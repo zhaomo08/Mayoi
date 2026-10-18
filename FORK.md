@@ -12,6 +12,7 @@
 | 改动 | 原因 |
 |---|---|
 | `mygo.json` 删除 `updates` | 关闭自动更新，否则会被上游 Release 覆盖掉定制 |
+
 定制尽量写成新文件（`cmd/mayoi/x_*.go`、`internal/<新包>`），上游文件只留挂载点，降低 cherry-pick 冲突。
 自己的改动不写进 `CHANGELOG.md`（上游文件，必冲突），记在上表。
 
