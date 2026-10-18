@@ -8,6 +8,8 @@ needs a `## <version>` section here, or its build fails.
 - On Windows, the Undo, Discard and Reset dialogs and the repository
   headers name a submodule with `/`, as `packages/module`, like the other
   systems.
+- A project's square dragged along the rail goes where it is dropped
+  again, before the square under the pointer, not always at the end.
 
 ## 0.11.0
 
