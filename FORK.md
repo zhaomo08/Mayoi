@@ -5,15 +5,13 @@
 ## 分支
 
 - `main`：上游镜像，只做 `git merge --ff-only upstream/main`，不提交自己的改动
-- `develop`：定制开发；跟进上游用 `git cherry-pick -x <sha>`
+- `develop`：定制开发；跟进上游用 `git merge upstream/main`（只挑部分提交时用 `cherry-pick -x`）
 
 ## 和上游的差异
 
 | 改动 | 原因 |
 |---|---|
 | `mygo.json` 删除 `updates` | 关闭自动更新，否则会被上游 Release 覆盖掉定制 |
-| 修复 diff 向右拆分闪退（#20/#39） | 已提上游 [PR #45](https://github.com/sorrycc/Mayoi/pull/45)，合并后跟进上游时跳过此提交 |
-
 定制尽量写成新文件（`cmd/mayoi/x_*.go`、`internal/<新包>`），上游文件只留挂载点，降低 cherry-pick 冲突。
 自己的改动不写进 `CHANGELOG.md`（上游文件，必冲突），记在上表。
 
@@ -35,9 +33,13 @@ ditto build/darwin-arm64/Mayoi.app /Applications/Mayoi.app
 git fetch upstream
 git log --oneline develop..upstream/main      # 看新提交
 git checkout main && git merge --ff-only upstream/main && git push
-git checkout develop && git cherry-pick -x <sha>
+git checkout develop && git merge upstream/main   # 冲突时我们已合入上游的改动取 --theirs
 ```
 
 ## 待办
 
 - LSP（gopls 先行验证，再 jdtls）——暂缓，先用起来再说
+
+## 已合入上游的贡献
+
+- [PR #45](https://github.com/sorrycc/Mayoi/pull/45)：修复 diff 向右拆分闪退（#20/#39），v0.11.0 起包含
