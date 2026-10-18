@@ -39,6 +39,7 @@ func railFixture(t testing.TB, dirs ...string) (*frame, []*desktop, *ui.Tester) 
 		// none.
 		h := &desktop{m: m}
 		h.a = newApp(&fakeHost{}, s, w)
+		t.Cleanup(h.a.shutdown)
 		f.add(h)
 		hs = append(hs, h)
 	}
@@ -179,6 +180,7 @@ func TestFolderKeepsItsLayout(t *testing.T) {
 	s.Forget(w)
 	x := s.NewWindow()
 	a := newApp(&fakeHost{folder: root}, s, x)
+	t.Cleanup(a.shutdown)
 	a.openSession(root)
 	if x.SidebarView != "git" || x.SidebarWidth != 320 {
 		t.Fatalf("layout %+v", x.Layout)
@@ -192,6 +194,7 @@ func TestUnshownProjectKeepsItsSession(t *testing.T) {
 	w := s.NewWindow()
 	w.Columns = []settings.Column{{Tabs: []settings.Tab{{File: "/tmp/a.go"}}, Weight: 1}}
 	a := newApp(&fakeHost{}, s, w)
+	t.Cleanup(a.shutdown)
 	a.keepSession()
 	a.park()
 	if len(w.Columns) != 1 || len(w.Columns[0].Tabs) != 1 {
@@ -207,6 +210,7 @@ func TestProjectTabsOpenFoldersInTabs(t *testing.T) {
 	s.ProjectTabs = true
 	h := &fakeHost{}
 	a := newApp(h, s, s.NewWindow())
+	t.Cleanup(a.shutdown)
 	a.switchFolder(root)
 	if a.root != root || len(h.windows) != 0 {
 		t.Fatalf("no folder: folder %q, windows %v", a.root, h.windows)

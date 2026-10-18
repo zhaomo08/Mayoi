@@ -117,6 +117,34 @@ type app struct {
 	// vimReg is what vim mode put on the clipboard last, which tells
 	// whether a paste of the same text pastes lines.
 	vimReg vimRegister
+	// vimLine is vim mode's command line, vimSearch the pattern searched
+	// last, vimHist the searches and the commands typed, and vimMsg what
+	// a command said.
+	vimLine   vimLine
+	vimSearch vimSearch
+	vimHist   [2][]string
+	vimMsg    vimMessage
+	vimCount  vimCounted
+	// vimRegs are vim mode's registers but the unnamed one, which is the
+	// clipboard. vimRec is the register recorded into, 0 while none is,
+	// and vimRecKeys the keys typed since; vimPlayed is the register played
+	// last, which @@ plays again. vimPlaying is set while keys play, as
+	// many deep as registers play registers, and vimBudget is how many more
+	// they may type. vimFailed is set as a command fails, which ends the
+	// keys playing.
+	vimRegs    map[rune]vimRegister
+	vimRec     rune
+	vimRecKeys []rune
+	vimPlayed  rune
+	vimPlaying int
+	vimBudget  int
+	vimFailed  bool
+	// vimLastEx is the command run last after :, which @: runs again, and
+	// vimLastSub what followed :s, which & does again. vimGlobalOn is set
+	// while :g runs its command.
+	vimLastEx   string
+	vimLastSub  string
+	vimGlobalOn bool
 
 	// queue holds the functions other goroutines post for the main thread,
 	// which the next frame runs.
@@ -142,6 +170,8 @@ type app struct {
 	// which is done again at most every remoteIndexEvery.
 	indexed time.Time
 	files   ui.OutlineState[string]
+	// crumbs is the box a folder of the breadcrumbs opens.
+	crumbs  crumbsPicker
 	fileRow int
 	// filesView is the explorer's list, which focusFiles has take the
 	// keyboard as it next shows.
@@ -151,6 +181,7 @@ type app struct {
 	// file it should choose once its row shows.
 	treeSynced, selectInTree string
 	git                      gitState
+	repositories             repositoryState
 	commitTools              commitTools
 	scm                      scmState
 
@@ -407,6 +438,7 @@ func (a *app) openFolder(dir string) {
 	a.files.List.Selected = &a.fileRow
 	a.index, a.indexStale = nil, true
 	a.ignored, a.ignoredStale = nil, true
+	a.resetRepositories()
 	a.git = gitState{}
 	a.resetSearch()
 	a.window.Folder = dir
@@ -455,6 +487,7 @@ func (a *app) closeFolder() {
 			a.tree.Close()
 		}
 		a.detachRemote()
+		a.resetRepositories()
 		a.root, a.tree, a.index, a.git = "", nil, nil, gitState{}
 		a.resetSearch()
 		a.closed = nil
@@ -482,7 +515,7 @@ func (a *app) saveDoc(d *document, then func()) {
 	}
 	saved := func() {
 		d.diskGone, d.autoSave.failed = false, false
-		a.git.stale = true
+		a.repositoryForPath(d.path).git.stale = true
 		a.rememberTabs()
 		if then != nil {
 			then()
@@ -535,6 +568,11 @@ func (a *app) saveAll() {
 // diskChanged follows files changed on disk: an open document without
 // changes of its own shows the file's new text.
 func (a *app) diskChanged(changed, removed []string) {
+	for _, path := range append(slices.Clone(changed), removed...) {
+		if filepath.Base(path) == ".gitmodules" {
+			a.repositories.dirty = true
+		}
+	}
 	a.indexStale, a.ignoredStale = true, true
 	a.diffsOnDisk(append(changed, removed...))
 	a.searchAgain(append(changed, removed...))

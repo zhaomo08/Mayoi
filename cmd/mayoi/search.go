@@ -806,16 +806,13 @@ func (a *app) searchView(c *ui.Context) {
 	}
 	ui.Column(c).Padding(0, 12, 6, 6).Gap(5).Children(func() {
 		ui.Row(c).Gap(2).AlignItems(ui.Stretch).Children(func() {
-			arrow := iconChevronRight
-			if s.replacing {
-				arrow = iconChevronDown
-			}
 			b := ui.ButtonBase(c.Key("toggle-replace")).Width(18).Radius(4).Justify(ui.Center).AlignItems(ui.Center).
 				Label(locales.SearchToggleReplace()).Tooltip(a.withKey(locales.SearchToggleReplace(), "edit.replaceInFiles"))
 			if b.Hovered() {
 				b.Background(p.hover)
 			}
-			b.Children(func() { ui.Icon(c, arrow).FontSize(13).TextColor(p.muted) })
+			b.Transition(hoverFade)
+			b.Children(func() { chevron(c, s.replacing).FontSize(13).TextColor(p.muted) })
 			if b.Clicked() {
 				s.replacing = !s.replacing
 			}
@@ -875,7 +872,7 @@ func (a *app) searchField(c *ui.Context, key string, value *string, placeholder 
 	p := a.pal
 	var in ui.Element
 	field := ui.Row(c).Height(26).Padding(0, 4, 0, 8).Gap(2).AlignItems(ui.Center).Radius(5).
-		Background(p.editor).Border(1, p.border)
+		Background(p.editor).Border(1, p.border).Transition(fieldFocus)
 	field.Children(func() {
 		in = a.textKeys(ui.TextInputBase(c.Key(key), value)).Grow(1).MinWidth(0).FontSize(12.5).Placeholder(placeholder).Label(placeholder)
 		if bind != nil {
@@ -899,7 +896,7 @@ func (a *app) searchSummary(c *ui.Context) {
 	var msg string
 	switch {
 	case s.err != "":
-		msg, col = s.err, p.danger
+		msg, col = s.err, p.dangerFg
 	case s.query == "":
 	case s.count > 0:
 		msg = locales.SearchResultsIn(s.count, len(s.files))
@@ -1039,11 +1036,7 @@ func (a *app) searchHeader(c *ui.Context, f *searchFile, action *func()) {
 	clicked := row.Clicked()
 	a.dragFile(row, &fileDrag{path: f.path})
 	row.Children(func() {
-		icon := iconChevronDown
-		if s.collapsed[f.rel] {
-			icon = iconChevronRight
-		}
-		ui.Icon(c, icon).FontSize(12).TextColor(p.muted)
+		chevron(c, !s.collapsed[f.rel]).FontSize(12).TextColor(p.muted)
 		name := filepath.Base(f.path)
 		fi, col := fileIcon(p, name)
 		ui.Icon(c, fi).FontSize(14).TextColor(col)

@@ -556,9 +556,9 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 		case remote.Connected:
 			conn, connCol = locales.RemoteConnectedTo(host), p.muted
 		case remote.Connecting:
-			conn, connCol = locales.RemoteConnectingTip(host), p.modified
+			conn, connCol = locales.RemoteConnectingTip(host), p.modifiedFg
 		default:
-			conn, connCol = locales.RemoteDisconnectedTip(host), p.danger
+			conn, connCol = locales.RemoteDisconnectedTip(host), p.dangerFg
 		}
 	}
 	var keys []string

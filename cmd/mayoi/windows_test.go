@@ -2,6 +2,7 @@ package main
 
 import (
 	"mayoi/internal/settings"
+	"mayoi/locales"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -28,6 +29,7 @@ func TestBlankWindow(t *testing.T) {
 	s := settings.Default()
 	w := s.NewWindow()
 	a := newApp(&fakeHost{}, s, w)
+	t.Cleanup(a.shutdown)
 	if !a.blank() {
 		t.Error("an empty window is not blank")
 	}
@@ -35,8 +37,9 @@ func TestBlankWindow(t *testing.T) {
 	if a.blank() {
 		t.Error("a window with tabs to restore is blank")
 	}
+	// The folder as the system spells it, with backslashes on Windows.
 	w.Columns, w.Folder = nil, "/tmp/x/"
-	if a.blank() || a.folder() != "/tmp/x" {
+	if a.blank() || a.folder() != filepath.FromSlash("/tmp/x") {
 		t.Errorf("a window of a folder: blank %v, folder %q", a.blank(), a.folder())
 	}
 }
@@ -49,6 +52,7 @@ func TestRecentFolderOpensInWhichWindow(t *testing.T) {
 	s.Recent = []string{root, other}
 	h := &fakeHost{others: []string{other}}
 	a := newApp(h, s, s.NewWindow())
+	t.Cleanup(a.shutdown)
 	tt := ui.NewTester(a.view, 1200, 760)
 	step(tt)
 	if err := tt.ClickWith(ui.Cmd, "Open "+root); err != nil {
@@ -76,6 +80,7 @@ func TestRecentFolderCmdEnter(t *testing.T) {
 	s.Recent = []string{root}
 	h := &fakeHost{}
 	a := newApp(h, s, s.NewWindow())
+	t.Cleanup(a.shutdown)
 	tt := ui.NewTester(a.view, 1200, 760)
 	step(tt)
 	label := "Open " + root
@@ -97,6 +102,29 @@ func TestRecentFolderCmdEnter(t *testing.T) {
 	}
 }
 
+// The welcome page lists six recent folders, and More… opens the picker
+// of them all.
+func TestWelcomeMoreRecent(t *testing.T) {
+	s := settings.Default()
+	for range 8 {
+		s.Recent = append(s.Recent, t.TempDir())
+	}
+	a := newApp(&fakeHost{}, s, s.NewWindow())
+	t.Cleanup(a.shutdown)
+	tt := ui.NewTester(a.view, 1200, 760)
+	step(tt)
+	if _, ok := tt.Find("Open " + s.Recent[6]); ok {
+		t.Fatal("the welcome page lists a seventh recent folder")
+	}
+	if err := tt.Click(locales.MenuOpenRecentMore()); err != nil {
+		t.Fatal(err)
+	}
+	step(tt)
+	if !a.recents.open {
+		t.Fatal("More… does not open the recent folders")
+	}
+}
+
 // ⌃R shows the recent folders but the window's: ⏎ opens the one typed in
 // the window, ⌘⏎ in a window of its own.
 func TestOpenRecentPicker(t *testing.T) {
@@ -105,6 +133,7 @@ func TestOpenRecentPicker(t *testing.T) {
 	s.Recent = []string{third, other}
 	h := &fakeHost{}
 	a := newApp(h, s, s.NewWindow())
+	t.Cleanup(a.shutdown)
 	a.openFolder(root)
 	if h.recentChanges != 1 || s.Recent[0] != root {
 		t.Fatalf("opening a folder: %d changes, recent %v", h.recentChanges, s.Recent)
@@ -144,6 +173,7 @@ func TestOpenRecentMenu(t *testing.T) {
 	s.Recent = []string{other, filepath.Join(t.TempDir(), "gone")}
 	h := &fakeHost{}
 	a := newApp(h, s, s.NewWindow())
+	t.Cleanup(a.shutdown)
 	a.openFolder(root)
 	var ran []string
 	m := a.menu(false, func(id string, _ *mygo.Window) { ran = append(ran, id) })
