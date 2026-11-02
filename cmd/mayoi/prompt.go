@@ -17,6 +17,8 @@ type prompt struct {
 	err         string
 	done        func(value string) string
 	selected    bool
+	// optional lets the value be empty.
+	optional bool
 }
 
 func (a *app) promptView(c *ui.Context) {
@@ -33,7 +35,7 @@ func (a *app) promptView(c *ui.Context) {
 		a.prompt = nil
 	}
 	ui.Overlay(c, func() {
-		back := a.dialogBack(c, "prompt:"+pr.title)
+		back := a.dialogBack(c)
 		back.Children(func() {
 			box := a.floating(c, ui.Column(c).Width(420).MaxWidthPercent(92).Margin(titleBarH+8, 0, 0, 0).Padding(14, 16).Gap(10).Radius(10), true).
 				Role(ui.RoleDialog).Label(pr.title)
@@ -66,7 +68,7 @@ func (a *app) promptView(c *ui.Context) {
 					if ui.Button(c, locales.ButtonCancel()).Clicked() {
 						a.prompt = nil
 					}
-					if ui.PrimaryButton(c, strings.TrimSuffix(pr.title, "…")).Disabled(strings.TrimSpace(pr.value) == "").Clicked() {
+					if ui.PrimaryButton(c, strings.TrimSuffix(pr.title, "…")).Disabled(!pr.optional && strings.TrimSpace(pr.value) == "").Clicked() {
 						submit()
 					}
 				})
@@ -120,7 +122,7 @@ func (a *app) confirmView(c *ui.Context) {
 		width = 560
 	}
 	ui.Overlay(c, func() {
-		back := a.dialogBack(c, "confirm:"+cf.title)
+		back := a.dialogBack(c)
 		back.Children(func() {
 			box := a.floating(c, ui.Column(c).Width(width).MaxWidthPercent(92).Margin(titleBarH+8, 0, 0, 0).Padding(14, 16).Gap(10).Radius(10), true).
 				Role(ui.RoleDialog).Label(cf.title)

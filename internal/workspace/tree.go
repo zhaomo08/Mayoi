@@ -18,6 +18,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"mayoi/internal/bg"
 	"mayoi/internal/remote"
 	"mayoi/internal/vfs"
 )
@@ -86,7 +87,7 @@ type Tree struct {
 	pending map[string]bool // directories to read again
 	files   map[string]bool // files written
 	gone    map[string]bool // paths removed
-	timer   *time.Timer
+	timer   *bg.Timer
 	closed  bool
 	// idle is set while the tree's window is not in front.
 	idle bool
@@ -139,6 +140,9 @@ func (t *Tree) Loaded(dir string) bool {
 	_, ok := t.children[dir]
 	return ok
 }
+
+// Loading reports whether a directory read is still in flight.
+func (t *Tree) Loading(dir string) bool { return t.loading[dir] }
 
 // Children returns a directory's entries, nil for a file and an empty
 // slice for a directory not read yet: Load reads it.
@@ -218,7 +222,7 @@ func (t *Tree) readAhead(dir string) {
 	if len(dirs) == 0 {
 		return
 	}
-	go func() {
+	bg.Go(func() {
 		lists, _, err := vfs.ReadDirs(dirs)
 		if err != nil {
 			return
@@ -234,12 +238,12 @@ func (t *Tree) readAhead(dir string) {
 				}
 			}
 		})
-	}()
+	})
 }
 
 func (t *Tree) reload(dir string) {
 	t.loading[dir] = true
-	go func() {
+	bg.Go(func() {
 		entries, err := vfs.ReadDir(dir)
 		t.post(func() {
 			delete(t.loading, dir)
@@ -256,7 +260,7 @@ func (t *Tree) reload(dir string) {
 				t.readAhead(dir)
 			}
 		})
-	}()
+	})
 }
 
 // set records a directory's entries.
@@ -379,7 +383,7 @@ func (t *Tree) event(name string, created, removed, written bool) {
 		delete(t.gone, name)
 	}
 	if t.timer == nil && !t.closed {
-		t.timer = time.AfterFunc(120*time.Millisecond, t.flush)
+		t.timer = bg.AfterFunc(120*time.Millisecond, t.flush)
 	}
 }
 
@@ -565,7 +569,7 @@ func (t *Tree) poll(full bool) {
 		return
 	}
 	t.polling = true
-	go func() {
+	bg.Go(func() {
 		lists, errs, infos, err := vfs.Look(dirs, files)
 		t.post(func() {
 			t.polling = false
@@ -582,7 +586,7 @@ func (t *Tree) poll(full bool) {
 				t.poll(true)
 			}
 		})
-	}()
+	})
 }
 
 // took takes what a poll read: the directories that changed, and the
@@ -663,7 +667,7 @@ func (t *Tree) lookAgain(dirs []string) {
 	for _, d := range dirs {
 		t.loading[d] = true
 	}
-	go func() {
+	bg.Go(func() {
 		lists, errs, _, err := vfs.Look(dirs, nil)
 		t.post(func() {
 			for _, d := range dirs {
@@ -673,7 +677,7 @@ func (t *Tree) lookAgain(dirs []string) {
 				t.took(lists, errs, nil, nil)
 			}
 		})
-	}()
+	})
 }
 
 // notifyExcluded matches the paths inotifywait leaves out: those in the

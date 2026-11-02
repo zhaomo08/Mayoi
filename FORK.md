@@ -7,13 +7,16 @@
 - `main`：上游镜像，只做 `git merge --ff-only upstream/main`，不提交自己的改动
 - `develop`：定制开发；跟进上游用 `git merge upstream/main`（只挑部分提交时用 `cherry-pick -x`）
 
+## 提交去向
+
+日常改动只提交并推送到本仓库（`origin`）。只有明确要给作者修 issue 时，才向 `sorrycc/Mayoi` 提 PR。
+
 ## 和上游的差异
 
 | 改动 | 原因 |
 |---|---|
 | `mygo.json` 删除 `updates` | 关闭自动更新，否则会被上游 Release 覆盖掉定制 |
 | 图标换成简单的编辑器窗口（`cmd/mayoi/icon-art.png`，再 `go run ./tools/icongen` 生成 `resources/icon.png`） | 自用偏好 |
-| Source Control 列出子目录里的独立仓库（#17） | 已提上游 [PR #49](https://github.com/sorrycc/Mayoi/pull/49)，合并后跟进时冲突取 `--theirs` |
 
 定制尽量写成新文件（`cmd/mayoi/x_*.go`、`internal/<新包>`），上游文件只留挂载点，降低 cherry-pick 冲突。
 自己的改动不写进 `CHANGELOG.md`（上游文件，必冲突），记在上表。
@@ -46,3 +49,4 @@ git checkout develop && git merge upstream/main   # 冲突时我们已合入上�
 ## 已合入上游的贡献
 
 - [PR #45](https://github.com/sorrycc/Mayoi/pull/45)：修复 diff 向右拆分闪退（#20/#39），v0.11.0 起包含
+- [PR #49](https://github.com/sorrycc/Mayoi/pull/49)：Source Control 列出子目录里的独立仓库（#17），已随 v0.16.2 合并跟进

@@ -124,7 +124,8 @@ func (a *app) syncPanel(c *ui.Context, anchor, panel ui.Element, si syncInfo) {
 		a.countdownTick()
 	}
 	panel.AttachTo(anchor, ui.AnchorTopRight, ui.AnchorBottomRight).Margin(0, 0, 6, 0)
-	a.floating(c, panel.Width(304).Radius(10).Gap(0), false).Role(ui.RoleDialog).Label(locales.SyncPanelLabel(si.name))
+	// It rises from the status bar, which it opens above.
+	dropIn(a.floating(c, panel.Width(304).Radius(10).Gap(0), false), -4).Role(ui.RoleDialog).Label(locales.SyncPanelLabel(si.name))
 	divider := func() { ui.Row(c).Height(1).Background(p.border) }
 	close := func(fn func()) {
 		a.syncOpen = false
@@ -216,7 +217,7 @@ func (a *app) syncPanel(c *ui.Context, anchor, panel ui.Element, si syncInfo) {
 				ui.Text(c, locales.SyncKeepHint()).FontSize(11).TextColor(col)
 			})
 			if hint.Clicked() {
-				close(a.openSettings)
+				close(func() { a.host.showSettings(settings.CatGeneral, "syncIgnored") })
 			}
 		})
 		divider()
@@ -362,7 +363,7 @@ func (a *app) signinView(c *ui.Context) {
 		a.countdownTick()
 	}
 	ui.Overlay(c, func() {
-		back := a.dialogBack(c, "signin")
+		back := a.dialogBack(c)
 		back.Children(func() {
 			box := a.floating(c, ui.Column(c).Width(440).MaxWidthPercent(92).Margin(titleBarH+8, 0, 0, 0).Padding(20, 20, 16, 20).Gap(16).Radius(12), true).
 				Role(ui.RoleDialog).Label(locales.SyncSignInTitle())

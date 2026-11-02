@@ -9,10 +9,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 
+	"mayoi/internal/bg"
+	"mayoi/internal/git"
 	"mayoi/internal/highlight"
 	"mayoi/internal/keymap"
 	"mayoi/internal/mon"
@@ -40,8 +43,13 @@ type host interface {
 	// and clipboardFiles are the local files the clipboard has.
 	copyFiles(paths []string) error
 	clipboardFiles() []string
-	// clipboardImage is the image the clipboard has, as PNG, or nil.
+	// clipboardImage is the image the clipboard has, as PNG, or nil, and
+	// copyImage puts a PNG on it.
 	clipboardImage() []byte
+	copyImage(png []byte) error
+	// exportAs asks where to save a file of the type of ext, at path
+	// first.
+	exportAs(path, ext string, done func(path string))
 	// choosePaths asks in the native dialog for files, or for a folder
 	// when folders is set, starting in dir.
 	choosePaths(title, button, dir string, folders bool, done func(paths []string))
@@ -68,9 +76,12 @@ type host interface {
 	// they change.
 	recentChanged()
 	menuChanged()
-	// fontChanged draws every window anew, in the font the settings
-	// have now.
-	fontChanged()
+	// showSettings opens the settings window, or brings it to the front,
+	// at section, a category of the preferences or "shortcuts", and at
+	// the preference of key when it is not "", for the window's folder.
+	showSettings(section, key string)
+	// redrawWindows draws every window with the current font and zoom.
+	redrawWindows()
 	// installCLI and uninstallCLI put the mayoi command on the shell's
 	// path, and take it away, saying how it went.
 	installCLI()
@@ -93,6 +104,10 @@ type host interface {
 	// account was signed out elsewhere.
 	ai() *mon.Client
 	aiSignedOut()
+	// update is the new version of Mayoi a check found, "" when there is
+	// none, and installUpdate opens the update window to install it.
+	update() string
+	installUpdate()
 	// With project tabs, stepProject shows the project by steps along the
 	// rail, showProject the one at i, the last for -1, and closeProject
 	// closes the window's, as the window closes when it is its only one.
@@ -102,18 +117,35 @@ type host interface {
 	showProject(i int)
 	closeProject()
 	projectTabsChanged()
+	// nativeDrags reports whether a drag can leave the app as a system
+	// drag other apps read. The headless test host has no system
+	// pasteboard, and says no, which keeps drags in-process value drags
+	// there.
+	nativeDrags() bool
+	// shown reports whether the project is the one its window shows, and
+	// the window is on screen, not minimized nor hidden.
+	shown() bool
 }
 
 // app is the state of a window of Mayoi.
 type app struct {
 	host     host
 	settings *settings.Settings
+	// folderPrefs is what the folder chooses of the preferences, nil
+	// without a folder.
+	folderPrefs *folderPrefs
 	// window is what the settings keep of this window.
 	window *settings.Window
 
-	pal      *palette
+	pal *palette
+	// fade is the window's way from one palette to another, as the
+	// theme or the appearance changes.
+	fade     paletteFade
 	font     codeFont
 	services ui.Services
+	// diffScratch is what painting the lines of a diff fills, kept from
+	// line to line.
+	diffScratch diffLineScratch
 	// vimReg is what vim mode put on the clipboard last, which tells
 	// whether a paste of the same text pastes lines.
 	vimReg vimRegister
@@ -168,8 +200,9 @@ type app struct {
 	retryAt time.Time
 	// indexed is when the files of a remote folder were last listed,
 	// which is done again at most every remoteIndexEvery.
-	indexed time.Time
-	files   ui.OutlineState[string]
+	indexed  time.Time
+	files    ui.OutlineState[string]
+	explorer explorerTree
 	// crumbs is the box a folder of the breadcrumbs opens.
 	crumbs  crumbsPicker
 	fileRow int
@@ -181,9 +214,13 @@ type app struct {
 	// file it should choose once its row shows.
 	treeSynced, selectInTree string
 	git                      gitState
+	gitClock                 func() time.Time // nil uses real time; tests use the frame clock
 	repositories             repositoryState
 	commitTools              commitTools
 	scm                      scmState
+
+	// treeOpening follows the folders of the tree as they open.
+	treeOpening treeOpening
 
 	// ignored is what Git ignores in the workspace, which the tree shows
 	// faint.
@@ -196,6 +233,10 @@ type app struct {
 	indexStale bool
 	// opening is set while a file opens as a preview tab.
 	opening bool
+	// openingText is set while a file opens for its text — a search
+	// match, a line to go to, an edit to make — so openFileIn does not
+	// preview it as markdownPreview says.
+	openingText bool
 
 	// docs are the documents open, each in a tab or several; cols the
 	// columns of the editor area, and col the one that has the keyboard,
@@ -203,6 +244,15 @@ type app struct {
 	docs []*document
 	cols []*column
 	col  int
+	// findCol is the column the find widget shows in, the one with the
+	// keyboard as the frame's columns began: a click on another's tab as
+	// they draw moves col, and the widget's input binds one control.
+	findCol *column
+	// keptTabs is keepEditors' list of the tabs it keeps, reused.
+	keptTabs []*colTab
+	// findPreview is the Markdown preview find last looked in, which
+	// shows its matches while find is open.
+	findPreview *markdownPreview
 	// review is the comments on lines of the changes, to send to an agent.
 	review review
 	// fileCol caches the last unlocked column used for files. Removal clears
@@ -224,6 +274,11 @@ type app struct {
 	terms     []*session
 	panelTerm *session
 	nextTerm  int
+	// panelScroll measures whether the terminal chips need a scroll bar;
+	// panelLayout requests a follow-up frame when their available room or
+	// titles change, so the header can use the freshly measured overflow.
+	panelScroll ui.ScrollState
+	panelLayout panelHeaderLayout
 	// termTheme is the theme of the settings the terminals have the colors
 	// of.
 	termTheme string
@@ -231,6 +286,11 @@ type app struct {
 	termFont terminal.Font
 	// termCopy is whether the terminals copy what is selected.
 	termCopy bool
+	// hcListed is what hc ls printed last, and when (hcList).
+	hcListed struct {
+		out []byte
+		at  time.Time
+	}
 	// transfers are the copies to and from hosts running.
 	transfers []*transfer
 
@@ -238,6 +298,8 @@ type app struct {
 	welcomeView ui.Handle
 	rain        rainState   // The Matrix's, behind the welcome page
 	mascot      mascotState // the theme's character, Claude's or Qoder's
+	toldAt      time.Time   // when a toast last told what a command did
+	spin        spinState   // Claude's spinner, while Git works
 	// blurred is set while the window has not the keyboard.
 	blurred  bool
 	colsView ui.Handle // the columns, whose width their weights share
@@ -245,31 +307,41 @@ type app struct {
 	// frame may build the view several times.
 	frame   int
 	frameAt time.Time
+	// builds counts the builds of the view.
+	builds int
 	// dragging is set while a tab is dragged, as the frame before found.
 	dragging, dragNow bool
 	// middle is the tab a middle press is on, until it is let go of: the
 	// press closes it rather than shows it.
 	middle *colTab
 
+	// viewedW is how wide the mark of a pull request's file viewed is in
+	// its header, with the gap before the counts, as measured last.
+	viewedW float32
+
 	quick      quickOpen
 	palette    []paletteEntry    // the commands of the command palette, made as it first opens
+	waits      []docWait         // the mayoi --wait commands waiting for documents to close
 	hints      map[string]string // the keys of the commands, as tooltips show them
 	branches   branchPicker      // the box that switches branches
+	stashes    stashPicker       // the box of the stashes
+	prs        prPicker          // the box of the pull requests
+	checks     checksPicker      // the box of the checks of the pull request
+	worktrees  worktreePicker    // the box that switches worktrees
 	recents    recentPicker      // the box of the recent folders
+	themes     themePicker       // the box of the color themes
 	remotePick remotePicker      // the box that connects to a host
+	conflicts  conflictsList     // the box of the files in conflict
 	find       findState
 	inFiles    searchState // search in the files, of the sidebar
 	prompt     *prompt
 	confirm    *confirm
 	signin     *signin
+	diagram    *diagramOverlay // a preview's diagram shown over the window
 	// syncOpen shows the account's panel above its part of the status
 	// bar, and tickAt is when a countdown shown repaints next.
 	syncOpen bool
 	tickAt   time.Time
-	// dialog is the dialog shown, which came in as it showed, and
-	// dialogBuilt says a build of the view built one.
-	dialog      string
-	dialogBuilt bool
 
 	errors []string // to show as toasts
 	// fails counts the errors shown, which stop the commands of
@@ -353,6 +425,7 @@ func (a *app) park() {
 		for _, t := range col.tabs {
 			if t.ed != nil {
 				a.hideEditor(t.ed)
+				t.ed.areaCol = nil
 			}
 		}
 	}
@@ -404,6 +477,9 @@ func (a *app) tell(n note) { a.notes = append(a.notes, n) }
 // had open.
 func (a *app) start() {
 	w := a.window
+	// Restoring the tabs remembers them, and the panel's terminals with
+	// them, which are not restored yet: keep those to attach to.
+	terms, shown := slices.Clone(w.PanelTerms), w.PanelTerm
 	if w.Folder != "" {
 		// A remote folder opens at once, as its host connects.
 		if remote.Is(w.Folder) {
@@ -413,7 +489,7 @@ func (a *app) start() {
 		}
 	}
 	a.restoreTabs()
-	if w.TerminalOpen && w.PanelOpen && a.root != "" {
+	if !a.restorePanel(terms, shown) && w.TerminalOpen && w.PanelOpen && a.root != "" {
 		a.newTerminal()
 	}
 }
@@ -429,11 +505,13 @@ func (a *app) openFolder(dir string) {
 	}
 	a.root = dir
 	a.attachRemote(dir)
+	a.loadFolderPrefs(dir)
 	a.tree = workspace.NewTree(dir, a.post)
 	a.tree.OnChange = a.diskChanged
-	a.tree.IsOpen = a.files.Open.Has
+	a.tree.IsOpen = a.explorerDirVisible
 	a.tree.Load(dir)
 	a.files = ui.OutlineState[string]{Indent: treeStep}
+	a.explorer = explorerTree{}
 	a.fileRow = -1
 	a.files.List.Selected = &a.fileRow
 	a.index, a.indexStale = nil, true
@@ -487,6 +565,7 @@ func (a *app) closeFolder() {
 			a.tree.Close()
 		}
 		a.detachRemote()
+		a.dropFolderPrefs()
 		a.resetRepositories()
 		a.root, a.tree, a.index, a.git = "", nil, nil, gitState{}
 		a.resetSearch()
@@ -503,6 +582,7 @@ func (a *app) saveDoc(d *document, then func()) {
 			if path == "" {
 				return
 			}
+			a.dropKept(d)
 			d.path = path
 			d.hl.Close()
 			d.hl = highlight.New(highlight.Lexer(path), a.invalidate)
@@ -535,6 +615,10 @@ func (a *app) saveDoc(d *document, then func()) {
 }
 
 func (a *app) saveActive() {
+	if t := a.activeTab(); t != nil && t.merge != nil {
+		a.saveMerge(t.merge)
+		return
+	}
 	if d := a.activeEditor(); d != nil {
 		a.saveDoc(d.document, nil)
 	}
@@ -546,15 +630,18 @@ func (a *app) saveActiveAs() {
 		return
 	}
 	d := ed.document
-	a.askSavePath(d.name(), func(path string) {
-		if path == "" {
-			return
-		}
-		d.path = path
-		d.hl.Close()
-		d.hl = highlight.New(highlight.Lexer(path), a.invalidate)
-		a.saveDoc(d, nil)
-	})
+	a.askSavePath(d.name(), func(path string) { a.saveDocAs(d, path) })
+}
+
+// saveDocAs saves a document to path, which it is the file of from then.
+func (a *app) saveDocAs(d *document, path string) {
+	if path == "" {
+		return
+	}
+	d.path = path
+	d.hl.Close()
+	d.hl = highlight.New(highlight.Lexer(path), a.invalidate)
+	a.saveDoc(d, nil)
 }
 
 func (a *app) saveAll() {
@@ -569,8 +656,7 @@ func (a *app) saveAll() {
 // changes of its own shows the file's new text.
 func (a *app) diskChanged(changed, removed []string) {
 	for _, path := range append(slices.Clone(changed), removed...) {
-		// A .git made under a folder that is not a work tree adds one.
-		if base := filepath.Base(path); base == ".gitmodules" || base == ".git" && a.git.repo == nil {
+		if filepath.Base(path) == ".gitmodules" || a.git.repo == nil && a.mayHoldWorkTree(path) {
 			a.repositories.dirty = true
 		}
 	}
@@ -612,6 +698,21 @@ func (a *app) diskChanged(changed, removed []string) {
 	a.gitChanged()
 }
 
+// mayHoldWorkTree reports whether a path made or gone under a folder that
+// is not a work tree may add or drop one under it: a .git, or a folder
+// where one may be, cloned or removed, outside the work trees found.
+func (a *app) mayHoldWorkTree(path string) bool {
+	if filepath.Base(path) == ".git" {
+		return true
+	}
+	rel, err := filepath.Rel(a.root, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.Count(filepath.ToSlash(rel), "/") >= git.NestedDepth {
+		return false
+	}
+	ctx := a.repositoryForPath(path)
+	return ctx.git.repo == nil || ctx.git.repo.Root == path
+}
+
 // reloadDoc makes a document's text the file's on disk, as a step of
 // undo, as in other editors.
 func (a *app) reloadDoc(d *document) {
@@ -620,23 +721,71 @@ func (a *app) reloadDoc(d *document) {
 		return
 	}
 	data, err := os.ReadFile(d.path)
-	if err != nil || isBinary(data) {
+	if err != nil || isBinary(data) || hasLongLine(data) {
 		return
 	}
 	d.takeText(data)
 }
 
 // takeText makes a document's text data, read from its file, as a step of
-// undo, and clean.
+// undo, and clean. Only the part that changed is replaced, so that the
+// selections stay on their text, and the editors stay where they are
+// scrolled, the line at the top of each on its text too.
 func (d *document) takeText(data []byte) {
 	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-	if string(data) != d.buf.String() {
+	if old := d.buf.String(); string(data) != old {
 		if ed := d.main(); ed != nil {
-			ed.edit(ed.sel, textEdit{0, d.buf.Len(), string(data)})
+			e, from, to := reloadEdit(old, string(data))
+			n := utf8.RuneCountInString(e.text)
+			moved := func(x int) int {
+				switch {
+				case x <= e.start:
+					return x
+				case x >= e.end:
+					return x + n - (e.end - e.start)
+				}
+				return e.start + min(x-e.start, n) // in what changed
+			}
+			ed.edit([2]int{moved(ed.sel[0]), moved(ed.sel[1])}, e)
+			ed.quiet = true
+			delta := strings.Count(e.text, "\n") - (to - from)
+			for _, o := range d.views {
+				o.reloaded = &reloadShift{from: from, to: to, delta: delta}
+			}
 		}
 		d.measureWidest()
 	}
 	d.markSaved()
+}
+
+// reloadShift is where a reload changed the lines of a document: lines
+// from up to to of the text before, which became delta lines more.
+type reloadShift struct{ from, to, delta int }
+
+// reloadEdit returns the edit that makes old now: the runes between the
+// text the two start and end with, and the lines of old they are on.
+func reloadEdit(old, now string) (e textEdit, from, to int) {
+	boundary := func(s string, i int) bool { return i >= len(s) || utf8.RuneStart(s[i]) }
+	p := 0
+	for p < len(old) && p < len(now) && old[p] == now[p] {
+		p++
+	}
+	for p > 0 && !(boundary(old, p) && boundary(now, p)) {
+		p--
+	}
+	k := 0
+	for k < len(old)-p && k < len(now)-p && old[len(old)-1-k] == now[len(now)-1-k] {
+		k++
+	}
+	for k > 0 && !(boundary(old, len(old)-k) && boundary(now, len(now)-k)) {
+		k--
+	}
+	e.start = utf8.RuneCountInString(old[:p])
+	e.end = e.start + utf8.RuneCountInString(old[p:len(old)-k])
+	e.text = now[p : len(now)-k]
+	from = strings.Count(old[:p], "\n")
+	to = from + strings.Count(old[p:len(old)-k], "\n")
+	return e, from, to
 }
 
 // imageViewers returns the viewers of the image files open in tabs.
@@ -666,7 +815,8 @@ func (a *app) refreshIndex() {
 	a.indexed = time.Now()
 	a.indexing, a.indexStale = true, false
 	root := a.root
-	go func() {
+	bg.Go(func() {
+		defer recoverCrash()
 		files := workspace.Index(root)
 		a.post(func() {
 			a.indexing = false
@@ -675,7 +825,7 @@ func (a *app) refreshIndex() {
 				a.quick.stale = true
 			}
 		})
-	}()
+	})
 }
 
 // refreshIgnored asks Git again in the background what it ignores, when
@@ -689,7 +839,8 @@ func (a *app) refreshIgnored() {
 	}
 	a.ignoring, a.ignoredStale = true, false
 	root := a.root
-	go func() {
+	bg.Go(func() {
+		defer recoverCrash()
 		ignored := workspace.Ignored(root)
 		a.post(func() {
 			a.ignoring = false
@@ -697,7 +848,7 @@ func (a *app) refreshIgnored() {
 				a.ignored = ignored
 			}
 		})
-	}()
+	})
 }
 
 // isIgnored reports whether Git ignores path, or a folder above it.

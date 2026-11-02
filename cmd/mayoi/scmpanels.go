@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"mayoi/internal/bg"
 	"mayoi/internal/git"
 	"mayoi/locales"
 
@@ -118,7 +119,8 @@ func (a *gitContext) refreshScmPanels() {
 			openRemotes[strings.TrimPrefix(key, "panel:remote:")] = true
 		}
 	}
-	go func() {
+	bg.Go(func() {
+		defer recoverCrash()
 		branches, err := repo.PanelBranches()
 		var remotes []git.Remote
 		if err == nil && tab == scmRemotesTab {
@@ -155,7 +157,7 @@ func (a *gitContext) refreshScmPanels() {
 			}
 			p.gen++
 		})
-	}()
+	})
 }
 
 func panelRef(b git.Branch) string {
@@ -178,7 +180,8 @@ func (a *gitContext) panelLog(key, from, to string) *scmPanelLog {
 	l.loading, l.request = true, p.request
 	repo, token := p.repo, p.request
 	n := l.n
-	go func() {
+	bg.Go(func() {
+		defer recoverCrash()
 		var commits []git.Commit
 		var err error
 		if from == "" {
@@ -207,7 +210,7 @@ func (a *gitContext) panelLog(key, from, to string) *scmPanelLog {
 			}
 			p.gen++
 		})
-	}()
+	})
 	return l
 }
 
@@ -219,7 +222,7 @@ func (a *gitContext) scmPanelRows(rows []scmRow) []scmRow {
 	if a.git.repo == nil {
 		return rows
 	}
-	header := panelRow("tabs", "panel:tabs", strings.ToUpper(locales.PanelRepository()), "", 0)
+	header := panelRow("tabs", "panel:tabs", locales.PanelRepository(), "", 0)
 	header.header = true
 	rows = append(rows, header)
 	if !a.app.settings.ScmRepositoryOpen {
@@ -238,8 +241,7 @@ func (a *gitContext) scmPanelRows(rows []scmRow) []scmRow {
 		}
 		rows = append(rows, panelRow(kind, key+":status", label, p.err, depth))
 	}
-	var addLog func(key, from, to string, depth int)
-	addLog = func(key, from, to string, depth int) {
+	addLog := func(key, from, to string, depth int) {
 		l := a.panelLog(key, from, to)
 		switch {
 		case l.loading && !l.loaded:
@@ -311,7 +313,7 @@ func (a *gitContext) scmPanelRows(rows []scmRow) []scmRow {
 	}
 	// Branches default closed; opening a branch is the first read of its log.
 	section := scmPanelTabs[p.tab].key
-	r := panelRow("section", "panel:"+section, strings.ToUpper(panelTabLabel(section)), "", 0)
+	r := panelRow("section", "panel:"+section, panelTabLabel(section), "", 0)
 	r.header = true
 	if section == "branches" {
 		for _, b := range p.branches {
@@ -473,7 +475,8 @@ func (a *gitContext) scmPanelTabsView(c *ui.Context, r scmRow, action *func()) {
 	clicked := row.Clicked()
 	row.Children(func() {
 		chevron(c, a.app.settings.ScmRepositoryOpen).FontSize(12).TextColor(p.muted)
-		ui.Text(c, r.panel.label).FontSize(11).FontWeight(600).LetterSpacing(0.4).TextColor(p.muted).SingleLine().Shrink(1)
+		size, spacing := p.titleLook(11, 0.4)
+		ui.Text(c, p.title(r.panel.label)).FontSize(size).FontWeight(600).LetterSpacing(spacing).TextColor(p.muted).SingleLine().Shrink(1)
 		ui.Spacer(c)
 		for _, tab := range scmPanelTabs {
 			active := a.scm.panels.tab == tab.id
@@ -558,9 +561,14 @@ func (a *gitContext) scmPanelRowView(c *ui.Context, r scmRow, action *func()) {
 			// Which way the URL goes leads, so a long URL cannot cut it off.
 			ui.Text(c, q.detail).FontSize(11).TextColor(p.muted).SingleLine().Shrink(0)
 		}
-		text := ui.Text(c, q.label).FontSize(12.5).TextColor(col).SingleLine().Shrink(1)
+		label := q.label
 		if r.header {
-			text.FontSize(10).FontWeight(500).LetterSpacing(0.2).TextColor(p.muted)
+			label = p.title(label)
+		}
+		text := ui.Text(c, label).FontSize(12.5).TextColor(col).SingleLine().Shrink(1)
+		if r.header {
+			size, spacing := p.titleLook(10, 0.2)
+			text.FontSize(size).FontWeight(500).LetterSpacing(spacing).TextColor(p.muted)
 			ui.Text(c, fmt.Sprint(r.count)).FontSize(10).TextColor(p.faint)
 		}
 		if q.detail != "" && q.kind != "url" {
@@ -748,7 +756,7 @@ func (a *gitContext) editPanelRemote(name string, push bool) {
 	if repo == nil {
 		return
 	}
-	go func() {
+	bg.Go(func() {
 		remote, err := repo.RemoteURLs(name)
 		a.app.post(func() {
 			if a.git.repo != repo {
@@ -760,7 +768,7 @@ func (a *gitContext) editPanelRemote(name string, push bool) {
 			}
 			a.askPanelRemote(&remote, push)
 		})
-	}()
+	})
 }
 
 func (a *gitContext) askPanelRemote(remote *git.Remote, push bool) {
@@ -835,7 +843,6 @@ func (a *gitContext) bindPanelDialogs(repo *git.Repo) {
 	}
 }
 func (a *gitContext) askPanelNewBranch() {
-	defer a.bindPanelDialogs(a.git.repo)
 	a.askNewBranch()
 }
 func (a *gitContext) askPrunePanelRemote(name string, fetch bool) {

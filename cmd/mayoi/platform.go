@@ -45,6 +45,16 @@ func platformAccel(id, accel string) string {
 	return strings.ReplaceAll(accel, "CmdOrCtrl", "Ctrl")
 }
 
+// parseAccel reads an accelerator as Mayoi takes it on the system: with
+// Command for CmdOrCtrl on macOS, where MyGo's would follow the machine.
+func parseAccel(accel string) (keymap.Stroke, bool) {
+	if macKeys() {
+		accel = strings.ReplaceAll(accel, "CommandOrControl", "Cmd")
+		accel = strings.ReplaceAll(accel, "CmdOrCtrl", "Cmd")
+	}
+	return keymap.ParseAccel(accel)
+}
+
 // tabMod is the modifier that, with a digit, shows a tab of the column:
 // Command on macOS, Alt elsewhere, as in VS Code.
 func tabMod() ui.Modifiers {
@@ -126,12 +136,13 @@ func (a *app) menuKeys(c *ui.Context) {
 }
 
 // shellSkips are the commands whose shortcuts a terminal leaves to Mayoi
-// on Windows and Linux, as VS Code's commandsToSkipShell: the shell has
-// the other keys with Control, which edit its line.
+// on Windows and Linux, as VS Code's commandsToSkipShell, find among them:
+// the shell has the other keys with Control, which edit its line.
 var shellSkips = map[string]bool{
 	"go.quickOpen": true, "go.commands": true, "go.nextTab": true, "go.prevTab": true,
 	"view.terminal": true, "view.newTerminal": true, "view.sidebar": true,
 	"view.zoomIn": true, "view.zoomOut": true, "view.zoomReset": true,
+	"edit.find": true,
 }
 
 // shellSkip returns the command a terminal leaves stroke s to, on Windows
@@ -208,7 +219,7 @@ func revealActiveLabel(t locales.Messages) string {
 // vimCtrl reports whether vim's normal mode takes ⌃F, ⌃B and ⌃R: on
 // macOS, where shortcuts are Command's, and elsewhere with vimCtrlKeys,
 // rather than Find, Toggle Sidebar and Open Recent.
-func (a *app) vimCtrl() bool { return macKeys() || a.settings.VimCtrlKeys }
+func (a *app) vimCtrl() bool { return macKeys() || a.prefs().VimCtrlKeys }
 
 // vimTakesCtrl reports whether the editor with the keyboard takes vim's
 // keys with Control, as ⌃R.

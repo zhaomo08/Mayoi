@@ -39,6 +39,8 @@ PROMPT='%F{cyan}%1~%f %F{magenta}main%f %F{green}❯%f '
 RPROMPT=''
 export CLICOLOR=1 LSCOLORS=ExGxFxdaCxDaDahbadacec
 alias ls='ls -G'
+# Exiting, zsh would write its history here while the test removes it.
+unset HISTFILE
 `), 0o644)
 	t.Setenv("ZDOTDIR", z)
 	t.Setenv("SHELL", "/bin/zsh")
@@ -614,6 +616,7 @@ const featMD = "# A tour of Mayoi\n\n" +
 	"## Roadmap\n\n" +
 	"- [x] Remote SSH\n- [x] Markdown preview\n- [ ] Language servers\n\n" +
 	"> Light enough to start in an instant, and to stay out of your way.\n\n" +
+	"> [!TIP]\n> Press `⇧⌘V` to switch between the text and its preview.\n\n" +
 	"| Shortcut | Action |\n|---|---|\n| ⌘P | Quick open |\n| ⇧⌘F | Find in files |\n| ⌘\\\\ | Split right |\n\n" +
 	"```go\nfunc main() {\n\tfmt.Println(\"hello, mayoi\")\n}\n```\n"
 
@@ -687,9 +690,7 @@ func TestFeatWelcome(t *testing.T) {
 func featRemoteHome(t *testing.T) (home, project string) {
 	useFakeSSH(t)
 	featShell(t)
-	home = "/tmp/home/deploy"
-	os.RemoveAll("/tmp/home")
-	t.Cleanup(func() { os.RemoveAll("/tmp/home") })
+	home = filepath.Join(t.TempDir(), "deploy")
 	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
 	os.WriteFile(filepath.Join(home, ".ssh", "config"), []byte(`Host dev-box
   HostName 10.0.0.12
@@ -784,6 +785,10 @@ func TestFeatThemes(t *testing.T) {
 	}{
 		{themeMatrix, true, "matrix"}, {themeClaude, false, "claude-light"}, {themeClaude, true, "claude-dark"},
 		{themeQoder, false, "qoder-light"}, {themeQoder, true, "qoder-dark"},
+		{themeGrokBot, false, "grokbot-light"}, {themeGrokBot, true, "grokbot-dark"},
+		{themeCursor, false, "cursor-light"}, {themeCursor, true, "cursor-dark"},
+		{themePurpleGold, true, "purplegold"},
+		{themePumpkin, true, "pumpkin"}, {themeWitchsBrew, true, "witchsbrew"}, {themeBloodMoon, true, "bloodmoon"},
 	} {
 		hs := featHarness(t, tc.dark, featOpts{theme: tc.theme, expanded: []string{"cmd", "cmd/mayoi"}})
 		a := hs.a

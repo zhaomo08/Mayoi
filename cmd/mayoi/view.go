@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +44,10 @@ func (a *app) view(c *ui.Context) {
 	// project moves to another window.
 	a.setServices(c.Services())
 	a.review.ctx = c
+	// Restoring a preview uses font metrics to recover its scroll position.
+	if p := a.settings.Prefs; !a.font.is(p) {
+		a.font = newCodeFont(p)
+	}
 	if !a.started {
 		// Before what was posted meanwhile, as opening the file the app was
 		// started with: it opens in the columns of the last session.
@@ -57,19 +64,19 @@ func (a *app) view(c *ui.Context) {
 	// The places that take the keys say so as they are built.
 	a.keyFocus = placeNone
 	a.pal = a.applyTheme(c)
+	updateLinuxControlsTheme(a.fade.to)
 	a.themeTerminals()
 	a.fontTerminals()
 	a.copyTerminals()
 	p := a.pal
-	if p := a.settings.Prefs; !a.font.is(p) {
-		a.font = newCodeFont(p)
-	}
+	a.builds++
 	if now := c.Now(); now != a.frameAt {
 		a.frameAt = now
 		a.frame++
 		a.dragging, a.dragNow = a.dragNow, false
 	}
 	a.shortcuts(c)
+	c.SetZoom(float32(math.Pow(1.2, float64(a.settings.ZoomLevel))))
 	// Which pane has the keyboard focus, as the frame before left it, and
 	// which column: its editor is the one typing is of.
 	for i, col := range a.cols {
@@ -78,7 +85,7 @@ func (a *app) view(c *ui.Context) {
 		case t.ed != nil && t.ed.vscroll.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
 			t.ed.typist = t.ed
-		case t.term != nil && t.term.view.FocusWithin(c):
+		case t.term != nil && (t.term.view.FocusWithin(c) || t.term.findInput.Focused(c)):
 			a.focus, a.col = paneEditor, i
 		case t.view != nil && t.view.pane.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
@@ -90,7 +97,7 @@ func (a *app) view(c *ui.Context) {
 	}
 	a.autoSaveTick()
 	switch {
-	case a.panelTerm != nil && a.panelTerm.view.FocusWithin(c):
+	case a.panelTerm != nil && (a.panelTerm.view.FocusWithin(c) || a.panelTerm.findInput.Focused(c)):
 		a.focus = paneTerminal
 	case a.files.List.FocusWithin(c):
 		a.focus = paneFiles
@@ -117,7 +124,8 @@ func (a *app) view(c *ui.Context) {
 				}
 				// Its splitter is along the edge facing the editors.
 				at, dir := edgeRight, float32(1)
-				box := ui.Column(c.Key("sidebar")).Width(w.SidebarWidth).Shrink(0).BorderColor(p.border)
+				box := ui.Column(c.Key("sidebar")).Width(w.SidebarWidth).Shrink(0).BorderColor(p.seam())
+				a.grained(box)
 				if s.SidebarRight {
 					at, dir = edgeLeft, -1
 					box.BorderWidth(0, 0, 0, 1)
@@ -139,12 +147,17 @@ func (a *app) view(c *ui.Context) {
 				sidebar()
 			}
 			main := ui.Column(c.Key("main")).MinWidth(0)
-			if side != "" && a.panelMax {
+			if (side == "left" || side == "right") && a.panelMax {
 				// A panel maximized at a side takes the row, so the
-				// editors give it theirs rather than sharing it.
+				// editors give it theirs rather than sharing it. One at
+				// the bottom is in the editors' column, and takes theirs.
 				main.Grow(0).Width(0)
 			} else {
 				main.Grow(1)
+				// Inset from the window's edges where it meets them.
+				left := a.rail == nil && side != "left" && (w.SidebarClosed || s.SidebarRight)
+				right := side != "right" && (w.SidebarClosed || !s.SidebarRight)
+				a.asCard(main, left, right)
 			}
 			main.Children(func() { a.main(c) })
 			if s.SidebarRight {
@@ -158,16 +171,19 @@ func (a *app) view(c *ui.Context) {
 	})
 	a.quickOpenView(c)
 	a.branchPickerView(c)
+	a.stashPickerView(c)
+	a.prPickerView(c)
+	a.prChecksView(c)
+	a.worktreePickerView(c)
 	a.repositoryPickerView(c)
 	a.recentPickerView(c)
+	a.themePickerView(c)
 	a.remotePickerView(c)
+	a.conflictsView(c)
+	a.diagramOverlayView(c)
 	a.promptView(c)
 	a.confirmView(c)
 	a.signinView(c)
-	if !a.dialogBuilt {
-		a.dialog = ""
-	}
-	a.dialogBuilt = false
 	a.windowKeys(c)
 	if inEditor := a.keyFocus == placeEditor; inEditor != a.cutInEditor {
 		a.cutInEditor = inEditor
@@ -177,6 +193,10 @@ func (a *app) view(c *ui.Context) {
 		c.Toast(msg)
 	}
 	a.errors = a.errors[:0]
+	if len(a.notes) > 0 {
+		// The character holds up its megaphone for a while.
+		a.toldAt = c.Now()
+	}
 	for _, n := range a.notes {
 		if n.action != nil {
 			c.ToastAction(n.message, n.label, n.action)
@@ -282,7 +302,7 @@ const (
 
 // splitter is the handle along an edge of a pane that resizes it. drag
 // gets how far the pointer moved, across the edge.
-func (a *app) splitter(c *ui.Context, at edge, drag func(d float32)) {
+func (a *app) splitter(c *ui.Context, at edge, drag func(d float32)) ui.Element {
 	h := ui.Box(c).Absolute()
 	switch at {
 	case edgeTop:
@@ -309,7 +329,21 @@ func (a *app) splitter(c *ui.Context, at edge, drag func(d float32)) {
 		if lit < 0.01 {
 			return
 		}
-		line := ui.Box(c).Absolute().Background(a.pal.accentDim.Alpha(lit))
+		line := ui.Box(c).Absolute()
+		if a.pal.card > 0 {
+			// Around a card, it lights around the pointer, as Qoder's do.
+			px, py, _ := h.PointerPosition()
+			col := a.pal.accent.Alpha(lit)
+			line.Draw(func(pt *ui.Painter, r ui.Rect) {
+				if at == edgeTop {
+					drawSeamLight(pt, r, true, r.X+px, col)
+				} else {
+					drawSeamLight(pt, r, false, r.Y+py, col)
+				}
+			})
+		} else {
+			line.Background(a.pal.accentDim.Alpha(lit))
+		}
 		switch at {
 		case edgeTop:
 			line.Top(0).Left(0).Right(0).Height(2)
@@ -328,13 +362,20 @@ func (a *app) splitter(c *ui.Context, at edge, drag func(d float32)) {
 		}
 		a.settings.Changed()
 	}
+	return h
 }
 
 func (a *app) titleBar(c *ui.Context) {
 	p := a.pal
 	bar := c.TitleBar()
-	ui.Row(c).Height(max(bar.Height, titleBarH)).Padding(0, bar.Right+8, 0, bar.Left+10).AlignItems(ui.Center).
-		BorderWidth(0, 0, 1, 0).BorderColor(p.border).DragWindow().Children(func() {
+	rightPad := bar.Right + 8
+	if runtime.GOOS == "linux" && bar.Right > 0 {
+		rightPad = bar.Right - 2
+	}
+	row := ui.Row(c).Height(max(bar.Height, titleBarH)).Padding(0, rightPad, 0, bar.Left+10).AlignItems(ui.Center).
+		BorderWidth(0, 0, 1, 0).BorderColor(p.hairline()).DragWindow()
+	a.grained(row)
+	row.Children(func() {
 		// The sidebar's button is on its side. The terminal's is on the
 		// panel's: at the left of the bar when the panel is at the
 		// window's left, past the sidebar's button when the sidebar is
@@ -352,11 +393,18 @@ func (a *app) titleBar(c *ui.Context) {
 			}
 		}
 		terminalButton := func() {
-			if a.iconButton(c, iconTerminal, a.withKey(locales.CmdViewTerminal(), "view.terminal"), a.window.PanelOpen).Clicked() {
+			btn := a.iconButton(c, iconTerminal, a.withKey(locales.CmdViewTerminal(), "view.terminal"), a.window.PanelOpen)
+			if runtime.GOOS == "linux" {
+				btn.Padding(1, 0, 0, 0)
+			}
+			if btn.Clicked() {
 				a.togglePanel()
 			}
 		}
 		ui.Row(c).Basis(0).Grow(1).MinWidth(56).Gap(2).Children(func() {
+			if hostOS != "darwin" {
+				a.iconButton(c, iconMenu, locales.Menu(), false).Menu(a.appUIMenu)
+			}
 			if panelLeft {
 				terminalButton()
 			}
@@ -487,6 +535,7 @@ func (a *app) columns(c *ui.Context) {
 	// The columns as the frame began: one an action of the frame takes
 	// away, from its tab strip as it draws, is let be till the next.
 	cols := slices.Clone(a.cols)
+	a.findCol = a.column()
 	ui.Row(c.Key("columns")).Bind(&a.colsView).Grow(1).MinHeight(0).AlignItems(ui.Stretch).Children(func() {
 		for i, col := range cols {
 			if !slices.Contains(a.cols, col) {
@@ -564,17 +613,38 @@ func (a *app) columnView(c *ui.Context, col *column) {
 					a.viewerView(c, shown.view, shown.name())
 				case shown.diff != nil:
 					a.diffViewUI(c, shown.diff)
+				case shown.merge != nil:
+					a.mergeViewUI(c, shown.merge)
 				case shown.ed.loading || shown.ed.loadErr != nil:
 					a.hideEditor(shown.ed)
 					a.loadingView(c, shown.ed)
 				case shown.ed.preview != nil:
 					a.hideEditor(shown.ed)
-					a.viewerView(c, shown.ed.preview, shown.name())
+					v := shown.ed.preview
+					if col == a.findCol && v.markdown != nil && a.find.open {
+						a.findPreview = v.markdown
+						a.searchPreview(v.markdown)
+					}
+					a.viewerView(c, v, shown.name())
+					if col == a.findCol && v.markdown != nil {
+						a.previewFindView(c, v)
+					}
 				default:
+					if a.editorReviewView(c, shown.ed) {
+						break
+					}
+					shown.ed.areaKept = shown.ed.areaShown(a, col)
+					if ed := shown.ed; !ed.areaKept && ed.areaCol != nil && ed.areaCol != col {
+						// Moved to another column, it gets a new text area: it
+						// comes back to its place as a tab shown again does.
+						a.hideEditor(ed)
+					}
+					shown.ed.areaCol, shown.ed.areaBuild, shown.ed.seenBuild = col, a.builds, a.builds
 					a.editorView(c, shown.ed)
 					a.hunkPeekView(c, shown.ed)
 					a.reviewBoxView(c, shown.ed)
-					if col == a.column() {
+					a.agentContextView(c, shown.ed)
+					if col == a.findCol {
 						a.findView(c, shown.ed)
 					}
 					a.vimLineView(c, shown.ed)
@@ -582,12 +652,54 @@ func (a *app) columnView(c *ui.Context, col *column) {
 			})
 		}
 		a.dropZones(c, col, over)
+		a.keepEditors(c, col, shown)
 	})
+}
+
+// keepTabs is how many of a column's tabs out of sight keep their text
+// areas: those shown last. The others come back with a new one.
+const keepTabs = 8
+
+// keepEditors builds the text areas of a column's tabs that showed and are
+// out of sight now, hidden, where they show: they stay as they were, the
+// heights of their rows and their place among them, for when the tab comes
+// back, rather than start anew from estimates and scroll to their caret.
+// Only the keepTabs shown last do, as an area keeps the layout of its text.
+func (a *app) keepEditors(c *ui.Context, col *column, shown *colTab) {
+	kept := a.keptTabs[:0]
+	for _, t := range col.tabs {
+		if d := t.ed; t != shown && d != nil && d.areaShown(a, col) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) > keepTabs {
+		slices.SortStableFunc(kept, func(x, y *colTab) int { return y.ed.seenBuild - x.ed.seenBuild })
+		kept = kept[:keepTabs]
+	}
+	for _, t := range kept {
+		d := t.ed
+		d.areaCol, d.areaBuild = col, a.builds
+		ui.Column(c.Key(t.id)).Hidden(true).Children(func() {
+			ui.ScrollHorizontal(c).Children(func() {
+				ui.TextAreaBufferBase(c, d.buf)
+			})
+		})
+	}
+	clear(kept)
+	a.keptTabs = kept[:0]
 }
 
 func (a *app) hideEditor(d *editor) {
 	if !d.hidden {
 		d.hidden, d.hiddenY = true, d.vscroll.Y
+		if d.areaCol == nil {
+			return // never shown: no area laid its lines out
+		}
+		snap := d.buf.Snapshot()
+		g := a.geometry(d, snap.LineCount())
+		top := g.at(d.vscroll.Y - editorPadY)
+		d.hiddenAt, _ = snap.LineRange(top)
+		d.hiddenOff, d.hiddenPlaced = editorPadY+g.top(top)-d.vscroll.Y, true
 	}
 }
 
@@ -599,9 +711,25 @@ type dragItem struct {
 	file *fileDrag
 }
 
+// owns reports whether what was dragged is this window's to take: a tab or
+// a terminal dragged from another window stays there, as its view binds
+// controls of that window, or a file, which opens in any.
+func (a *app) owns(it dragItem) bool {
+	switch {
+	case it.file != nil:
+		return true
+	case it.term != nil:
+		return slices.Contains(a.terms, it.term)
+	case it.tab != nil:
+		col, _ := a.locate(it.tab)
+		return col != nil
+	}
+	return false
+}
+
 // dropInColumn puts what was dragged at place at of a column.
 func (a *app) dropInColumn(it dragItem, col *column, at int) {
-	if slices.Index(a.cols, col) < 0 {
+	if slices.Index(a.cols, col) < 0 || !a.owns(it) {
 		return
 	}
 	switch {
@@ -617,7 +745,7 @@ func (a *app) dropInColumn(it dragItem, col *column, at int) {
 // dropBeside puts what was dragged in a column of its own, before a
 // column or after it.
 func (a *app) dropBeside(it dragItem, col *column, after bool) {
-	if slices.Index(a.cols, col) < 0 {
+	if slices.Index(a.cols, col) < 0 || !a.owns(it) {
 		return
 	}
 	if it.file != nil {
@@ -710,6 +838,8 @@ func (a *app) breadcrumbs(c *ui.Context, col *column, t *colTab) {
 	var parts []crumb
 	if path := t.path(); path != "" {
 		parts = crumbsOf(path, a.root, homeDir())
+	} else if t.diff != nil && t.diff.commit != nil && t.diff.commit.pr != nil {
+		parts = []crumb{{locales.PullRequest(), ""}, {t.name(), ""}}
 	} else if t.diff != nil && t.diff.commit != nil && t.diff.commit.from != "" {
 		parts = []crumb{{locales.Comparison(), ""}, {t.name(), ""}}
 	} else if t.diff != nil && t.diff.commit != nil {
@@ -734,6 +864,8 @@ func (a *app) breadcrumbs(c *ui.Context, col *column, t *colTab) {
 			if last {
 				icon, col := fileIcon(p, part.name)
 				switch {
+				case t.diff != nil && t.diff.commit != nil && t.diff.commit.pr != nil:
+					icon, col = iconPullRequest, p.accent
 				case t.diff != nil && t.diff.commit != nil:
 					icon, col = iconCommit, p.accent
 				case t.diff != nil:
@@ -793,9 +925,20 @@ func (a *app) breadcrumbs(c *ui.Context, col *column, t *colTab) {
 				ui.Icon(c, iconChevronRight).FontSize(11).TextColor(p.faint)
 			}
 		}
-		if d != nil && canPreview(d.document) {
+		if d != nil && (canPreview(d.document) || a.settings.EditorAgentContext) {
 			ui.Spacer(c)
-			a.previewButton(c, t, d)
+			if a.settings.EditorAgentContext {
+				a.reviewSendButton(c)
+				if len(a.review.notes) > 0 {
+					b := ui.ButtonBase(c.Key("agent-context-list")).Size(26, crumbsH-6).Radius(4).
+						AlignItems(ui.Center).Justify(ui.Center).Label(locales.AgentContextList()).Tooltip(locales.AgentContextList())
+					b.Children(func() { ui.Icon(c, iconMore).FontSize(14).TextColor(p.muted) })
+					b.Menu(a.reviewMenu)
+				}
+			}
+			if canPreview(d.document) {
+				a.previewButton(c, t, d)
+			}
 		}
 		if t.diff != nil {
 			ui.Spacer(c)
@@ -833,14 +976,16 @@ func (a *app) previewButton(c *ui.Context, t *colTab, d *editor) {
 // statusVisibility is which of the parts of the status bar that can go
 // show.
 type statusVisibility struct {
-	branchLabel bool
-	folder      bool
-	terminal    bool
-	lines       bool
-	indent      bool
-	encoding    bool
-	eol         bool
-	language    bool
+	branchLabel   bool
+	gitSyncCounts bool
+	prDetail      bool // the checks and the review after the number
+	folder        bool
+	terminal      bool
+	lines         bool
+	indent        bool
+	encoding      bool
+	eol           bool
+	language      bool
 }
 
 // statusFit returns which parts of the status bar show in width: as the
@@ -913,7 +1058,7 @@ func (a *app) statusFit(c *ui.Context, width float32) statusVisibility {
 		snap := d.buf.Snapshot()
 		n := snap.LineCount()
 		used += measure(locales.StatusPos(n, 999), false)
-		if a.settings.Vim {
+		if a.prefs().Vim {
 			// The mode's badge, and the keys typed after it.
 			used += measure(d.vim.mode.String(), false) + 2*6
 			if k := d.vim.pending(); k != "" {
@@ -943,9 +1088,24 @@ func (a *app) statusFit(c *ui.Context, width float32) statusVisibility {
 	if a.host.account() != "" {
 		used += syncStatusW
 	}
+	if version := a.host.update(); version != "" {
+		used += measure(version, true)
+	}
+	if pr := a.repository().currentPR(); pr != nil {
+		// The number stays, as the branch's icon does.
+		number := measure("#"+strconv.Itoa(pr.Number), false)
+		used += number
+		add(&v.prDetail, measure(prBadgeLabel(pr), false)-number+4*4)
+	}
+	if repo := a.repository(); repo.gitSyncVisible() {
+		used += 2*6 + 12 + 2 // the sync icon stays beside the branch
+		if label := repo.gitSyncLabel(); label != "" {
+			add(&v.gitSyncCounts, measure(label, false)-2*6-2+5)
+		}
+	}
 	if a.branch() != "" {
 		used += 2*6 + 12 + 2 // its icon, which stays
-		add(&v.branchLabel, measure(a.branchLabel(), false)-2*6-2+5)
+		add(&v.branchLabel, measure(a.branch(), false)-2*6-2+5)
 	}
 	for _, p := range parts {
 		*p.on = true
@@ -961,6 +1121,37 @@ func (a *app) statusFit(c *ui.Context, width float32) statusVisibility {
 	return v
 }
 
+// gitSyncStatus is separate from the branch menu so syncing needs one
+// click. The icon remains when the bar is too narrow for the counts.
+func (a *gitContext) gitSyncStatus(c *ui.Context, showCounts bool) {
+	if !a.gitSyncVisible() {
+		return
+	}
+	p, g := a.app.pal, a.git
+	label, tip, icon := locales.GitSync(), locales.GitSyncTip(g.status.Upstream), iconRefresh
+	if g.status.Upstream == "" {
+		label, tip, icon = locales.ScmPublishBranch(), locales.ScmPublishBranch(), iconPush
+	}
+	if g.busy != "" {
+		tip = g.busy
+	}
+	b := ui.ButtonBase(c.Key("status:git-sync")).Height(statusBarH-6).Padding(0, 6).Gap(5).Radius(4).
+		AlignItems(ui.Center).Label(label).Tooltip(tip).Disabled(g.busy != "")
+	if b.Hovered() {
+		b.Background(p.hover)
+	}
+	b.Transition(hoverFade)
+	b.Children(func() {
+		ui.Icon(c, icon).FontSize(12).TextColor(p.statusFg)
+		if counts := a.gitSyncLabel(); showCounts && counts != "" {
+			ui.Text(c, counts).FontSize(11.5).TextColor(p.statusFg).SingleLine()
+		}
+	})
+	if b.Clicked() {
+		a.gitSync()
+	}
+}
+
 // vimBadge shows vim mode's mode in the status bar, as a badge colored
 // by it: plain in normal mode, the accent in insert mode, and the color
 // of a change in visual mode; then the keys of a command typed so far.
@@ -974,12 +1165,9 @@ func (a *app) vimBadge(c *ui.Context, v *vimState, text func(string) ui.Element)
 		bg, fg = p.modified.Alpha(0.22), p.modifiedFg
 	}
 	row := ui.Row(c.Key("status:vim")).Height(statusBarH).Padding(0, 6).Gap(6).AlignItems(ui.Center)
-	// From mode to mode, the badge's colors and name cross over.
-	fade := ui.Animation{Duration: 140 * time.Millisecond}
-	bg, fg = row.AnimateColor("bg", bg, fade), row.AnimateColor("fg", fg, fade)
 	row.Children(func() {
 		ui.Text(c, v.mode.String()).FontSize(10.5).FontWeight(650).LetterSpacing(0.6).TextColor(fg).SingleLine().
-			Padding(1, 6).Radius(4).Background(bg).ContentTransition(ui.ContentTransition{})
+			Padding(1, 6).Radius(4).Background(bg)
 		if a.vimRec != 0 {
 			// A register recording, as vim says: a red dot, and its name.
 			ui.Row(c.Key("status:vim-rec")).Gap(5).AlignItems(ui.Center).
@@ -1008,10 +1196,13 @@ func (a *app) vimBadge(c *ui.Context, v *vimState, text func(string) ui.Element)
 
 func (a *app) statusBar(c *ui.Context) {
 	p := a.pal
+	repo := a.repository()
 	width, _ := c.Size()
 	visible := a.statusFit(c, width)
-	ui.Row(c).Height(statusBarH).Padding(0, 6).Gap(2).AlignItems(ui.Center).Background(p.status).
-		BorderWidth(1, 0, 0, 0).BorderColor(p.border).Children(func() {
+	bar := ui.Row(c).Height(statusBarH).Padding(0, 6).Gap(2).AlignItems(ui.Center).Background(p.status).
+		BorderWidth(1, 0, 0, 0).BorderColor(p.hairline())
+	a.grained(bar)
+	bar.Children(func() {
 		text := func(s string) ui.Element {
 			return ui.Text(c, s).FontSize(11.5).TextColor(p.statusFg).SingleLine()
 		}
@@ -1065,9 +1256,9 @@ func (a *app) statusBar(c *ui.Context) {
 		}
 		a.remoteStatus(c, text)
 		a.portsStatus(c, text)
-		if b := a.branch(); b != "" {
+		if b := repo.branch(); b != "" {
 			bb := ui.ButtonBase(c.Key("status:branch")).Height(statusBarH-6).Padding(0, 6).Gap(5).Radius(4).
-				AlignItems(ui.Center).Label(locales.BranchLabel(b)).Tooltip(locales.BranchStatusTip(b))
+				AlignItems(ui.Center).Label(locales.BranchLabel(b)).Tooltip(locales.BranchStatusTip(b)).Disabled(repo.git.busy != "")
 			if bb.Hovered() {
 				bb.Background(p.hover)
 			}
@@ -1076,13 +1267,25 @@ func (a *app) statusBar(c *ui.Context) {
 				ui.Icon(c, iconBranch).FontSize(12).TextColor(p.statusFg)
 				if visible.branchLabel {
 					// Switched to another, the name rolls to it.
-					text(a.branchLabel()).ContentTransition(ui.ContentTransition{})
+					text(b).ContentTransition(ui.ContentTransition{})
 				}
 			})
-			bb.Menu(a.branchMenu)
+			if bb.Clicked() {
+				repo.openBranchPicker()
+			}
+			repo.prBadge(c, true, !visible.prDetail)
 		}
+		repo.gitSyncStatus(c, visible.gitSyncCounts)
 		a.transferStatus(c, text)
-		if busy := a.repository().git.busy; busy != "" {
+		if busy := hcBusy(); busy != "" {
+			ui.Row(c.Key("status:hc")).Height(statusBarH).Padding(0, 6).Gap(5).AlignItems(ui.Center).Transition(revealFade).Children(func() {
+				ui.Spinner(c).Size(11, 11)
+				text(busy)
+			})
+		}
+		if busy := repo.git.busy; busy != "" && a.settings.Theme == themeClaude {
+			a.claudeSpinner(c, busy)
+		} else if busy != "" {
 			ui.Row(c.Key("status:busy")).Height(statusBarH).Padding(0, 6).Gap(5).AlignItems(ui.Center).Children(func() {
 				// In a theme with a character, it hops for it instead.
 				if a.themeMascot() == nil {
@@ -1105,8 +1308,12 @@ func (a *app) statusBar(c *ui.Context) {
 		}
 		a.reviewStatus(c, text)
 		ui.Spacer(c)
-		// Settings sync is last, at the right, whatever shows before it.
+		// Settings sync is last, at the right, whatever shows before it,
+		// and a new version of Mayoi before it.
 		defer a.syncStatus(c)
+		if v := a.host.update(); v != "" {
+			defer item("update", v, locales.UpdateAvailable(v), iconUpdate, a.host.installUpdate)
+		}
 		if v := a.activeViewer(); v != nil {
 			a.viewerStatus(c, v, item, text)
 			return
@@ -1140,7 +1347,7 @@ func (a *app) statusBar(c *ui.Context) {
 		}
 		snap := d.buf.Snapshot()
 		caret := min(d.caret, snap.Len())
-		if a.settings.Vim && d.vim.mode.visual() {
+		if a.prefs().Vim && d.vim.mode.visual() {
 			caret = vimCursor(d, snap)
 		}
 		line := snap.LineAt(caret)
@@ -1149,7 +1356,7 @@ func (a *app) statusBar(c *ui.Context) {
 		if n := abs(d.sel[1] - d.sel[0]); n > 0 {
 			pos += locales.StatusSelected(n)
 		}
-		if a.settings.Vim {
+		if a.prefs().Vim {
 			a.vimBadge(c, &d.vim, text)
 		}
 		item("pos", pos, a.withKey(locales.GoToLineLabel(), "go.line"), nil, func() { a.openQuick(":") })
@@ -1264,6 +1471,11 @@ func (a *app) welcome(c *ui.Context) {
 						ui.Text(c, locales.WelcomeTagline()).FontSize(13).TextColor(p.muted)
 					})
 				})
+				if v := a.host.update(); v != "" {
+					a.welcomeSection(c, locales.WelcomeUpdate(), 30*time.Millisecond, func() {
+						a.welcomeAction(c, iconUpdate, locales.UpdateAvailable(v), "", a.host.installUpdate)
+					})
+				}
 				a.welcomeSection(c, locales.WelcomeStart(), 60*time.Millisecond, func() {
 					if a.root == "" {
 						a.welcomeAction(c, iconFolderOpen, locales.CmdFileOpenFolder(), a.keyHint("file.openFolder"), a.chooseFolder)
@@ -1278,6 +1490,7 @@ func (a *app) welcome(c *ui.Context) {
 					a.welcomeAction(c, iconFilePlus, locales.CmdFileNew(), a.keyHint("file.new"), a.newFile)
 					a.welcomeAction(c, iconTerminal, locales.CmdViewTerminal(), a.keyHint("view.terminal"), a.togglePanel)
 					a.welcomeAction(c, iconSidebar, locales.CmdViewSidebar(), a.keyHint("view.sidebar"), a.toggleSidebar)
+					a.welcomeAction(c, iconSparkles, locales.CmdViewSelectTheme(), a.keyHint("view.selectTheme"), a.openThemePicker)
 					if a.host.account() == "" && a.settings.Path() != "" {
 						a.welcomeAction(c, iconCloud, locales.CmdAccountSignIn(), "", func() { a.host.signIn() })
 					}
@@ -1322,9 +1535,33 @@ func (a *app) welcome(c *ui.Context) {
 						}
 					})
 				}
+				a.welcomeStar(c)
 			})
 		})
 	})
+}
+
+// repoURL is Mayoi's repository on GitHub.
+const repoURL = "https://github.com/sorrycc/Mayoi"
+
+// welcomeStar is the link at the foot of the welcome page that opens
+// Mayoi's repository, to star it: quieter than the rows above it.
+func (a *app) welcomeStar(c *ui.Context) {
+	p := a.pal
+	r := ui.ButtonBase(c.Key("welcome:star")).AlignSelf(ui.Start).Height(24).Padding(0, 10).Radius(6).Gap(6).
+		AlignItems(ui.Center).Label(locales.WelcomeStar()).Tooltip(repoURL)
+	col := p.faint
+	if r.Hovered() {
+		col = p.accent
+	}
+	col = r.AnimateColor("text", col, ui.Animation{Duration: hoverFade.Duration})
+	riseIn(r, 150*time.Millisecond).Children(func() {
+		ui.Icon(c, iconStar).FontSize(13).TextColor(col)
+		ui.Text(c, locales.WelcomeStar()).FontSize(12).TextColor(col).SingleLine()
+	})
+	if r.Clicked() {
+		a.services.OpenURL(repoURL)
+	}
 }
 
 // welcomeRowH is the height of every row of the welcome page, with keys
@@ -1448,6 +1685,17 @@ func (a *app) togglePanel() {
 		a.focusTerminal()
 	} else {
 		a.focusColumn()
+	}
+	a.settings.Changed()
+}
+
+// toggleTerminalLocation has new terminals open in the editor area, or in
+// the panel again.
+func (a *app) toggleTerminalLocation() {
+	if a.settings.TerminalLocation == "" {
+		a.settings.TerminalLocation = "editor"
+	} else {
+		a.settings.TerminalLocation = ""
 	}
 	a.settings.Changed()
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,6 +21,7 @@ import (
 // unless MYGO_LOCALE asks for another, as for shots of a translation.
 // The language is worked out once: with no app running, MyGo would match
 // it again for every message, which the frame benchmarks would measure.
+// Many tests run in worker processes beside each other: see splitTests.
 func TestMain(m *testing.M) {
 	hostOS = "darwin"
 	keepLineEndings()
@@ -28,7 +30,15 @@ func TestMain(m *testing.M) {
 	}
 	locale := i18n.Locale()
 	i18n.SetLocaleFunc(func() string { return locale })
-	os.Exit(m.Run())
+	// The previews' pictures of the web are not fetched, but by the tests
+	// of them, from servers of their own.
+	markdownRemote.get = func(string) ([]byte, error) { return nil, errors.New("offline") }
+	code, split := splitTests()
+	if !split {
+		code = m.Run()
+	}
+	removeFixtureRepo()
+	os.Exit(code)
 }
 
 // keepLineEndings has every git the tests run, theirs and the app's, keep
@@ -162,8 +172,8 @@ func TestWindowsMenuKeys(t *testing.T) {
 	}
 }
 
-// A terminal off macOS leaves Mayoi the keys of the workbench, and the
-// shell the others with Control, which edit its line.
+// A terminal off macOS leaves Mayoi the keys of the workbench and find,
+// and the shell the others with Control, which edit its line.
 func TestShellSkip(t *testing.T) {
 	onOS(t, "linux")
 	a := newApp(&fakeHost{}, settings.Default(), settings.Default().NewWindow())
@@ -180,7 +190,7 @@ func TestShellSkip(t *testing.T) {
 		{0, ui.KeyF3, "edit.findNext", true},
 		{ui.Alt, ui.Key2, "", true},
 		{ui.Ctrl, ui.KeyW, "", false},
-		{ui.Ctrl, ui.KeyF, "", false},
+		{ui.Ctrl, ui.KeyF, "edit.find", true},
 		{ui.Ctrl, ui.KeyR, "", false},
 		{ui.Ctrl | ui.Shift, ui.KeyV, "", false},
 	} {

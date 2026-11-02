@@ -2,9 +2,14 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	mtransfer "github.com/egoist/mygo/transfer"
+
+	"mayoi/internal/remote"
 )
 
 func tabNames(col *column) string {
@@ -13,6 +18,43 @@ func tabNames(col *column) string {
 		out = append(out, t.name())
 	}
 	return strings.Join(out, " ")
+}
+
+func TestFileDragData(t *testing.T) {
+	// An existing local file goes out as a file list, one file URL per
+	// item.
+	file := filepath.Join(t.TempDir(), "main.go")
+	os.WriteFile(file, []byte("package main\n"), 0o644)
+	data := fileDragData(file)
+	urls, err := data.URLs()
+	if err != nil || len(urls) != 1 {
+		t.Fatalf("urls %v, err %v", urls, err)
+	}
+	if !strings.HasPrefix(urls[0], "file://") || !strings.HasSuffix(urls[0], "/main.go") {
+		t.Fatalf("url %q", urls[0])
+	}
+
+	// A local path that is gone goes out as its path, not a dangling file.
+	gone := filepath.Join(t.TempDir(), "gone.go")
+	data = fileDragData(gone)
+	text, err := data.Read(mtransfer.Text)
+	if err != nil || string(text) != gone {
+		t.Fatalf("text %q, err %v", text, err)
+	}
+	if _, err := data.Read(mtransfer.FileList); err == nil {
+		t.Fatal("a missing file offered as a local file")
+	}
+
+	// A remote file goes out as its displayed path: text, not a file of
+	// this machine.
+	data = fileDragData(remote.Path("dev", "/srv/app/main.go"))
+	text, err = data.Read(mtransfer.Text)
+	if err != nil || string(text) != "dev:/srv/app/main.go" {
+		t.Fatalf("text %q, err %v", text, err)
+	}
+	if _, err := data.Read(mtransfer.FileList); err == nil {
+		t.Fatal("a remote file offered as a local file")
+	}
 }
 
 func TestDroppingFiles(t *testing.T) {
@@ -128,4 +170,31 @@ func TestDraggingFilesFromTheSidebar(t *testing.T) {
 	if tabNames(a.cols[1]) != "style.css a.go" || d == nil || d.buf.Slice(d.sel[0], d.sel[1]) != "Answer" {
 		t.Fatalf("tabs %q", tabNames(a.cols[1]))
 	}
+}
+
+// Files copied in the Finder paste into a terminal of this machine as
+// their paths, quoted for the shell, not as the names the clipboard has
+// as text.
+func TestPastingFilesIntoATerminal(t *testing.T) {
+	featShell(t)
+	hs := newHarness(t, true)
+	a := hs.a
+	t.Cleanup(a.closeTerminals)
+	a.newTerminal()
+	hs.settle()
+	s := a.panelTerm
+	hs.until("the prompt", func() bool { return strings.Contains(s.term.Text(), "❯") })
+	if a.terminalPaste(s, "main.go") {
+		t.Fatal("text alone taken")
+	}
+	spaced := hs.path("my notes.md")
+	os.WriteFile(spaced, nil, 0o644)
+	hs.h.clipboard = []string{hs.path("main.go"), spaced}
+	if !a.terminalPaste(s, "main.go\nmy notes.md") {
+		t.Fatal("files not taken")
+	}
+	want := quotePaths(hs.h.clipboard)
+	hs.until("the paths pasted", func() bool {
+		return strings.Contains(strings.ReplaceAll(s.term.Text(), "\n", ""), strings.TrimSpace(want))
+	})
 }

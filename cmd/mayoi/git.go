@@ -11,8 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/egoist/mygo/ui"
-
+	"mayoi/internal/bg"
 	"mayoi/internal/git"
 	"mayoi/internal/remote"
 	"mayoi/locales"
@@ -28,10 +27,14 @@ type gitState struct {
 	lookup          *int // the lookup running, which a reset drops
 
 	status   *git.Status
-	branches []string // the local branches, read with the status
-	remotes  []string // the remotes, read with the status
+	branches []string    // the local branches, read with the status
+	stashes  []git.Stash // the newest stashes, read with the status
+	remotes  []string    // the remotes, read with the status
 	// remotesStale has the next read of the status read the remotes too.
 	remotesStale bool
+	// remotesOf is when the config was changed that the remotes were read
+	// from, zero when that is not known.
+	remotesOf time.Time
 	// entries are the files that differ, by path; dirs the folders above
 	// them, with the letter of the one that matters most.
 	entries map[string]git.Entry
@@ -40,6 +43,12 @@ type gitState struct {
 	// view, worked out for the status groupsOf.
 	groups   [groupCount][]git.Entry
 	groupsOf *git.Status
+	// mergeDone are the files of the command in progress that the merge
+	// view staged as resolved, by path, and mergeDoneOp the command they
+	// belong to: a list of the files in conflict has them resolved, until
+	// the command ends or another starts.
+	mergeDone   map[string]bool
+	mergeDoneOp git.Op
 	// stale has the next frame read the status again, unless running;
 	// read is when it was read last.
 	stale, running bool
@@ -80,12 +89,42 @@ type gitState struct {
 	// counts.
 	graph   []graphRow
 	graphOf int
-	// tags are the names of the tags, read with the history.
+	// tags are the names of the tags, read with the status.
 	tags []string
 	// reach is the commits of history that HEAD has, worked out for the
 	// HEAD and the read reachOf names.
 	reach   map[string]bool
 	reachOf string
+
+	// pr is the pull request of prBranch of prRepo, as gh last told, nil
+	// for none; prRead is when it was asked last, of the state prOf names.
+	// prRunning is set while gh runs, prOff once gh could not tell, and
+	// prWake draws a frame when it is time to ask again. ghOK is set once
+	// gh answered, which it does only when installed and signed in, and
+	// ghProbed once it was asked so without a branch checked out.
+	pr        *git.PR
+	prRepo    *git.Repo
+	prBranch  string
+	prOf      string
+	prRead    time.Time
+	prRunning bool
+	prOff     bool
+	prWake    *time.Timer
+	ghOK      bool
+	ghProbed  bool
+
+	// prHeads is the pull requests open of prHeadsRepo by the commit at
+	// their head, as gh last told, which the history marks; prHeadsRead
+	// is when it was asked last, of the refs prHeadsOf counts. As for pr,
+	// prHeadsRunning is set while gh runs, prHeadsOff once gh could not
+	// tell, and prHeadsWake draws a frame when it is time to ask again.
+	prHeads        map[string][]git.PRHead
+	prHeadsRepo    *git.Repo
+	prHeadsOf      int
+	prHeadsRead    time.Time
+	prHeadsRunning bool
+	prHeadsOff     bool
+	prHeadsWake    *time.Timer
 }
 
 // historyPage is how many commits the history reads at first, and more
@@ -95,6 +134,13 @@ const historyPage = 50
 // statusEvery is how often the status is read again on its own, for the
 // files changed in folders the tree does not watch.
 const statusEvery = 5 * time.Second
+
+func (a *app) gitNow() time.Time {
+	if a.gitClock != nil {
+		return a.gitClock()
+	}
+	return time.Now()
+}
 
 // lookUpRepo finds the work tree of the folder in the background.
 func (a *app) lookUpRepo() {
@@ -108,7 +154,8 @@ func (a *app) lookUpRepo() {
 	// it found what was there before.
 	tok := new(int)
 	g.lookup = tok
-	go func() {
+	bg.Go(func() {
+		defer recoverCrash()
 		r, err := git.Open(root)
 		a.post(func() {
 			if a.root != root || g.lookup != tok {
@@ -119,7 +166,7 @@ func (a *app) lookUpRepo() {
 				g.repo, g.stale, g.remotesStale = r, true, true
 			}
 		})
-	}()
+	})
 }
 
 // refreshGit runs once a frame: it looks up the work tree, notices HEAD
@@ -132,13 +179,15 @@ func (a *gitContext) refreshGit() {
 	if g.repo == nil || !a.app.online() {
 		return
 	}
+	now := a.app.gitNow()
 	switch {
 	case a.app.conn != nil:
 		// On the host, at one round trip, in the background.
-		if !g.metaRunning && time.Since(g.checked) >= remoteMetaEvery {
-			g.checked, g.metaRunning = time.Now(), true
+		if !g.metaRunning && now.Sub(g.checked) >= remoteMetaEvery {
+			g.checked, g.metaRunning = now, true
 			r := g.repo
-			go func() {
+			bg.Go(func() {
+				defer recoverCrash()
 				t, refs, err := remoteGitMeta(r)
 				a.app.post(func() {
 					if g.repo != r {
@@ -149,27 +198,42 @@ func (a *gitContext) refreshGit() {
 						a.tookGitMeta(t, refs)
 					}
 				})
-			}()
+			})
 		}
-	case time.Since(g.checked) >= 1500*time.Millisecond:
-		g.checked = time.Now()
+	case now.Sub(g.checked) >= 1500*time.Millisecond:
+		g.checked = now
 		a.tookGitMeta(gitMeta(g.repo))
 	}
 	a.refreshHistory()
-	if g.running || !g.stale && time.Since(g.read) < statusEvery {
+	if g.running || !g.stale && now.Sub(g.read) < statusEvery {
 		return
 	}
 	g.running, g.stale = true, false
 	r := g.repo
 	// The remotes change seldom: they are read again with the status after
-	// a command, or as HEAD moves, not every few seconds.
-	readRemotes := g.remotesStale
+	// a command, or as HEAD moves, not every few seconds, and of a work
+	// tree here only once the config they are in changed.
+	readRemotes, local, remotesOf := g.remotesStale, a.app.conn == nil, g.remotesOf
 	g.remotesStale = false
-	go func() {
+	bg.Go(func() {
+		defer recoverCrash()
 		st, err := r.Status()
-		branches, _ := r.Branches()
+		refs, _ := r.Refs()
+		// The stash is listed only while its ref is there.
+		var stashes []git.Stash
+		var stashesErr error
+		if refs.Stash {
+			stashes, stashesErr = r.StashList(stashListN)
+		}
 		var remotes []string
 		var remotesErr error
+		var config time.Time
+		if readRemotes && local {
+			if info, err := os.Stat(filepath.Join(r.Common, "config")); err == nil {
+				config = info.ModTime()
+				readRemotes = !config.Equal(remotesOf)
+			}
+		}
 		if readRemotes {
 			remotes, remotesErr = r.Remotes()
 		}
@@ -177,17 +241,20 @@ func (a *gitContext) refreshGit() {
 			if g.repo != r {
 				return
 			}
-			g.running, g.read = false, time.Now()
+			g.running, g.read = false, a.app.gitNow()
 			if err != nil {
 				return
 			}
 			a.setStatus(st)
-			g.branches = branches
+			g.branches, g.tags = refs.Branches, refs.Tags
+			if stashesErr == nil {
+				g.stashes = stashes
+			}
 			if readRemotes && remotesErr == nil {
-				g.remotes = remotes
+				g.remotes, g.remotesOf = remotes, config
 			}
 		})
-	}()
+	})
 }
 
 // historyKey names the state the history is read for: where HEAD and its
@@ -220,14 +287,14 @@ func (a *gitContext) refreshHistory() {
 	}
 	g.loadingHistory = true
 	// Without a remote nothing is pushed or not: no commit is marked.
-	r, remotes, all := g.repo, len(g.remotes) > 0, a.app.settings.ScmAllBranches
-	go func() {
+	r, remotes, all, upstream := g.repo, len(g.remotes) > 0, a.app.settings.ScmAllBranches, st.Upstream
+	bg.Go(func() {
+		defer recoverCrash()
 		cs, err := r.Log(n, all)
 		var unpushed map[string]bool
 		if remotes {
-			unpushed = r.Unpushed(n)
+			unpushed = r.Unpushed(n, upstream)
 		}
-		tags, _ := r.Tags()
 		a.app.post(func() {
 			if g.repo != r {
 				return
@@ -237,10 +304,10 @@ func (a *gitContext) refreshHistory() {
 			if err != nil {
 				return
 			}
-			g.history, g.unpushed, g.tags = cs, unpushed, tags
+			g.history, g.unpushed = cs, unpushed
 			g.historyGen++
 		})
-	}()
+	})
 }
 
 // tookGitMeta takes when the files HEAD moving changes last changed, and
@@ -423,7 +490,7 @@ func (a *gitContext) gitDo(busy string, fn func(r *git.Repo) error, then func())
 		g.busy = busy
 	}
 	g.pending++
-	go func() {
+	bg.Go(func() {
 		err := fn(r)
 		a.app.post(func() {
 			if g.repo != r {
@@ -442,7 +509,7 @@ func (a *gitContext) gitDo(busy string, fn func(r *git.Repo) error, then func())
 				then()
 			}
 		})
-	}()
+	})
 }
 
 // gitFailed says why a git command failed.
@@ -504,6 +571,36 @@ func (a *gitContext) push() {
 			a.app.tell(note{message: locales.PushedTo(branch, st.Upstream)})
 		} else {
 			a.app.tell(note{message: locales.Published(branch)})
+		}
+	})
+}
+
+// gitSync pulls and pushes in one background operation, keeping the
+// repository busy until both finish. A branch without an upstream is
+// published by the existing push command.
+func (a *gitContext) gitSync() {
+	if !a.gitSyncVisible() {
+		return
+	}
+	if a.git.status.Upstream == "" {
+		a.push()
+		return
+	}
+	upstream, ahead, pulled := a.git.status.Upstream, a.git.status.Ahead, 0
+	a.gitDo(locales.BusySyncing(), func(r *git.Repo) error {
+		before := r.Head()
+		if err := r.Sync(); err != nil {
+			return err
+		}
+		if before != "" {
+			pulled = r.Count(before, "HEAD")
+		}
+		return nil
+	}, func() {
+		if pulled == 0 && ahead == 0 {
+			a.app.tell(note{message: locales.AlreadyUpToDate()})
+		} else {
+			a.app.tell(note{message: locales.SyncedWith(upstream)})
 		}
 	})
 }
@@ -639,6 +736,7 @@ func (a *gitContext) runOp(op git.Op, busy, done string, fn func(r *git.Repo) er
 			g.message, g.amend = msg, false
 		}
 		a.app.showSourceControl()
+		a.app.openConflicts()
 		a.app.tell(note{message: locales.OpStopped(opTitle(op)),
 			label: locales.ButtonAbort(), action: func() { a.abortOpOf(op) }})
 	})
@@ -823,13 +921,17 @@ func (a *gitContext) askRefAt(cm git.Commit, tag bool) {
 
 // askNewBranch asks for the name of a branch to make and check out.
 func (a *gitContext) askNewBranch() {
-	if a.git.repo == nil {
+	if !a.live() || a.git.busy != "" {
 		return
 	}
+	defer a.bindPanelDialogs(a.git.repo)
 	a.app.prompt = &prompt{title: locales.CreateBranchEllipsis(), hint: locales.BranchFrom(a.branch()), done: func(name string) string {
+		if a.git.busy != "" {
+			return a.git.busy
+		}
 		name = strings.TrimSpace(name)
-		if name == "" || strings.ContainsAny(name, " ~^:?*[\\") {
-			return locales.RefNameNoSpaces("false")
+		if !validBranch(name) {
+			return locales.BranchInvalidName()
 		}
 		if slices.Contains(a.git.branches, name) {
 			return locales.RefExists("false")
@@ -839,49 +941,19 @@ func (a *gitContext) askNewBranch() {
 	}}
 }
 
-// branchMenu is the menu of the branch in the status bar: the branches to
-// switch to, and the commands of the remotes.
-func (a *gitContext) branchMenu(m *ui.Menu) {
-	g := a.git
-	cur := a.branch()
-	if m.Item(locales.CmdGitSwitchBranch()).Disabled(g.busy != "").Chosen() {
-		a.app.post(a.openBranchPicker)
-	}
-	m.Separator()
-	for _, b := range g.branches {
-		if m.Item(b).Checked(b == cur).Disabled(g.busy != "").Chosen() && b != cur {
-			a.app.post(func() { a.switchBranch(b, false) })
-		}
-	}
-	if len(g.branches) > 0 {
-		m.Separator()
-	}
-	if m.Item(locales.CreateBranchEllipsis()).Disabled(g.busy != "").Chosen() {
-		a.app.post(a.askNewBranch)
-	}
-	m.Separator()
-	if m.Item(locales.CmdGitFetch()).Disabled(g.busy != "").Chosen() {
-		a.app.post(a.fetch)
-	}
-	if m.Item(locales.CmdGitPull()).Disabled(g.busy != "").Chosen() {
-		a.app.post(a.pull)
-	}
-	if m.Item(locales.CmdGitPush()).Disabled(g.busy != "").Chosen() {
-		a.app.post(a.push)
-	}
+// gitSyncVisible keeps publishing and syncing off detached and unborn
+// branches, and off repositories with no upstream or remote.
+func (a *gitContext) gitSyncVisible() bool {
+	st := a.git.status
+	return a.git.repo != nil && st != nil && st.Branch != "" && st.Head != "" &&
+		(st.Upstream != "" || len(a.git.remotes) > 0)
 }
 
-// branchLabel is what the status bar says of the branch: its name, and
-// how far it is ahead of its upstream and behind it.
-func (a *gitContext) branchLabel() string {
-	label := a.branch()
-	if st := a.git.status; st != nil && st.Upstream != "" {
-		if st.Behind > 0 {
-			label += fmt.Sprintf(" ↓%d", st.Behind)
-		}
-		if st.Ahead > 0 {
-			label += fmt.Sprintf(" ↑%d", st.Ahead)
-		}
+// gitSyncLabel keeps both counts when either is nonzero; an up-to-date
+// branch has only the sync icon, which can still fetch new commits.
+func (a *gitContext) gitSyncLabel() string {
+	if st := a.git.status; st != nil && st.Upstream != "" && (st.Behind > 0 || st.Ahead > 0) {
+		return fmt.Sprintf("%d↓ %d↑", st.Behind, st.Ahead)
 	}
-	return label
+	return ""
 }

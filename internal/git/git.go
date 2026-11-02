@@ -271,7 +271,7 @@ func (r *Repo) Show(rev, path string) (text string, ok bool, err error) {
 		}
 		var ge *Error
 		if errors.As(err, &ge) {
-			for _, s := range []string{"exists on disk, but not in", "does not exist in", "neither on disk nor in the index", "invalid object name", "bad revision"} {
+			for _, s := range []string{"exists on disk, but not in", "does not exist in", "neither on disk nor in the index", "invalid object name", "bad revision", "is in the index, but not at stage"} {
 				if strings.Contains(ge.Stderr, s) {
 					return "", false, nil
 				}
@@ -357,14 +357,18 @@ func (r *Repo) Unstage(paths ...string) error {
 		_, err := r.run(nil, append([]string{"rm", "--cached", "-r", "-q", "--"}, r.rels(paths)...)...)
 		return err
 	}
-	_, err := r.run(nil, append([]string{"restore", "--staged", "--"}, r.rels(paths)...)...)
-	return err
+	return r.runOr(
+		append([]string{"restore", "--staged", "--"}, r.rels(paths)...),
+		append([]string{"reset", "-q", "--"}, r.rels(paths)...),
+	)
 }
 
 // Discard makes the tracked files in the work tree as the index has them.
 func (r *Repo) Discard(paths ...string) error {
-	_, err := r.run(nil, append([]string{"restore", "--worktree", "--"}, r.rels(paths)...)...)
-	return err
+	return r.runOr(
+		append([]string{"restore", "--worktree", "--"}, r.rels(paths)...),
+		append([]string{"checkout", "--"}, r.rels(paths)...),
+	)
 }
 
 // StageText puts text in the index as the file at path.
@@ -587,19 +591,36 @@ func (r *Repo) LastMessage() string {
 	return strings.TrimSpace(string(out))
 }
 
-// Branches returns the local branches, by name.
-func (r *Repo) Branches() ([]string, error) {
-	out, err := r.run(nil, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+// Refs are the local branches and the tags, by name, and whether a stash
+// is kept: what one read of the refs says.
+type Refs struct {
+	Branches, Tags []string
+	Stash          bool
+}
+
+// Refs reads the branches, the tags and the stash's ref, at one git.
+func (r *Repo) Refs() (Refs, error) {
+	out, err := r.run(nil, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags", "refs/stash")
 	if err != nil {
-		return nil, err
+		return Refs{}, err
 	}
-	var bs []string
-	for _, b := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if b != "" {
-			bs = append(bs, b)
+	var refs Refs
+	for _, ref := range strings.Split(string(out), "\n") {
+		if b, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+			refs.Branches = append(refs.Branches, b)
+		} else if t, ok := strings.CutPrefix(ref, "refs/tags/"); ok {
+			refs.Tags = append(refs.Tags, t)
+		} else if ref == "refs/stash" {
+			refs.Stash = true
 		}
 	}
-	return bs, nil
+	return refs, nil
+}
+
+// Branches returns the local branches, by name.
+func (r *Repo) Branches() ([]string, error) {
+	refs, err := r.Refs()
+	return refs.Branches, err
 }
 
 // Branch is a branch, local or of a remote, and its last commit.
@@ -607,6 +628,7 @@ type Branch struct {
 	Name          string // as "main", or "origin/main" for a remote's
 	Remote        bool
 	Time          time.Time // when its last commit was made
+	Author        string    // the author of its last commit
 	Subject       string    // the subject of its last commit
 	Hash          string
 	Upstream      string // display name
@@ -619,14 +641,14 @@ type Branch struct {
 // one committed to last first.
 func (r *Repo) BranchList() ([]Branch, error) {
 	out, err := r.run(nil, "for-each-ref", "--sort=-committerdate",
-		"--format=%(refname)%1f%(committerdate:unix)%1f%(subject)", "refs/heads", "refs/remotes")
+		"--format=%(refname)%1f%(committerdate:unix)%1f%(authorname)%1f%(subject)", "refs/heads", "refs/remotes")
 	if err != nil {
 		return nil, err
 	}
 	var bs []Branch
 	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.SplitN(line, "\x1f", 3)
-		if len(f) < 3 {
+		f := strings.SplitN(line, "\x1f", 4)
+		if len(f) < 4 {
 			continue
 		}
 		var b Branch
@@ -644,7 +666,7 @@ func (r *Repo) BranchList() ([]Branch, error) {
 		if s, err := strconv.ParseInt(f[1], 10, 64); err == nil {
 			b.Time = time.Unix(s, 0)
 		}
-		b.Subject = f[2]
+		b.Author, b.Subject = f[2], f[3]
 		bs = append(bs, b)
 	}
 	return bs, nil
@@ -661,8 +683,7 @@ func (r *Repo) Remotes() ([]string, error) {
 
 // Checkout checks out a commit, detaching HEAD at it.
 func (r *Repo) Checkout(rev string) error {
-	_, err := r.run(nil, "switch", "--detach", rev)
-	return err
+	return r.runOr([]string{"switch", "--detach", rev}, []string{"checkout", "--detach", rev, "--"})
 }
 
 // CreateBranch makes a branch at a commit, without checking it out.
@@ -683,24 +704,37 @@ func (r *Repo) CreateTag(name, at, message string) error {
 
 // Tags returns the names of the tags.
 func (r *Repo) Tags() ([]string, error) {
-	out, err := r.run(nil, "tag", "--list")
-	if err != nil {
-		return nil, err
-	}
-	return strings.Fields(string(out)), nil
+	refs, err := r.Refs()
+	return refs.Tags, err
 }
 
 // Switch checks out a branch, making it first when create is set.
 func (r *Repo) Switch(branch string, create bool) error {
 	args := []string{"switch", branch}
+	checkout := []string{"checkout", branch, "--"}
 	if create {
 		args = []string{"switch", "-c", branch}
+		checkout = []string{"checkout", "-b", branch, "--"}
 	}
-	_, err := r.run(nil, args...)
+	err := r.runOr(args, checkout)
 	if err != nil && !create {
 		if path, lookupErr := r.WorktreeForBranch(branch); lookupErr == nil && path != "" && path != r.Root {
 			return &WorktreeInUse{Branch: branch, Path: path}
 		}
+	}
+	return err
+}
+
+// runOr runs args, then old when the host's Git is older than its
+// command: switch and restore came in Git 2.23. Only a missing command is
+// retried, so a conflict or an occupied branch keeps the original error.
+// A checkout of a branch ends in -- so a missing branch cannot restore a
+// file.
+func (r *Repo) runOr(args, old []string) error {
+	_, err := r.run(nil, args...)
+	var gitErr *Error
+	if errors.As(err, &gitErr) && strings.HasPrefix(gitErr.Stderr, "git: '"+args[0]+"' is not a git command.") {
+		_, err = r.run(nil, old...)
 	}
 	return err
 }
@@ -835,15 +869,16 @@ func parseCommit(rec string) (Commit, bool) {
 // and tag when all is set, newest first and each after the commits made
 // on it: none before the first commit.
 func (r *Repo) Log(n int, all bool) ([]Commit, error) {
-	if _, err := r.run(nil, "rev-parse", "--verify", "-q", "HEAD"); err != nil {
-		return nil, nil
-	}
 	args := []string{"log", "-z", "--date-order", "--decorate=full", "-n", strconv.Itoa(n), commitFormat, "HEAD"}
 	if all {
 		args = append(args, "--branches", "--remotes", "--tags")
 	}
 	out, err := r.run(nil, append(args, "--")...)
 	if err != nil {
+		// Before the first commit HEAD names none: no history, no error.
+		if r.Head() == "" {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var cs []Commit
@@ -857,10 +892,15 @@ func (r *Repo) Log(n int, all bool) ([]Commit, error) {
 
 // Unpushed returns the commits, up to n of them, that HEAD has and its
 // upstream has not, by hash; without an upstream, or one gone, those no
-// branch of a remote has.
-func (r *Repo) Unpushed(n int) map[string]bool {
-	out, err := r.run(nil, "rev-list", "-n", strconv.Itoa(n), "@{upstream}..HEAD")
-	if err != nil {
+// branch of a remote has. upstream is the one the status names, "" when
+// it names none, which saves asking git for it.
+func (r *Repo) Unpushed(n int, upstream string) map[string]bool {
+	var out []byte
+	var err error
+	if upstream != "" {
+		out, err = r.run(nil, "rev-list", "-n", strconv.Itoa(n), "@{upstream}..HEAD")
+	}
+	if upstream == "" || err != nil {
 		out, err = r.run(nil, "rev-list", "-n", strconv.Itoa(n), "HEAD", "--not", "--remotes")
 	}
 	if err != nil {
@@ -947,6 +987,39 @@ func (r *Repo) Pull() error {
 	return err
 }
 
+// Sync fast-forwards from the current branch's upstream, then pushes
+// any local commits back to that same branch, regardless of push defaults.
+func (r *Repo) Sync() error {
+	out, err := r.run(nil, "for-each-ref", "--format=%(HEAD)%1f%(refname)%1f%(upstream:remotename)%1f%(upstream:remoteref)", "refs/heads")
+	if err != nil {
+		return err
+	}
+	var branch, remote, upstream string
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Split(line, "\x1f")
+		if len(f) == 4 && f[0] == "*" {
+			branch, remote, upstream = f[1], f[2], f[3]
+			break
+		}
+	}
+	if branch == "" {
+		return errors.New("check out a branch with a commit before synchronizing")
+	}
+	if remote == "" || upstream == "" {
+		return errors.New("the current branch has no upstream to synchronize with")
+	}
+	if _, err := r.run(nil, "pull", "--ff-only", "--", remote, upstream); err != nil {
+		return err
+	}
+	// FETCH_HEAD includes remote changes not yet known when sync began.
+	out, err = r.run(nil, "rev-list", "--count", "FETCH_HEAD.."+branch)
+	if err != nil || strings.TrimSpace(string(out)) == "0" {
+		return err
+	}
+	_, err = r.run(nil, "push", "--", remote, branch+":"+upstream)
+	return err
+}
+
 // Push pushes the branch to its upstream, or to a remote of the same name
 // that becomes its upstream when it has none.
 func (r *Repo) Push(branch string, hasUpstream bool) error {
@@ -991,5 +1064,125 @@ func NeedsAuth(err error) bool {
 // Init makes dir a Git repository.
 func Init(dir string) error {
 	_, err := run(dir, nil, "init")
+	return err
+}
+
+// Stage is one of the versions Git keeps of a file in conflict.
+type Stage struct {
+	Text string
+	Ok   bool // the stage has the file
+}
+
+// Stages returns the three versions Git keeps of a file in conflict: the
+// common base, ours, and theirs. A stage has no file when that version
+// has none, as the base of a file both sides added, or the side that
+// deleted it.
+func (r *Repo) Stages(path string) (base, ours, theirs Stage, err error) {
+	base, err = r.stage(1, path)
+	if err != nil {
+		return base, ours, theirs, err
+	}
+	ours, err = r.stage(2, path)
+	if err != nil {
+		return base, ours, theirs, err
+	}
+	theirs, err = r.stage(3, path)
+	return base, ours, theirs, err
+}
+
+// stage returns the text of one stage of a conflicted file.
+func (r *Repo) stage(n int, path string) (Stage, error) {
+	text, ok, err := r.Show(":"+strconv.Itoa(n), path)
+	return Stage{Text: text, Ok: ok}, err
+}
+
+// MergeSide is one side of a conflict: the ref it reads, and its name as
+// the view shows it.
+type MergeSide struct {
+	Ref  string // the commit or ref the version comes from, "" for the base
+	Name string // how the view names it, as "main" or "HEAD"
+}
+
+// MergeSides names the two sides of a conflict under the command stopped
+// for it: ours is HEAD, theirs the commit the command brings in. Without
+// one, theirs is still named.
+func (r *Repo) MergeSides(op Op) (ours, theirs MergeSide) {
+	ours = MergeSide{Ref: "HEAD", Name: "HEAD"}
+	if out, err := run(r.Root, nil, "symbolic-ref", "--short", "-q", "HEAD"); err == nil {
+		ours.Name = strings.TrimSpace(string(out))
+	}
+	switch op {
+	case OpMerge:
+		theirs = r.sideOf("MERGE_HEAD")
+	case OpCherryPick:
+		theirs = r.sideOf("CHERRY_PICK_HEAD")
+	case OpRevert:
+		theirs = r.sideOf("REVERT_HEAD")
+	case OpRebase:
+		theirs = r.sideOf("REBASE_HEAD")
+		if base := r.rebaseOnto(); base.Ref != "" {
+			ours = base
+		} else if b := r.rebaseBranch(); b != "" {
+			ours.Name = b
+		}
+	default:
+		theirs = MergeSide{Name: "Theirs"}
+	}
+	return ours, theirs
+}
+
+// sideOf names the commit the head file of a command stopped for has.
+func (r *Repo) sideOf(name string) MergeSide {
+	b, err := vfs.ReadFile(filepath.Join(r.Dir, name))
+	if err != nil {
+		return MergeSide{Name: "Theirs"}
+	}
+	hash := strings.TrimSpace(string(b))
+	if hash == "" {
+		return MergeSide{Name: "Theirs"}
+	}
+	return r.sideRef(hash)
+}
+
+func (r *Repo) sideRef(hash string) MergeSide {
+	s := MergeSide{Ref: hash, Name: ShortHash(hash)}
+	if out, err := run(r.Root, nil, "name-rev", "--name-only", "--exclude", "refs/remotes/*", hash); err == nil {
+		if name := strings.TrimSpace(string(out)); name != "" && name != "undefined" {
+			s.Name = name
+		}
+	}
+	return s
+}
+
+// rebaseBranch returns the branch a rebase stopped part way moves, "" for
+// a detached one.
+func (r *Repo) rebaseBranch() string {
+	b, err := vfs.ReadFile(filepath.Join(r.Dir, "rebase-merge", "head-name"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSpace(string(b)), "refs/heads/")
+}
+
+// rebaseOnto returns the commit currently checked out while rebase replays
+// the branch named by rebaseBranch.
+func (r *Repo) rebaseOnto() MergeSide {
+	b, err := vfs.ReadFile(filepath.Join(r.Dir, "rebase-merge", "onto"))
+	if err != nil {
+		return MergeSide{}
+	}
+	hash := strings.TrimSpace(string(b))
+	if hash == "" {
+		return MergeSide{}
+	}
+	return r.sideRef(hash)
+}
+
+// RestoreConflict puts a file back in conflict, as the command stopped
+// part way makes it: Git merges its two sides again, which brings the
+// stages and the markers of the conflict back. A file the command merged
+// with no conflict of its own comes out as the index has it.
+func (r *Repo) RestoreConflict(path string) error {
+	_, err := r.run(nil, "checkout", "-m", "--", r.Rel(path))
 	return err
 }

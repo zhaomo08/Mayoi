@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -69,19 +70,26 @@ func TestImageOpensInAViewer(t *testing.T) {
 		t.Fatalf("%d tabs", n)
 	}
 
-	// ⌘= zooms the picture, not the text.
+	// Window zoom leaves the picture's own zoom and base font size alone.
 	size := a.settings.FontSize
 	a.run("view.zoomIn")
+	hs.settle()
+	if a.settings.ZoomLevel != 1 || v.zoom != 0 || a.settings.FontSize != size {
+		t.Fatalf("window zoom %v, picture zoom %v, font %v", a.settings.ZoomLevel, v.zoom, a.settings.FontSize)
+	}
+	a.run("view.zoomReset")
+	// Image commands zoom only the picture.
+	a.run("image.zoomIn")
 	hs.settle()
 	if v.zoom != 1.5 || a.settings.FontSize != size || !tt.HasText("150%") {
 		t.Fatalf("zoom %v, font size %v", v.zoom, a.settings.FontSize)
 	}
-	a.run("view.zoomOut")
-	a.run("view.zoomOut")
+	a.run("image.zoomOut")
+	a.run("image.zoomOut")
 	if v.zoom != 2.0/3 {
 		t.Fatalf("zoomed out to %v", v.zoom)
 	}
-	a.run("view.zoomReset")
+	a.run("image.zoomReset")
 	if v.zoom != 0 {
 		t.Fatalf("reset to %v", v.zoom)
 	}
@@ -100,6 +108,12 @@ func TestImageOpensInAViewer(t *testing.T) {
 	hs.settle()
 	if v.zoom <= 4 || v.panX >= 0 {
 		t.Fatalf("scrolled to zoom %v, pan %v", v.zoom, v.panX)
+	}
+	// Scrolling that coasts on with Cmd pressed meanwhile moves it.
+	z0, y0 := v.zoom, v.panY
+	a.viewerInput(v, ui.InputEvent{Kind: ui.InputScroll, Mods: ui.Cmd, X: box.W / 2, Y: box.H / 2, DY: 10, Precise: true, Momentum: true})
+	if v.zoom != z0 || v.panY >= y0 {
+		t.Fatalf("coasting zoomed %v to %v, moved %v to %v", z0, v.zoom, y0, v.panY)
 	}
 	x0 := v.panX
 	hs.drag(cx, cy, cx+80, cy)
@@ -129,6 +143,32 @@ func TestOtherBinaryFilesStillRefuse(t *testing.T) {
 	hs.until("the error", func() bool { return a.activeViewer().loaded })
 	if v := a.activeViewer(); v.src != nil || v.err == "" || !hs.tt.HasText("Cannot show broken.png: "+v.err) {
 		t.Fatalf("err %q, texts %q", v.err, hs.tt.Texts())
+	}
+}
+
+func TestLongLineRefuses(t *testing.T) {
+	line := strings.Repeat("x", maxLineBytes)
+	for _, c := range []struct {
+		data string
+		long bool
+	}{
+		{"", false},
+		{line, false},
+		{line + "\n" + line, false},
+		{line + "x", true},
+		{"a\n" + line + "x\nb", true},
+		{line + "\n" + line + "x", true},
+	} {
+		if got := hasLongLine([]byte(c.data)); got != c.long {
+			t.Errorf("%d bytes: long %v", len(c.data), got)
+		}
+	}
+	hs := newHarness(t, true)
+	a := hs.a
+	os.WriteFile(hs.path("index.js.map"), []byte(line+"x"), 0o644)
+	a.openFile(hs.path("index.js.map"), true)
+	if len(a.errors) != 1 || !strings.Contains(a.errors[0], "too long") || len(a.column().tabs) != 0 {
+		t.Fatalf("errors %q, %d tabs", a.errors, len(a.column().tabs))
 	}
 }
 
@@ -163,7 +203,7 @@ func TestImageTabsMoveAndRestore(t *testing.T) {
 	if len(a.cols) != 2 || a.cols[1].tab().view == nil || a.cols[1].tab().view == a.cols[0].tab().view || a.cols[1].tab().view.src == nil {
 		t.Fatalf("%d columns", len(a.cols))
 	}
-	a.run("view.zoomIn")
+	a.run("image.zoomIn")
 	if a.cols[0].tab().view.zoom != 0 {
 		t.Error("zooming one column zoomed the other")
 	}
@@ -219,10 +259,45 @@ func TestSVGPreview(t *testing.T) {
 	if got := a.window.Columns[0].Tabs[0]; !got.Preview {
 		t.Errorf("preview not remembered: %+v", got)
 	}
-	a.run("view.zoomIn")
+	a.run("image.zoomIn")
 	if v.zoom != 1.5 {
 		t.Fatalf("zoom %v", v.zoom)
 	}
+	a.run("image.zoomReset")
+
+	// Pinching zooms around the pointer, as far as the picture zooms.
+	box, ok := tt.Find("Preview logo.svg")
+	if !ok {
+		t.Fatal("no pane")
+	}
+	tt.Pinch(box.X+box.W/2, box.Y+box.H/2, 2)
+	hs.settle()
+	if v.zoom != 2 {
+		t.Fatalf("pinched to %v", v.zoom)
+	}
+	// Larger than the pane, the point under the pointer stays there.
+	v.zoomBy(0)
+	v.zoomAt(24, box.W/2, box.H/2, v.paneW, v.paneH)
+	px, py := box.W/2+20, box.H/2+10
+	before := v.place(v.paneW, v.paneH)
+	tt.Pinch(box.X+px, box.Y+py, 1.25)
+	hs.settle()
+	after := v.place(v.paneW, v.paneH)
+	if v.zoom != 30 ||
+		math.Abs(float64((px-after.X)-1.25*(px-before.X))) > 0.5 || math.Abs(float64((py-after.Y)-1.25*(py-before.Y))) > 0.5 {
+		t.Fatalf("pinched to %v, %+v to %+v", v.zoom, before, after)
+	}
+	tt.Pinch(box.X+px, box.Y+py, 1e6)
+	hs.settle()
+	if v.zoom != v.maxScale() {
+		t.Fatalf("pinched in to %v, past %v", v.zoom, v.maxScale())
+	}
+	tt.Pinch(box.X+px, box.Y+py, 1e-6)
+	hs.settle()
+	if v.zoom != zoomSteps[0] {
+		t.Fatalf("pinched out to %v", v.zoom)
+	}
+	a.run("image.zoomReset")
 
 	// The preview follows the text, saved or not.
 	snap := d.buf.Snapshot()

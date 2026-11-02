@@ -7,9 +7,15 @@ area, so every column showing a file shares its text and history. This page walk
 
 ## Windows and commands
 
-**`main.go`, `cli.go`.** These manage the windows. Folders and files reach the app in two ways. The `mayoi` script hands
-them to `open` with the app's identifier, and a second Mayoi started with paths passes them on and exits. Each folder
-goes to the window that already has it, or to a new one. A file goes to the window whose folder contains it.
+**`main.go`, `ipc.go`, `internal/cli`.** These manage the windows. Folders and files reach the app in three ways. The
+`mayoi` command is the app's own executable, which on macOS the installed script runs with `MAYOI_CLI` set, and which
+on Linux is the command itself: it reads its options (`cli.Parse`), and sends them as JSON over a Unix socket in the
+data folder, which the running app listens on, to `serve` on the main thread. The reply is what to print, or what went
+wrong, and with `--wait` it comes once the files are closed. With no app running, the command starts it, and sends what
+it asked once the app answers; folders and files alone go to the app as it starts, as the Finder's do. The Finder hands
+the app folders and files to open, and a second Mayoi started with paths passes them on and exits. Each folder goes to
+the window that already has it, or to a new one. A file goes to the window whose folder contains it, and a command to
+the project whose folder contains the directory it ran in.
 
 **`projects.go`.** A `frame` is a native window, and a `desktop` a project in it, with its own `app`. A window
 holds one project, or with project tabs every one, which a rail on its left chooses among. Only the project shown is
@@ -55,9 +61,9 @@ document as one tab shows it, with its own selection, scroll position and paint 
 which is an editor or a terminal.
 
 **`columnlock.go`.** A locked column stays when empty and does not take implicit
-file opens. `fileColumn` selects the current unlocked column or the last one used,
-creating a workspace on the left if all columns are locked. Explicit drops and
-session restoration name their target column directly. Removing an empty file
+file opens or new terminal tabs. `fileColumn` selects the current unlocked column
+or the last one used, creating a workspace on the left if all columns are locked.
+Explicit drops and session restoration name their target column directly. Removing an empty file
 column keeps the last unlocked workspace and transfers width only to other
 unlocked columns, so locked columns do not expand as files close. Sessions keep
 each column's lock and the last file column along with the existing width weights.
@@ -143,7 +149,10 @@ hunks of that comparison that overlap the change are applied, and the result goe
 **`diffview.go`.** A diff tab paints its rows itself in a pane that scrolls both ways, rather than using text areas. A
 text area has no way to leave the blank rows that side by side needs across from lines the other side lacks. Only the
 rows in view are painted, each side has its own highlighter, and word changes are found for the rows in view. The
-cost is that both sides are read-only. Double-clicking opens the file to edit.
+sides are read-only but for the working tree's, which the diff edits in
+place: its typing, its undo and its save state are the file document's
+one history, shared with the file's editor (`diffedit.go`), and the other
+sides stay read-only. Double-clicking opens the file to edit.
 
 The one diff tab holds every file the status lists, staged and not, each read and compared on its own, four at a
 time, and only those within a view's height of what shows. `diffrows.go` lays the rows out again only when what they
@@ -223,11 +232,11 @@ match, then reads those and matches them here, as it does local files, so that b
 ## Theme
 
 **`theme.go`.** The palettes for the window, the code and the terminal: Mayoi's own light and
-dark, and the other themes that the `theme` setting names: The Matrix, which makes the native window dark whatever the
-`appearance` setting is, and Claude and Qoder, which have a light and a dark palette and are as the appearance is. `rain.go` paints The Matrix's digital rain behind the welcome page,
+dark, and the other themes that the `theme` setting names: The Matrix, Purple Gold and the Halloween themes, which make the native window dark whatever the
+`appearance` setting is, and Claude, Qoder, Grok Bot and Cursor, which have a light and a dark palette and are as the appearance is. A palette with a `card` radius, Qoder's, has `workbench.go` lay the editors and the bottom panel out as a card in a grained shell of chrome, with no lines between the shell's parts and splitters lit around the pointer. `rain.go` paints The Matrix's digital rain behind the welcome page,
 worked out from the time alone, a step every 70 ms. `mascot.go` places a theme's character on the welcome page and in
 the status bar, its pose also worked out from the time, asking for a frame only when the pose next changes: `clawd.go`
-paints Claude's from cells, and `qoduck.go` Qoder's duck from vector shapes. It also styles what floats over
+paints Claude's from cells, `qoduck.go` Qoder's duck from vector shapes, with the prop `mascot.go` picks from the work going on for the status bar's, `grokbot.go` Grok Bot's face from them too, and `halloween.go` the Halloween themes' pumpkin, cauldron and bat from cells, `rabbit.go` The Matrix's White Rabbit from them too; Cursor and Purple Gold have none. `clauding.go` draws Claude's welcome page as Claude Code's welcome box, and its spinner in the status bar while Git works, its glyph, the light on its word and its seconds painted from the time, a step every 120 ms. It also styles what floats over
 the window, dialogs and the boxes over an editor, and fades them in as they show.
 
 ## Performance

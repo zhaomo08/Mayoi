@@ -43,6 +43,12 @@ type Settings struct {
 	seq   uint64
 	wmu   sync.Mutex
 	wrote uint64
+	// gen counts the changes of the preferences, as Changed and SetPrefs
+	// tell of them, prefsSeen is the preferences as gen last counted, and
+	// prefsChanged is called with each change Changed tells of.
+	gen          uint64
+	prefsSeen    []byte
+	prefsChanged func()
 }
 
 // State is what Mayoi keeps itself, not what a person chooses: the
@@ -89,6 +95,8 @@ type legacy struct {
 // Prefs are the settings a person chooses, which an edit of the file
 // applies as Mayoi runs: not the windows and the layout it keeps itself.
 type Prefs struct {
+	// ZoomLevel scales all window content by 1.2 to this power.
+	ZoomLevel  float32 `json:"zoomLevel"`
 	FontSize   float32 `json:"fontSize"`
 	FontFamily string  `json:"fontFamily"`
 	// FontWeight is how heavy the code's text is, from 100 to 900.
@@ -113,9 +121,47 @@ type Prefs struct {
 	// scrolling sideways to them. A tab may choose otherwise, until this
 	// changes: Settings.WrapGen counts its changes.
 	WordWrap bool `json:"wordWrap,omitempty"`
+	// EditorAgentContext offers selection actions in ordinary files to
+	// collect code snippets and send them with review comments.
+	EditorAgentContext bool `json:"editorAgentContext,omitempty"`
+	// PreviewMermaid draws the blocks of Mermaid of a Markdown preview as
+	// the diagrams they make, rather than their source.
+	PreviewMermaid bool `json:"previewMermaid"`
+	// PreviewMath draws the TeX math of a Markdown preview, between $ and
+	// $, $$ and $$, or in a block of math, as the formulas it makes.
+	PreviewMath bool `json:"previewMath"`
+	// MarkdownPreview opens a Markdown file, .mdx included, rendered
+	// rather than as text; ⇧⌘V still shows the text.
+	MarkdownPreview bool `json:"markdownPreview,omitempty"`
 	// DiffLayout is how diffs show: "split" side by side, "inline" in
 	// one column, or "" side by side when they are wide enough to.
 	DiffLayout string `json:"diffLayout,omitempty"`
+	// DiffCrossFiles is how a diff's change navigation crosses into
+	// another file at the first or last change of one: "" says where it
+	// is and crosses on one more step that way, "always" crosses at once,
+	// and "never" stays in the file.
+	DiffCrossFiles string `json:"diffCrossFiles,omitempty"`
+	// DiffHighlight is what a diff shows of a line that changed: "line"
+	// no more than the line, "char" the characters that changed, or ""
+	// the words that changed. What it shows is only so: a diff's block
+	// actions are for its hunks of lines, whatever it highlights.
+	DiffHighlight string `json:"diffHighlight,omitempty"`
+	// DiffWhitespace controls the comparison: "eol" ignores line-end
+	// whitespace, "all" ignores whitespace, and "blank" also treats
+	// whitespace-only lines as empty. Empty is exact comparison.
+	DiffWhitespace string `json:"diffWhitespace,omitempty"`
+	// DiffContext is how many unchanged lines a diff shows around a
+	// change, the rest folded away.
+	DiffContext int `json:"diffContext"`
+	// DiffSyncScroll has the sides of a side-by-side diff scroll
+	// together. Without it, each side scrolls on its own, and scrolls
+	// together again from where the right one was.
+	DiffAlignedRows bool `json:"diffAlignedRows"`
+	DiffSyncScroll  bool `json:"diffSyncScroll"`
+	// MergeAutoApply puts the changes of a conflicted file that no
+	// conflict holds in its result when the merge view opens. The
+	// conflicts stand, for the hand to decide.
+	MergeAutoApply bool `json:"mergeAutoApply"`
 	// ScmTree lists the changes in source control in a tree of their
 	// folders, rather than by path.
 	ScmTree bool `json:"scmTree,omitempty"`
@@ -135,16 +181,27 @@ type Prefs struct {
 	VimCtrlKeys bool `json:"vimCtrlKeys,omitempty"`
 	// Appearance is "light", "dark", or "" to follow the system.
 	Appearance string `json:"appearance,omitempty"`
-	// Theme is "matrix" for The Matrix, which is always dark, "claude" for
-	// Claude or "qoder" for Qoder, light or dark as Appearance is, or ""
-	// for Mayoi's own.
+	// Theme is "matrix" for The Matrix, "purplegold" for Purple Gold,
+	// "pumpkin" for Jack-o'-Lantern, "witchsbrew" for Witch's Brew or
+	// "bloodmoon" for Blood Moon, which are always dark, "claude" for Claude, "qoder" for Qoder,
+	// "grokbot" for Grok Bot or "cursor" for Cursor, light or dark as
+	// Appearance is, or "" for Mayoi's own.
 	Theme string `json:"theme,omitempty"`
 	// SidebarRight puts the sidebar right of the editors, rather than left.
 	SidebarRight bool `json:"sidebarRight,omitempty"`
+	// ExplorerCompactFolders shows a chain of single-child folders on one
+	// row in the Explorer, with its names separated by slashes.
+	ExplorerCompactFolders bool `json:"explorerCompactFolders,omitempty"`
 	// PanelPosition is where the terminal panel is: "" or "bottom"
 	// below the editors, "left" or "right" at the window's side, past
 	// the sidebar.
 	PanelPosition string `json:"panelPosition,omitempty"`
+	// TerminalLocation is where a new terminal opens: "" in the panel, or
+	// "editor" in a tab of the editor area.
+	TerminalLocation string `json:"terminalLocation,omitempty"`
+	// TerminalBackend is what runs a terminal's shell: "" Mayoi itself,
+	// or "hc" a terminal of herdr-core, which outlives the window.
+	TerminalBackend string `json:"terminalBackend,omitempty"`
 	// ProjectTabs keeps the folders open in one window, a rail on its left
 	// choosing which shows, rather than a window for each.
 	ProjectTabs bool `json:"projectTabs,omitempty"`
@@ -157,6 +214,10 @@ type Prefs struct {
 	// AIModel is the model of Mon's AI gateway that writes commit
 	// messages, "" for Mayoi's choice.
 	AIModel string `json:"aiModel,omitempty"`
+	// CrashReports is what Mayoi does with the report of a crash at the
+	// next launch: "" asks whether to send it to Mon, "always" sends it
+	// and "never" doesn't.
+	CrashReports string `json:"crashReports,omitempty"`
 	// SyncIgnored is what settings sync leaves on this machine: keys of
 	// the preferences, "settings.json" for all of them, and
 	// "keybindings.json" for the keyboard shortcuts.
@@ -198,12 +259,17 @@ const (
 	SyncKeybindings = "keybindings.json"
 )
 
+// MachineKept are the keys of the preferences settings sync leaves on
+// this machine whatever SyncIgnored says, as a development build's looks,
+// which would otherwise change the everyday Mayoi's.
+var MachineKept []string
+
 // SyncKept returns the keys of the preferences settings sync leaves on
 // this machine, and whether it leaves the keyboard shortcuts.
 func (p Prefs) SyncKept() (keys []string, keybindings bool) {
 	all := slices.Contains(p.SyncIgnored, SyncSettings)
 	for _, k := range PrefKeys {
-		if all && !slices.Contains(unsynced, k) || slices.Contains(p.SyncIgnored, k) {
+		if all && !slices.Contains(unsynced, k) || slices.Contains(p.SyncIgnored, k) || slices.Contains(MachineKept, k) {
 			keys = append(keys, k)
 		}
 	}
@@ -242,6 +308,11 @@ type Session struct {
 	FileColumn   int      `json:"fileColumn,omitempty"`
 	PanelOpen    bool     `json:"panelOpen,omitempty"`
 	TerminalOpen bool     `json:"terminalOpen,omitempty"`
+	// PanelTerms are the addresses in herdr-core of the panel's terminals
+	// whose shells run there, which the next start attaches to again, and
+	// PanelTerm the one of them the panel showed.
+	PanelTerms []string `json:"panelTerms,omitempty"`
+	PanelTerm  int      `json:"panelTerm,omitempty"`
 	// Expanded are the explorer's folders showing their files, relative to
 	// the window's folder.
 	Expanded []string `json:"expanded,omitempty"`
@@ -256,6 +327,8 @@ type Session struct {
 // the comment quotes, a diff when Diff is set, and Lines the lines as they
 // were, which the comment finds again as the file changes.
 type ReviewNote struct {
+	// Context keeps a code snippet even when it has no comment.
+	Context bool     `json:"context,omitempty"`
 	Path    string   `json:"path"`
 	Commit  string   `json:"commit,omitempty"`
 	Staged  bool     `json:"staged,omitempty"`
@@ -279,10 +352,17 @@ type Layout struct {
 	SidebarWidth  float32 `json:"sidebarWidth,omitempty"`
 	PanelHeight   float32 `json:"panelHeight,omitempty"`
 	PanelWidth    float32 `json:"panelWidth,omitempty"`
+	// CommitFilesOpen shows the panel of the files of a commit's tab, hidden
+	// at first, and CommitFilesWidth is how wide it is.
+	CommitFilesOpen  bool    `json:"commitFilesOpen,omitempty"`
+	CommitFilesWidth float32 `json:"commitFilesWidth,omitempty"`
+	// ScmChangesRatio is the share of the multi-repository view for changes.
+	// Zero fits the changes to their content, up to half the view.
+	ScmChangesRatio float32 `json:"scmChangesRatio,omitempty"`
 }
 
 // DefaultLayout is the layout of a first launch.
-var DefaultLayout = Layout{SidebarWidth: 248, PanelHeight: 260, PanelWidth: 400}
+var DefaultLayout = Layout{SidebarWidth: 248, PanelHeight: 260, PanelWidth: 400, CommitFilesWidth: 240}
 
 // Normalize keeps the layout in its bounds, as base has it where it has
 // none, as a session an older version kept.
@@ -293,8 +373,12 @@ func (l *Layout) Normalize(base Layout) {
 	if l.PanelWidth == 0 {
 		l.PanelWidth = base.PanelWidth
 	}
+	if l.CommitFilesWidth == 0 {
+		l.CommitFilesWidth = base.CommitFilesWidth
+	}
 	l.SidebarWidth = clamp(l.SidebarWidth, 160, 600)
 	l.PanelWidth = clamp(l.PanelWidth, 160, 2000)
+	l.CommitFilesWidth = clamp(l.CommitFilesWidth, 140, 800)
 	l.PanelHeight = clamp(l.PanelHeight, 100, 2000)
 }
 
@@ -307,10 +391,12 @@ type Column struct {
 }
 
 // Tab is a tab: the file it shows, or a terminal, which the next
-// start opens anew.
+// start opens anew, or attaches to again while its shell runs in
+// herdr-core at HC.
 type Tab struct {
 	File     string `json:"file,omitempty"`
 	Terminal bool   `json:"terminal,omitempty"`
+	HC       string `json:"hc,omitempty"`
 	// Preview is set for an SVG shown as a picture rather than as text.
 	Preview bool `json:"preview,omitempty"`
 	// Transient is set for the preview tab of its column, which the next
@@ -334,14 +420,24 @@ type Tab struct {
 	ScrollX float32 `json:"scrollX,omitempty"`
 	ScrollY float32 `json:"scrollY,omitempty"`
 	Wrap    *bool   `json:"wrap,omitempty"`
+	// Untitled is the file in the untitled folder beside the settings that
+	// keeps the text of an untitled document as the app quit, and Number
+	// the number of its name.
+	Untitled string `json:"untitled,omitempty"`
+	Number   int    `json:"number,omitempty"`
 }
+
+// MaxDiffContext is as many unchanged lines around a change as a diff
+// shows, the rest folded away.
+const MaxDiffContext = 100
 
 // Default is the settings of a first launch.
 func Default() *Settings {
 	return &Settings{
 		Prefs: Prefs{
 			FontSize: 13, FontFamily: "monospace", FontWeight: 400, LineHeight: 1.55,
-			AutoSave: true, Blame: true, TerminalCopyOnSelect: true,
+			AutoSave: true, Blame: true, TerminalCopyOnSelect: true, PreviewMermaid: true, PreviewMath: true,
+			DiffAlignedRows: true, DiffContext: 3, DiffSyncScroll: true, MergeAutoApply: true,
 		},
 	}
 }
@@ -409,32 +505,56 @@ func (s *Settings) layOut(old oldLayout) {
 	}
 }
 
+// Zoom levels keep the content within the UI's supported scale range.
+const MinZoomLevel, MaxZoomLevel = -5, 8
+
 // normalize keeps the preferences in their bounds, the defaults where the
 // file leaves them out or makes no sense.
-func (s *Settings) normalize() {
-	s.FontSize = clamp(s.FontSize, 9, 28)
-	if strings.TrimSpace(s.FontFamily) == "" {
-		s.FontFamily = "monospace"
+func (s *Settings) normalize() { s.Prefs.normalize() }
+
+func (p *Prefs) normalize() {
+	p.ZoomLevel = clamp(p.ZoomLevel, MinZoomLevel, MaxZoomLevel)
+	p.FontSize = clamp(p.FontSize, 9, 28)
+	if strings.TrimSpace(p.FontFamily) == "" {
+		p.FontFamily = "monospace"
 	}
-	if s.FontWeight == 0 {
-		s.FontWeight = 400
+	if p.FontWeight == 0 {
+		p.FontWeight = 400
 	}
-	s.FontWeight = min(max(s.FontWeight, 100), 900)
-	if s.LineHeight == 0 {
-		s.LineHeight = 1.55
+	p.FontWeight = min(max(p.FontWeight, 100), 900)
+	if p.LineHeight == 0 {
+		p.LineHeight = 1.55
 	}
-	s.LineHeight = clamp(s.LineHeight, 1, 3)
-	s.FontFeatures = slices.DeleteFunc(s.FontFeatures, func(f string) bool { return strings.TrimSpace(f) == "" })
-	if s.TerminalFontSize != 0 {
-		s.TerminalFontSize = clamp(s.TerminalFontSize, 9, 28)
+	p.LineHeight = clamp(p.LineHeight, 1, 3)
+	p.FontFeatures = slices.DeleteFunc(p.FontFeatures, func(f string) bool { return strings.TrimSpace(f) == "" })
+	if p.TerminalFontSize != 0 {
+		p.TerminalFontSize = clamp(p.TerminalFontSize, 9, 28)
 	}
+	switch p.DiffHighlight {
+	case "line", "char":
+	default:
+		p.DiffHighlight = ""
+	}
+	switch p.DiffWhitespace {
+	case "eol", "all", "blank":
+	default:
+		p.DiffWhitespace = ""
+	}
+	p.DiffContext = min(max(p.DiffContext, 0), MaxDiffContext)
+
 	// "" and "bottom" are the same panel position.
-	if s.PanelPosition != "left" && s.PanelPosition != "right" {
-		s.PanelPosition = ""
+	if p.PanelPosition != "left" && p.PanelPosition != "right" {
+		p.PanelPosition = ""
+	}
+	if p.TerminalLocation != "editor" {
+		p.TerminalLocation = ""
+	}
+	if p.TerminalBackend != "hc" {
+		p.TerminalBackend = ""
 	}
 	// The themes were appearances once.
-	if s.Appearance == "matrix" || s.Appearance == "claude" {
-		s.Theme, s.Appearance = s.Appearance, ""
+	if p.Appearance == "matrix" || p.Appearance == "claude" {
+		p.Theme, p.Appearance = p.Appearance, ""
 	}
 }
 
@@ -568,18 +688,42 @@ func clamp(v, lo, hi float32) float32 { return max(lo, min(v, hi)) }
 
 // Changed saves the settings a moment after the last change.
 func (s *Settings) Changed() {
-	if s.path == "" {
-		return
+	prefs, state := s.Encode()
+	s.mu.Lock()
+	var fn func()
+	if !bytes.Equal(prefs, s.prefsSeen) {
+		s.gen++
+		s.prefsSeen = prefs
+		fn = s.prefsChanged
 	}
+	if s.path != "" {
+		if s.timer != nil {
+			s.timer.Stop()
+		}
+		s.seq++
+		seq := s.seq
+		s.timer = time.AfterFunc(400*time.Millisecond, func() { s.write(seq, prefs, state) })
+	}
+	s.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// Gen counts the changes of the preferences: what is made of them, as
+// the preferences of a folder over them, is made again as it changes.
+func (s *Settings) Gen() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.timer != nil {
-		s.timer.Stop()
-	}
-	prefs, state := s.Encode()
-	s.seq++
-	seq := s.seq
-	s.timer = time.AfterFunc(400*time.Millisecond, func() { s.write(seq, prefs, state) })
+	return s.gen
+}
+
+// OnPrefsChanged calls fn each time Changed finds the preferences
+// changed, as a menu changes one, on the goroutine of Changed.
+func (s *Settings) OnPrefsChanged(fn func()) {
+	s.mu.Lock()
+	s.prefsChanged = fn
+	s.mu.Unlock()
 }
 
 // Flush saves the settings now, as the app quits.
@@ -710,6 +854,9 @@ func (s *Settings) SetPrefs(p Prefs) (old Prefs) {
 	if p.WordWrap != old.WordWrap {
 		s.WrapGen++
 	}
+	s.mu.Lock()
+	s.gen++
+	s.mu.Unlock()
 	return old
 }
 

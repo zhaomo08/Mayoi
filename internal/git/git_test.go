@@ -1,9 +1,11 @@
 package git
 
 import (
+	"mayoi/internal/cli"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -183,6 +185,55 @@ func TestStageUnstageDiscardCommit(t *testing.T) {
 	}
 }
 
+// A hook finds the commands of the user's shell, which Mayoi opened from
+// the Finder takes as it starts (issue 82).
+func TestCommitHookFindsShellCommands(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts")
+	}
+	r, git := repo(t)
+	tools := t.TempDir()
+	write(t, tools, "pnpm", "#!/bin/sh\nexit 0\n")
+	os.Chmod(filepath.Join(tools, "pnpm"), 0o755)
+	sh := filepath.Join(t.TempDir(), "zsh")
+	write(t, filepath.Dir(sh), "zsh", "#!/bin/sh\nPATH="+tools+":$PATH; export PATH; shift; exec /bin/sh -c \"$1\"\n")
+	os.Chmod(sh, 0o755)
+	t.Setenv("SHELL", sh)
+	t.Setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git on the system's path")
+	}
+	write(t, r.Root, ".git/hooks/pre-commit", "#!/bin/sh\npnpm lint-staged\n")
+	os.Chmod(filepath.Join(r.Root, ".git", "hooks", "pre-commit"), 0o755)
+	write(t, r.Root, "c.txt", "sea\n")
+	git("add", "c.txt")
+	if err := r.Commit("before", false); err == nil {
+		t.Fatal("the hook found pnpm on the system's path")
+	}
+	t.Setenv("PATH", strings.Join(cli.ShellPath(), string(os.PathListSeparator)))
+	if err := r.Commit("after", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRefs: one read names the branches and the tags apart, a tag named as
+// a branch too, and says whether a stash is kept.
+func TestRefs(t *testing.T) {
+	r, git := repo(t)
+	git("branch", "topic")
+	git("tag", "topic")
+	git("tag", "v1")
+	refs, err := r.Refs()
+	if err != nil || !slices.Equal(refs.Branches, []string{"main", "topic"}) || !slices.Equal(refs.Tags, []string{"topic", "v1"}) || refs.Stash {
+		t.Fatalf("refs %+v %v", refs, err)
+	}
+	write(t, r.Root, "a.txt", "changed\n")
+	git("stash", "-q")
+	if refs, _ = r.Refs(); !refs.Stash {
+		t.Errorf("no stash in %+v", refs)
+	}
+}
+
 func TestBranchesAndBlame(t *testing.T) {
 	r, _ := repo(t)
 	if err := r.Switch("topic", true); err != nil {
@@ -330,15 +381,22 @@ func TestLogAndCommitFiles(t *testing.T) {
 		t.Errorf("info %+v %v", info, err)
 	}
 	// Without an upstream, no remote has them.
-	if u := r.Unpushed(10); len(u) != 2 {
+	if u := r.Unpushed(10, ""); len(u) != 2 {
 		t.Errorf("unpushed without an upstream %v", u)
 	}
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	git("init", "-q", "--bare", remote)
 	git("remote", "add", "origin", remote)
 	git("push", "-q", "origin", cs[1].Hash+":refs/heads/main")
-	if u := r.Unpushed(10); len(u) != 1 || !u[cs[0].Hash] {
+	if u := r.Unpushed(10, ""); len(u) != 1 || !u[cs[0].Hash] {
 		t.Errorf("unpushed of a branch not published %v", u)
+	}
+	// With one, those it has not, even as other remotes' branches have them.
+	git("fetch", "-q", "origin")
+	git("branch", "-q", "-u", "origin/main")
+	git("push", "-q", "origin", cs[0].Hash+":refs/heads/other")
+	if u := r.Unpushed(10, "origin/main"); len(u) != 1 || !u[cs[0].Hash] {
+		t.Errorf("unpushed of a branch with an upstream %v", u)
 	}
 }
 
@@ -617,6 +675,158 @@ func TestRevertReset(t *testing.T) {
 	st, _ = r.Status()
 	if r.Head() != second || len(st.Entries) != 0 {
 		t.Errorf("soft: %v", st.Entries)
+	}
+}
+
+// conflictRepo makes a work tree where merging side into main stops for
+// a conflict of a.txt, which both branches changed.
+func conflictRepo(t *testing.T) (*Repo, func(args ...string)) {
+	r, git := repo(t)
+	git("checkout", "-qb", "side")
+	write(t, r.Root, "a.txt", "one\nside\nthree\n")
+	git("commit", "-qam", "theirs")
+	git("checkout", "-q", "main")
+	write(t, r.Root, "a.txt", "one\nours\nthree\n")
+	git("commit", "-qam", "ours")
+	cmd := exec.Command("git", "-C", r.Root, "merge", "side")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("the merge went clean: %s", out)
+	}
+	return r, git
+}
+
+func TestStages(t *testing.T) {
+	r, _ := conflictRepo(t)
+	a := filepath.Join(r.Root, "a.txt")
+	base, ours, theirs, err := r.Stages(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !base.Ok || base.Text != "one\ntwo\nthree\n" {
+		t.Errorf("base %q ok %v", base.Text, base.Ok)
+	}
+	if !ours.Ok || ours.Text != "one\nours\nthree\n" {
+		t.Errorf("ours %q ok %v", ours.Text, ours.Ok)
+	}
+	if !theirs.Ok || theirs.Text != "one\nside\nthree\n" {
+		t.Errorf("theirs %q ok %v", theirs.Text, theirs.Ok)
+	}
+}
+
+func TestStagesAdded(t *testing.T) {
+	r, git := repo(t)
+	git("checkout", "-qb", "side")
+	write(t, r.Root, "new.txt", "side\n")
+	git("add", "new.txt")
+	git("commit", "-qm", "theirs")
+	git("checkout", "-q", "main")
+	write(t, r.Root, "new.txt", "ours\n")
+	git("add", "new.txt")
+	git("commit", "-qm", "ours")
+	if out, err := exec.Command("git", "-C", r.Root, "merge", "side").CombinedOutput(); err == nil {
+		t.Fatalf("the merge went clean: %s", out)
+	}
+	base, ours, theirs, err := r.Stages(filepath.Join(r.Root, "new.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Ok {
+		t.Errorf("a file both sides added has no base, got %q", base.Text)
+	}
+	if !ours.Ok || ours.Text != "ours\n" || !theirs.Ok || theirs.Text != "side\n" {
+		t.Errorf("ours %q(%v) theirs %q(%v)", ours.Text, ours.Ok, theirs.Text, theirs.Ok)
+	}
+}
+
+func TestMergeSides(t *testing.T) {
+	r, _ := conflictRepo(t)
+	ours, theirs := r.MergeSides(OpMerge)
+	if ours.Name != "main" || ours.Ref != "HEAD" {
+		t.Errorf("ours %+v", ours)
+	}
+	if theirs.Name != "side" {
+		t.Errorf("theirs %+v", theirs)
+	}
+	// Without a command stopped for a conflict, the sides still say who
+	// they are.
+	ours, theirs = r.MergeSides("")
+	if ours.Name != "main" || theirs.Name == "" {
+		t.Errorf("without an op: %+v %+v", ours, theirs)
+	}
+}
+
+func TestRestoreConflict(t *testing.T) {
+	r, git := conflictRepo(t)
+	// The conflict resolved and staged: restoring it brings the stages
+	// and the markers of the conflict back.
+	write(t, r.Root, "a.txt", "one\nboth\nthree\n")
+	git("add", "a.txt")
+	if err := r.RestoreConflict(filepath.Join(r.Root, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	base, ours, theirs, err := r.Stages(filepath.Join(r.Root, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !base.Ok || !ours.Ok || !theirs.Ok {
+		t.Fatalf("stages back: base %v ours %v theirs %v", base.Ok, ours.Ok, theirs.Ok)
+	}
+	b, _ := os.ReadFile(filepath.Join(r.Root, "a.txt"))
+	if !strings.Contains(string(b), "<<<<<<<") {
+		t.Errorf("no markers back: %q", b)
+	}
+	// A file the command merged with no conflict stays as it is.
+	before, _ := os.ReadFile(filepath.Join(r.Root, "b.txt"))
+	if err := r.RestoreConflict(filepath.Join(r.Root, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(filepath.Join(r.Root, "b.txt"))
+	if string(before) != string(after) {
+		t.Errorf("b.txt changed: %q to %q", before, after)
+	}
+}
+
+func TestMergeSidesRebase(t *testing.T) {
+	r, git := repo(t)
+	write(t, r.Root, "a.txt", "one\nside\nthree\n")
+	git("checkout", "-qb", "side")
+	git("commit", "-qam", "side")
+	git("checkout", "-q", "main")
+	write(t, r.Root, "a.txt", "one\nours\nthree\n")
+	git("commit", "-qam", "ours")
+	write(t, r.Root, "b.txt", "more\n")
+	git("add", "b.txt")
+	git("commit", "-qm", "main only")
+	if out, err := exec.Command("git", "-C", r.Root, "rebase", "side").CombinedOutput(); err == nil {
+		t.Fatalf("the rebase went clean: %s", out)
+	}
+	ours, theirs := r.MergeSides(OpRebase)
+	if ours.Name != "side" {
+		t.Errorf("ours %+v, want the rebase base", ours)
+	}
+	if theirs.Name == "" || theirs.Name == "Theirs" {
+		t.Errorf("theirs %+v, want the commit it applies", theirs)
+	}
+}
+
+func TestMergeSidesCherryPick(t *testing.T) {
+	r, git := repo(t)
+	write(t, r.Root, "a.txt", "one\nside\nthree\n")
+	git("checkout", "-qb", "side")
+	git("commit", "-qam", "side")
+	side := r.Head()
+	git("checkout", "-q", "main")
+	write(t, r.Root, "a.txt", "one\nours\nthree\n")
+	git("commit", "-qam", "ours")
+	if out, err := exec.Command("git", "-C", r.Root, "cherry-pick", side).CombinedOutput(); err == nil {
+		t.Fatalf("the cherry-pick went clean: %s", out)
+	}
+	ours, theirs := r.MergeSides(OpCherryPick)
+	if ours.Name != "main" {
+		t.Errorf("ours %+v", ours)
+	}
+	if theirs.Name == "" || theirs.Name == "Theirs" {
+		t.Errorf("theirs %+v, want the commit picked", theirs)
 	}
 }
 

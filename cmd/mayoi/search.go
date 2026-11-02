@@ -19,6 +19,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 
+	"mayoi/internal/bg"
 	"mayoi/internal/remote"
 	"mayoi/internal/vfs"
 	"mayoi/internal/workspace"
@@ -103,7 +104,10 @@ type searchState struct {
 	watched map[string]bool
 
 	collapsed map[string]bool // the files folded, by rel
-	rows      []searchRow
+	// unfolded is when each file unfolded last did, by rel, whose matches
+	// fade in.
+	unfolded map[string]time.Time
+	rows     []searchRow
 	// version counts the changes of files and collapsed, and rowsOf is the
 	// version rows were made for.
 	version, rowsOf int
@@ -134,6 +138,17 @@ func (a *app) showSearch(replace bool) {
 	a.window.SidebarClosed, a.window.SidebarView = false, "search"
 	a.settings.Changed()
 	s.input.Focus()
+}
+
+// searchInFolder shows search with its files to include set to a folder,
+// rel to the root, and searches it again for the query.
+func (a *app) searchInFolder(rel string) {
+	s := &a.inFiles
+	s.include, s.details = "/"+rel+"/**", true
+	a.showSearch(false)
+	if s.query != "" {
+		a.startSearch()
+	}
 }
 
 // resetSearch forgets the results, as for another folder, keeping the
@@ -230,7 +245,8 @@ func (a *app) runSearch(gen int, re *regexp.Regexp, fold foldQuery, rels []strin
 		go a.searchRemote(gen, root, re, fold, rels, texts, cancel, partial, pre)
 		return
 	}
-	go func() {
+	bg.Go(func() {
+		defer recoverCrash()
 		var (
 			mu    sync.Mutex
 			batch []*searchFile
@@ -250,6 +266,7 @@ func (a *app) runSearch(gen int, re *regexp.Regexp, fold foldQuery, rels []strin
 		}
 		for range max(1, min(runtime.GOMAXPROCS(0), 8, len(rels))) {
 			wg.Go(func() {
+				defer recoverCrash()
 				for !cancel.Load() {
 					i := int(next.Add(1) - 1)
 					if i >= len(rels) {
@@ -285,7 +302,7 @@ func (a *app) runSearch(gen int, re *regexp.Regexp, fold foldQuery, rels []strin
 			break
 		}
 		flush(true)
-	}()
+	})
 }
 
 // searchFileText finds re in a file, or in its text in texts: nil when
@@ -584,11 +601,14 @@ func (a *app) searchRows() []searchRow {
 // preview tab, the keyboard staying in the results, or with keep in a tab
 // of its own with the keyboard.
 func (a *app) openMatch(f *searchFile, m searchMatch, keep bool) {
-	if keep {
-		a.openFile(f.path, true)
-	} else {
-		a.previewFile(f.path)
-	}
+	// The match is in the text, whatever markdownPreview says.
+	a.openText(func() {
+		if keep {
+			a.openFile(f.path, true)
+		} else {
+			a.previewFile(f.path)
+		}
+	})
 	a.selectMatch(f.path, m)
 }
 
@@ -598,6 +618,10 @@ func (a *app) selectMatch(path string, m searchMatch) {
 	if d == nil || d.path != path {
 		return
 	}
+	if d.preview != nil {
+		// The match is in the text.
+		a.setPreview(d, false)
+	}
 	snap := d.buf.Snapshot()
 	if m.line >= snap.LineCount() {
 		return
@@ -605,6 +629,7 @@ func (a *app) selectMatch(path string, m searchMatch) {
 	s, e := snap.LineRange(m.line)
 	start := min(s+m.col, e)
 	d.selectRange(start, min(start+utf8.RuneCountInString(m.text), snap.Len()), true)
+	d.lightLanding()
 }
 
 // replacement is a match of a file's text and what replaces it, by byte
@@ -724,7 +749,7 @@ func (a *app) replaceMatches(files []*searchFile, only *searchMatch) {
 		a.toldReplaced(n, changed, only != nil)
 		return
 	}
-	go func() {
+	bg.Go(func() {
 		var failed []string
 		for _, path := range closed {
 			k, err := replaceInFile(path, re, tmpl, only)
@@ -743,7 +768,7 @@ func (a *app) replaceMatches(files []*searchFile, only *searchMatch) {
 			a.searchAgain(closed)
 			a.toldReplaced(n, changed, only != nil)
 		})
-	}()
+	})
 }
 
 // toldReplaced says how many matches a replacement replaced, or that
@@ -797,7 +822,7 @@ func (a *app) searchView(c *ui.Context) {
 	s := &a.inFiles
 	if k := s.searchKey(); k != s.key {
 		s.key, s.typedAt, s.waiting = k, time.Now(), true
-		time.AfterFunc(searchPause, a.invalidate)
+		bg.AfterFunc(searchPause, a.invalidate)
 	}
 	if s.query != "" && (s.running || s.waiting) {
 		ui.Progress(c.Key("search-activity"), -1).Height(2).Radius(0).Label(locales.SearchSearching())
@@ -823,7 +848,11 @@ func (a *app) searchView(c *ui.Context) {
 					a.optionToggle(c, iconRegex, locales.FindRegex(), &s.regex)
 				})
 				if in.Submitted() {
-					a.startSearch()
+					if in.SubmittedMods()&ui.Shift != 0 {
+						a.searchStepBack()
+					} else {
+						a.startSearch()
+					}
 				}
 				if in.Shortcut(0, ui.KeyDown) && len(s.files) > 0 {
 					s.row = min(1, len(a.searchRows())-1)
@@ -989,6 +1018,35 @@ func (a *app) searchResults(c *ui.Context) {
 	}
 }
 
+// searchStepBack chooses the match before the one chosen in the results,
+// the last from the first or from none, and shows it in the preview tab,
+// leaving the keyboard in the query. Results not of the query yet are
+// searched for anew instead, as Enter does; a search under way is gone
+// back through as far as it has found.
+func (a *app) searchStepBack() {
+	s := &a.inFiles
+	rows := a.searchRows()
+	if s.waiting || s.key != s.searchKey() || s.re == nil && !s.running {
+		a.startSearch()
+		return
+	}
+	if firstMatchRow(rows) < 0 {
+		return
+	}
+	i := min(s.row, len(rows))
+	for {
+		if i--; i < 0 {
+			i = len(rows) - 1
+		}
+		if rows[i].match >= 0 {
+			break
+		}
+	}
+	s.row = i
+	s.list.ScrollIntoView(i)
+	a.previewRow()
+}
+
 // previewRow shows the match of the row chosen in the results in the
 // preview tab.
 func (a *app) previewRow() {
@@ -1007,7 +1065,7 @@ func (a *app) searchHint(c *ui.Context) {
 	p := a.pal
 	ui.Column(c).Padding(10, 14, 0, 26).Gap(6).Children(func() {
 		ui.Text(c, locales.SearchHintFind()).FontSize(12).TextColor(p.muted)
-		for _, k := range [][2]string{{"↓", locales.SearchHintResults()}, {"⏎", locales.SearchHintOpen()}, {a.keyHint("edit.replaceInFiles"), locales.FindReplace()}} {
+		for _, k := range [][2]string{{"↓", locales.SearchHintResults()}, {"⏎", locales.SearchHintOpen()}, {"⇧⏎", locales.SearchHintPrev()}, {a.keyHint("edit.replaceInFiles"), locales.FindReplace()}} {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, k[0]).FontSize(11).TextColor(p.muted).Padding(0, 5).Radius(4).Background(p.hover).MinWidth(22).
 					TextAlign(ui.Center)
@@ -1051,11 +1109,18 @@ func (a *app) searchHeader(c *ui.Context, f *searchFile, action *func()) {
 		ui.Text(c, fmt.Sprint(len(f.matches))).FontSize(10.5).TextColor(p.muted).Padding(0, 5).Radius(8).Background(p.hover)
 	})
 	if clicked && *action == nil {
+		now := c.Now()
 		*action = func() {
 			if s.collapsed == nil {
 				s.collapsed = map[string]bool{}
 			}
 			s.collapsed[f.rel] = !s.collapsed[f.rel]
+			if !s.collapsed[f.rel] {
+				if s.unfolded == nil {
+					s.unfolded = map[string]time.Time{}
+				}
+				s.unfolded[f.rel] = now
+			}
 			s.changed()
 		}
 	}
@@ -1068,6 +1133,15 @@ func (a *app) searchHeader(c *ui.Context, f *searchFile, action *func()) {
 func (a *app) searchMatchRow(c *ui.Context, i int, f *searchFile, m searchMatch, action *func()) {
 	s := &a.inFiles
 	row := ui.Row(c).Grow(1).Gap(6).AlignItems(ui.Center).Height(22).Padding(0, 0, 0, 30)
+	// The matches of a file just unfolded fade in.
+	if at, ok := s.unfolded[f.rel]; ok {
+		if k := ui.EaseOut(min(float32(c.Now().Sub(at))/float32(showFor), 1)); k < 1 {
+			row.Opacity(k)
+			c.AnimationFrame()
+		} else {
+			delete(s.unfolded, f.rel)
+		}
+	}
 	hovered := row.Hovered()
 	// Taking the drag, the row takes the clicks from the list too.
 	a.dragFile(row, &fileDrag{path: f.path, match: &m})
