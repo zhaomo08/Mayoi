@@ -12,6 +12,7 @@
 | 改动 | 原因 |
 |---|---|
 | `mygo.json` 删除 `updates` | 关闭自动更新，否则会被上游 Release 覆盖掉定制 |
+| 图标换成简单的编辑器窗口（`cmd/mayoi/icon-art.png`，再 `go run ./tools/icongen` 生成 `resources/icon.png`） | 自用偏好 |
 | Source Control 列出子目录里的独立仓库（#17） | 已提上游 [PR #49](https://github.com/sorrycc/Mayoi/pull/49)，合并后跟进时冲突取 `--theirs` |
 
 定制尽量写成新文件（`cmd/mayoi/x_*.go`、`internal/<新包>`），上游文件只留挂载点，降低 cherry-pick 冲突。
