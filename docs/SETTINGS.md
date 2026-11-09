@@ -72,6 +72,8 @@ takes its default.
 | `panelPosition`         | `""`          | `""` (bottom), `"left"`, `"right"`                          | **View → Panel Position**                      |
 | `terminalLocation`      | `""`          | `""` (the panel), `"editor"`                                | **View → New Terminals in Editor Area**        |
 | `terminalBackend`       | `""`          | `""` (Mayoi), `"hc"` (herdr-core)                           |                                                |
+| `terminalBackendHcPath` | `""`          | A path to `hc`, a folder that has it, or a name on `PATH`   |                                                |
+| `terminalBackendHcEnv`  | none          | A list of `KEY=value` environment variables for `hc`        |                                                |
 | `projectTabs`           | `false`       | `true`, `false`                                             | **View → Project Tabs**                        |
 | `projectTabStyle`       | none          | A label, color and icon for each folder                     | A square's context menu on the rail            |
 | `locale`                | `""`          | `""` (follow the system), `"en"`, `"zh-Hans"`, `"ja"`       | **View → Language**                            |
@@ -97,6 +99,7 @@ takes its default.
 | `scmAllBranches`        | `false`       | `true`, `false`                                             | **Show All Branches** in Source Control's menu |
 | `syncIgnored`           | none          | Keys, `"settings.json"`, `"keybindings.json"`               | The [settings sync](#settings-sync) panel      |
 | `aiModel`               | `""`          | `""` (`deepseek-flash`), or a model of the AI gateway       | Only this file                                 |
+| `aiSecretFiles`         | none          | Patterns of files AI commit messages send by name only      | Only this file                                 |
 | `crashReports`          | `""`          | `""` (ask), `"always"`, `"never"`                           | **Don't ask again** when Mayoi asks           |
 
 ### Language
@@ -160,9 +163,19 @@ differ in width lines them up only roughly.
   with its scrollback. Closing the terminal ends it. In a remote folder the shell runs on the host, one of hc's
   machines (`hc machine ls`): the first terminal of a host hc doesn't know asks to add it, which may copy `hc` there,
   and until then, or if you decline, terminals of the host use ssh until Mayoi quits. Mayoi takes `Ctrl+\`, hc's detach key,
-  and sends it to the shell. Mayoi finds `hc` on the path or in `~/.local/bin`; without it, terminals run in Mayoi,
-  and the first one asks once whether to install it. **View → Install hc…** installs it there with herdr's installer, on
-  macOS and Linux, and new terminals use it without a restart.
+  and sends it to the shell. Mayoi finds `hc` at `terminalBackendHcPath` when it is set, then on the path or in
+  `~/.local/bin`; without it, terminals run in Mayoi, and the first one asks once whether to install it.
+  **View → Install hc…** installs it there with herdr's installer, on macOS and Linux, and new terminals use it without
+  a restart.
+- **`terminalBackendHcPath`** is the `hc` Mayoi runs when `terminalBackend` is `"hc"`: a path to the program, or a
+  folder that has it, which may start with `~`; a bare name, as `"herdr-core"`, is found on the path, and any other
+  relative path is the working folder of Mayoi, so give an absolute path. Mayoi looks there first, and quietly falls
+  back to the path and `~/.local/bin` when it isn't there, so a path that is wrong still runs another `hc` if there is
+  one. With it set, Mayoi doesn't offer to install hc. It has no effect with another backend.
+- **`terminalBackendHcEnv`** is the environment of the `hc` commands Mayoi starts when `terminalBackend` is `"hc"`: a
+  list of `KEY=value` strings, as `["HC_NO_UPDATE=1"]`. Strings without `=` or with a NUL are ignored. It reaches the
+  commands Mayoi starts, not a terminal already attached; a server hc already has running keeps the environment it
+  started with.
 - **`projectTabs`** keeps every folder open in one window, as project tabs on a rail on its left, rather than a
   window for each. Changing it gathers the windows into one, or parts them, at once.
 - **`projectTabStyle`** gives a project's square on the rail its own label, up to two characters, in place of its
@@ -211,8 +224,15 @@ differ in width lines them up only roughly.
   your account can use are listed at `https://mon.sorrycc.dev/api/v1/ai/v1/models`.
 - **`crashReports`** is what Mayoi does at launch with the crash logs of the last runs: `""` asks whether to send them
   to Mon, `"always"` sends them and `"never"` doesn't. A report is anonymous, never sent with your account's token,
-  and has your home folder taken out. **Show Report** in the question opens the logs as they would be sent. Only
-  releases send reports, and builds started with `MAYOI_MON_URL`.
+  and has your home folder taken out, but not other paths, such as `/Volumes/...` or `/opt/...`. **Show Report** in
+  the question opens the logs as they would be sent. Only releases send reports, and builds started with
+  `MAYOI_MON_URL`. Enter answers **Don't Send**.
+- **`aiSecretFiles`** adds patterns of files whose lines **Write Commit Message with AI** never sends, after
+  Mayoi's own list of `.env` files, keys and credentials. A name matches in any folder, a path such as
+  `config/prod.yml` matches the end of a file's path, and `/config/prod.yml` its start. `**` is any run of folders,
+  and `deploy/` is everything in a `deploy` folder. `!` first sends files a pattern before it left out, as in
+  `"!.env.local"`. Whatever the patterns say, keys and tokens in any file's lines are left out, line by line. A
+  folder's `.mayoi/settings.json` can't set it.
 
 ### Example
 
@@ -290,14 +310,19 @@ code and approve it. The dialog counts down until the code expires.
 What syncs:
 
 - **`settings.json`**: every preference, except `scmRepositoryOpen` and `scmRemotes`, which remember Source Control's
-  panels on each machine, `projectTabStyle`, kept by this machine's folders, and `syncIgnored`. When two machines change different preferences, both changes stay. When
-  they change the same one, the machine that syncs last wins.
+  panels on each machine, `projectTabStyle`, kept by this machine's folders, `terminalBackendHcPath` and
+  `terminalBackendHcEnv`, which pick the program a terminal runs and may hold secrets, and `syncIgnored`. When two
+  machines change different preferences, both changes stay. When they change the same one, the machine that syncs last
+  wins.
 - **`keybindings.json`**, as text, comments and all. When it changed on this machine and on another since they last
   synced, this machine's stays and the other's is saved beside it as `keybindings.sync-conflict.json`. A toast and the
   account's panel offer **Compare**, which opens the two side by side to merge by hand, and **Keep Mine**, which
   deletes the other's.
 
 The windows, tabs and recent folders (`state.json`), window positions and update choices stay on each machine.
+
+Settings and `keybindings.json` are stored on mon.sorrycc.dev as they are, without end-to-end encryption, so keep
+tokens and other secrets out of them.
 
 ### The account's panel
 

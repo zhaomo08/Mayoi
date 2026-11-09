@@ -3,6 +3,74 @@
 The update window shows the section of the version it offers. Every release
 needs a `## <version>` section here, or its build fails.
 
+## 0.18.2
+
+- On Windows, right-click menus no longer cut off the end of their labels, as in Chinese.
+- The Markdown preview highlights `==text==` and `<mark>` text with a yellow background.
+- In Markdown, typing `=`, `*`, `_`, `~` or `$` over a selection wraps it; type it twice for `==` or `**`.
+- The Markdown editor highlights `==text==` with a yellow background, as Obsidian does.
+- The Markdown editor colors bold, italic and struck text between Chinese characters, as in `会**整体**线`.
+- The Markdown editor shows `**bold**` in bold and draws a line through `~~struck~~` text.
+
+## 0.18.1
+
+- Opening a folder you switched away from no longer shows the terminals another window kept from it.
+- On Windows, lines starting with tabs, like Go code, keep their indent, at four columns a tab.
+- On macOS, Mayoi appears in Finder's **Open With** menu for text, Markdown and source code files.
+- AI commit messages leave out the lines of more secret files, like `.envrc`, `*.tfvars` and `~/.aws` files.
+- A changed `.env` or key file that is already committed no longer has its lines sent to the AI either.
+- Keys, tokens and passwords in any changed line are swapped for `[left out]` before the diff goes to the AI.
+- New `aiSecretFiles` setting adds your own patterns of files whose lines AI commit messages leave out.
+
+## 0.18.0
+
+- AI commit messages no longer send the contents of new secret files like `.env` or keys, only their names.
+- With the `"hc"` backend, `terminalBackendHcPath` finds hc before `PATH` and `~/.local/bin`.
+- With the `"hc"` backend, `terminalBackendHcEnv` passes `KEY=value` variables to hc's commands.
+- With `terminalBackendHcPath` set, Mayoi no longer offers to install hc.
+- `terminalBackendHcPath` and `terminalBackendHcEnv` stay on each machine and never upload with settings sync.
+- Rename a terminal from its tab's right-click menu or **View: Rename Terminal…** in the command palette.
+- A renamed terminal keeps its name when programs set a title; rename it to nothing to show theirs again.
+- Pressing Enter in the crash report question chooses **Don't Send** instead of sending the report.
+- On Windows, files indented with tabs, like Go code, show their indentation again.
+- Find's match count changes instantly instead of rolling, in the editor, preview and terminal.
+- The Git commit list and project rail use less CPU redrawing author and project initials.
+- Windows can install `mayoi.cmd` from **File → Install 'mayoi' Command**, including user PATH setup.
+- The host box of **Connect to Host…** has an **SSH Config** button that opens `~/.ssh/config` in a tab.
+- **File → Remote SSH → Open SSH Config** and the command palette open it too, creating it when missing.
+- Typing in Markdown with blank lines between paragraphs takes less CPU to keep the colors up to date.
+- Terminals in tabs you can't see no longer redraw the window as they print, which saves CPU.
+- Typing an absolute or `~/` path in Quick Open offers that file, even with no folder open.
+- A path in Quick Open can end in `:line` or `:line:column`, and opens the file at that spot.
+- Quoted or backslash-escaped paths pasted from a terminal open in Quick Open too.
+- A project whose program works shows a turning ring at the corner of its square on the rail.
+- When work finishes or fails while other work goes on, its dot shows inside the ring.
+- The rail marks a project amber while it waits for you, green when done and red when work failed.
+- A program waiting for you keeps its project's mark until it stops waiting, even after you look.
+- Hovering a project on the rail lists what its programs wait for and work at, with their progress.
+- The work ring on a rail square turns smoothly and fills to show progress when programs report it.
+- A rail square's ring and dot grow in and fade out, and the dot blends from one state's color to the next.
+- The rail tip marks waiting, finished and failed work with icons and shows progress as a small bar.
+- A rail square's progress ring keeps its fill as it fades out, and completes when the work finishes.
+- A rail square's dot sends out one ring in its color when work finishes or fails.
+
+## 0.17.0
+
+- Terminal icons show whether a program says it works, waits for you, finished or failed (OSC 7501).
+- While a program works or waits for you, a pill over its terminal says what it does, with its progress.
+- A program in a project out of sight that waits for you, finishes or fails marks the project on the rail.
+- Typing in a terminal clears the mark of a program's finished or failed work.
+- The program status pill shows the program's name in bold, its message, and its progress as a bar.
+- When a program waits for you, its pill gets a colored ring and its icon pulses in time with the badge.
+- As shown work finishes or fails, the pill says so with a check or a cross for a moment.
+- The pill counts the program's other active tasks, and the terminal icon's tooltip lists them.
+- A program that reports its status very often no longer slows the window down.
+- **Rename Active File…** in the command palette renames the current tab's file, bindable as `file.rename`.
+- Opening a file from outside the folder clears the selection in the Explorer.
+- Splitting a Markdown preview to the right keeps it a preview, scrolled to the same place.
+- **New File…** and the other items of the Explorer's menu below the files no longer do nothing at times.
+- A plain mouse wheel scrolls the editor tabs sideways when more of them are open than fit.
+
 ## 0.16.2
 
 - **View → Theme → The Matrix** puts the code's green inside steel chrome, like the film's real world.

@@ -29,6 +29,11 @@ type column struct {
 	locked bool // automatic file opens avoid it; it stays when empty
 	// revealed is the tab the strip last scrolled into view.
 	revealed int
+	// tabScroll is where the strip's tabs scroll, so that a wheel scrolls
+	// them sideways as browsers do; tabWheelTo is where the wheel aims them,
+	// which a glide on its way does not tell.
+	tabScroll  ui.ScrollState
+	tabWheelTo float32
 	// body is where the tab shown is, which a tab dragged is dropped on.
 	body ui.Handle
 	// filesOver is set while files dragged from another app are over the
@@ -68,7 +73,7 @@ func (t *colTab) closeLabel() string {
 func (t *colTab) name() string {
 	switch {
 	case t.term != nil:
-		return t.term.title
+		return t.term.label()
 	case t.view != nil:
 		return t.view.name()
 	case t.diff != nil:
@@ -771,8 +776,22 @@ func (a *app) splitRight() {
 		}
 		return
 	}
-	a.addTab(nc, 0, &colTab{ed: cloneEditor(t.ed)})
+	ed := cloneEditor(t.ed)
+	if p := t.ed.preview; p != nil {
+		// The preview again, where the preview is: its text is not
+		// scrolled behind it.
+		ed.preview = newPreviewViewer(ed.document)
+		if p.markdown != nil {
+			m := &markdownPreview{}
+			m.sync.want, m.sync.placing = p.markdown.sync.top, true
+			ed.preview.markdown = m
+		}
+	}
+	a.addTab(nc, 0, &colTab{ed: ed})
 	a.activate(nc, 0, true)
+	if ed.preview != nil {
+		a.rememberTabs()
+	}
 }
 
 // cloneEditor returns another editor of d's document, its caret and

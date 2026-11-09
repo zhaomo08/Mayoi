@@ -1,0 +1,219 @@
+package main
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/egoist/mygo/plugins/terminal"
+)
+
+func TestProgLine(t *testing.T) {
+	for _, tc := range []struct {
+		r    terminal.StatusRecord
+		want string
+	}{
+		{terminal.StatusRecord{State: terminal.StatusWorking, App: "cargo", Message: "Compiling"}, "cargo: Compiling"},
+		{terminal.StatusRecord{State: terminal.StatusBlocked, Kind: terminal.KindPermission, App: "claude-code"}, "claude-code: Waiting for your approval"},
+		{terminal.StatusRecord{State: terminal.StatusDone, App: "deploy", Title: "eu-west"}, "eu-west: Done"},
+		{terminal.StatusRecord{State: terminal.StatusError}, "Failed"},
+	} {
+		if got := progLine(tc.r); got != tc.want {
+			t.Errorf("progLine(%+v) = %q, want %q", tc.r, got, tc.want)
+		}
+	}
+}
+
+// TestProgramStatusAlert: a program that finishes marks the project on
+// the rail; one that goes on working, or says the same again, does not.
+func TestProgramStatusAlert(t *testing.T) {
+	a := &app{}
+	s := &session{}
+	working := terminal.ProgramStatus{Records: []terminal.StatusRecord{{State: terminal.StatusWorking, App: "codex"}}}
+	a.programStatus(s, nil, working)
+	if a.alert != "" {
+		t.Fatalf("working alerted %q", a.alert)
+	}
+	if r, busy := progStatus(s); !busy || r.App != "codex" {
+		t.Fatalf("progStatus = %+v, %v", r, busy)
+	}
+	done := terminal.ProgramStatus{Records: []terminal.StatusRecord{{State: terminal.StatusDone, App: "codex", Message: "Fixed the bug"}}}
+	a.programStatus(s, nil, done)
+	if a.alert != "codex: Fixed the bug" {
+		t.Fatalf("alert %q", a.alert)
+	}
+	a.alert = ""
+	a.programStatus(s, nil, done)
+	if a.alert != "" {
+		t.Fatalf("the same status alerted again: %q", a.alert)
+	}
+	if a.alertState != terminal.StatusDone {
+		t.Fatalf("alert state %v", a.alertState)
+	}
+	a.alert = ""
+	blocked := terminal.ProgramStatus{Records: []terminal.StatusRecord{{State: terminal.StatusBlocked, App: "codex"}}}
+	a.programStatus(s, nil, blocked)
+	if a.alert != "" {
+		t.Fatalf("a program that waits alerted %q: it marks the rail while it waits", a.alert)
+	}
+	idle := terminal.ProgramStatus{Records: []terminal.StatusRecord{{State: terminal.StatusIdle, App: "codex"}}}
+	a.programStatus(s, nil, idle)
+	if _, busy := progStatus(s); busy {
+		t.Fatal("an idle program shows a badge")
+	}
+}
+
+// TestProjectWork: every record that works or waits counts, in every
+// terminal of the project, but for those of a terminal whose shell waits
+// for its machine.
+func TestProjectWork(t *testing.T) {
+	rec := func(id string, st terminal.StatusState) terminal.StatusRecord {
+		return terminal.StatusRecord{ID: id, State: st, Progress: -1}
+	}
+	since := time.Now()
+	a := &app{terms: []*session{
+		{status: terminal.ProgramStatus{Records: []terminal.StatusRecord{rec("", terminal.StatusWorking), rec("a", terminal.StatusWorking)}}},
+		// Its record most in need of the user waits; one of its others works.
+		{status: terminal.ProgramStatus{Records: []terminal.StatusRecord{rec("", terminal.StatusBlocked), rec("b", terminal.StatusWorking)}}, statusSince: since},
+		{status: terminal.ProgramStatus{Records: []terminal.StatusRecord{rec("", terminal.StatusDone)}}},
+		{status: terminal.ProgramStatus{Records: []terminal.StatusRecord{rec("", terminal.StatusWorking)}}, hc: "vps/t1", lost: true},
+	}}
+	w := projectWork(a)
+	if len(w.working) != 3 || len(w.blocked) != 1 || !w.blockedSince.Equal(since) {
+		t.Fatalf("projectWork = %d working, %d blocked, since %v", len(w.working), len(w.blocked), w.blockedSince)
+	}
+	if got := w.records(); got[0].State != terminal.StatusBlocked {
+		t.Errorf("records start with %v, want the one that waits", got[0].State)
+	}
+	if w := projectWork(&app{}); len(w.working)+len(w.blocked) != 0 {
+		t.Errorf("a project without terminals works: %+v", w)
+	}
+}
+
+// TestProgParts: what a program says goes on one line, and its label
+// comes before its name.
+func TestProgParts(t *testing.T) {
+	who, what := progParts(terminal.StatusRecord{State: terminal.StatusWorking, App: "codex", Title: " fix\tbug ", Message: "Reading\nfiles  now"})
+	if who != "fix bug" || what != "Reading files now" {
+		t.Fatalf("progParts = %q, %q", who, what)
+	}
+}
+
+// TestProgTip: the icon's tooltip lists the records not idle, the one
+// most in need of the user first, up to progTipMax, then how many more.
+func TestProgTip(t *testing.T) {
+	st := terminal.ProgramStatus{Records: []terminal.StatusRecord{
+		{ID: "", State: terminal.StatusWorking, App: "codex", Message: "Reading"},
+		{ID: "a", State: terminal.StatusIdle, App: "codex"},
+		{ID: "b", State: terminal.StatusBlocked, Kind: terminal.KindQuestion, App: "codex"},
+	}}
+	if got, want := progTip(st), "codex: Waiting for your answer\ncodex: Reading"; got != want {
+		t.Fatalf("progTip = %q, want %q", got, want)
+	}
+	if n := progOthers(st); n != 1 {
+		t.Fatalf("progOthers = %d, want 1", n)
+	}
+	st.Records = nil
+	for i := range progTipMax + 3 {
+		st.Records = append(st.Records, terminal.StatusRecord{ID: string(rune('a' + i)), State: terminal.StatusWorking, App: "make"})
+	}
+	lines := strings.Split(progTip(st), "\n")
+	if len(lines) != progTipMax+1 || lines[progTipMax] != "+3" {
+		t.Fatalf("progTip of %d records = %q", len(st.Records), lines)
+	}
+}
+
+// TestStatusIn: of many statuses a program says before the app takes
+// them, the first is posted and the last is taken.
+func TestStatusIn(t *testing.T) {
+	var in statusIn
+	posts := 0
+	for i := range 100 {
+		if in.put(terminal.ProgramStatus{Records: []terminal.StatusRecord{{State: terminal.StatusWorking, Progress: i}}}) {
+			posts++
+		}
+	}
+	st, ok := in.take()
+	if posts != 1 || !ok || st.Records[0].Progress != 99 {
+		t.Fatalf("posts %d, take = %+v, %v", posts, st, ok)
+	}
+	if _, ok := in.take(); ok {
+		t.Fatal("took a status twice")
+	}
+	if !in.put(terminal.ProgramStatus{}) {
+		t.Fatal("a status after a take is not posted")
+	}
+}
+
+// TestProgPilled: the pill shows work going on and, for a moment, work
+// that finished as it was shown; not work that finished unseen.
+func TestProgPilled(t *testing.T) {
+	a := &app{}
+	s := &session{}
+	rec := func(st terminal.StatusState) terminal.ProgramStatus {
+		return terminal.ProgramStatus{Records: []terminal.StatusRecord{{State: st, App: "codex", Progress: -1}}}
+	}
+	a.programStatus(s, nil, rec(terminal.StatusWorking))
+	if _, ok := progPilled(s); !ok {
+		t.Fatal("working is not shown")
+	}
+	a.programStatus(s, nil, rec(terminal.StatusDone))
+	if r, ok := progPilled(s); !ok || r.State != terminal.StatusDone {
+		t.Fatalf("done after working: %+v, %v", r, ok)
+	}
+	s.statusSince = s.statusSince.Add(-progFlashFor)
+	if _, ok := progPilled(s); ok {
+		t.Fatal("done is shown after progFlashFor")
+	}
+	s = &session{}
+	a.programStatus(s, nil, rec(terminal.StatusError))
+	if _, ok := progPilled(s); ok {
+		t.Fatal("failed work never shown working is shown")
+	}
+}
+
+// The ring of a project's square shows how far its work is only while
+// every record that works says, and then their mean.
+func TestWorkProgress(t *testing.T) {
+	rec := func(n int) terminal.StatusRecord {
+		return terminal.StatusRecord{State: terminal.StatusWorking, Progress: n}
+	}
+	for _, tc := range []struct {
+		rs   []terminal.StatusRecord
+		want float32
+	}{
+		{nil, -1},
+		{[]terminal.StatusRecord{rec(40)}, 0.4},
+		{[]terminal.StatusRecord{rec(20), rec(80)}, 0.5},
+		{[]terminal.StatusRecord{rec(20), rec(-1)}, -1},
+		{[]terminal.StatusRecord{rec(150)}, 1},
+	} {
+		if got := workProgress(tc.rs); got != tc.want {
+			t.Errorf("workProgress(%v) = %v, want %v", tc.rs, got, tc.want)
+		}
+	}
+}
+
+// The ring of a project's square keeps what its work last said as it
+// fades, filled when the work just finished.
+func TestRingDone(t *testing.T) {
+	now := time.Now()
+	a := &app{}
+	working := railWork{working: []terminal.StatusRecord{{State: terminal.StatusWorking, Progress: 40}}, progress: 0.4}
+	if got := ringDone(a, working, now); got != 0.4 {
+		t.Fatalf("working at 40%% fills %v", got)
+	}
+	if got := ringDone(a, railWork{progress: -1}, now); got != 0.4 {
+		t.Errorf("fading work fills %v, want what it last said", got)
+	}
+	a.alertState, a.alertAt = terminal.StatusDone, now
+	if got := ringDone(a, railWork{progress: -1}, now); got != 1 {
+		t.Errorf("work that just finished fills %v, want 1", got)
+	}
+	if got := ringDone(a, railWork{progress: -1}, now.Add(2*time.Second)); got != 0.4 {
+		t.Errorf("work that finished long ago fills %v", got)
+	}
+	if got := ringDone(a, railWork{working: []terminal.StatusRecord{{State: terminal.StatusWorking, Progress: -1}}, progress: -1}, now); got != -1 {
+		t.Errorf("work that says nothing fills %v, want a turning arc", got)
+	}
+}

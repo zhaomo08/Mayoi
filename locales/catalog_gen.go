@@ -1884,6 +1884,16 @@ func (msgs Messages) CliInstalledDetail() string {
 	return Catalog.Format(msgs.locale, "cliInstalledDetail", nil)
 }
 
+// CliInstalledDetailWindows says "In a new terminal, mayoi . opens the folder you are in, and mayoi <file> a file."
+// in the language the app shows.
+func CliInstalledDetailWindows() string { return In(i18n.Locale()).CliInstalledDetailWindows() }
+
+// CliInstalledDetailWindows says "In a new terminal, mayoi . opens the folder you are in, and mayoi <file> a file."
+// in the language of msgs.
+func (msgs Messages) CliInstalledDetailWindows() string {
+	return Catalog.Format(msgs.locale, "cliInstalledDetailWindows", nil)
+}
+
 // CliNotInstalled says "The 'mayoi' command is not installed."
 // in the language the app shows.
 func CliNotInstalled() string { return In(i18n.Locale()).CliNotInstalled() }
@@ -2274,6 +2284,16 @@ func CmdFileOpenRecent() string { return In(i18n.Locale()).CmdFileOpenRecent() }
 // in the language of msgs.
 func (msgs Messages) CmdFileOpenRecent() string {
 	return Catalog.Format(msgs.locale, "cmdFileOpenRecent", nil)
+}
+
+// CmdFileRename says "Rename Active File…"
+// in the language the app shows.
+func CmdFileRename() string { return In(i18n.Locale()).CmdFileRename() }
+
+// CmdFileRename says "Rename Active File…"
+// in the language of msgs.
+func (msgs Messages) CmdFileRename() string {
+	return Catalog.Format(msgs.locale, "cmdFileRename", nil)
 }
 
 // CmdFileReopenClosed says "Reopen Closed Tab"
@@ -2784,6 +2804,16 @@ func CmdRemoteForwardPort() string { return In(i18n.Locale()).CmdRemoteForwardPo
 // in the language of msgs.
 func (msgs Messages) CmdRemoteForwardPort() string {
 	return Catalog.Format(msgs.locale, "cmdRemoteForwardPort", nil)
+}
+
+// CmdRemoteOpenConfig says "Open SSH Config"
+// in the language the app shows.
+func CmdRemoteOpenConfig() string { return In(i18n.Locale()).CmdRemoteOpenConfig() }
+
+// CmdRemoteOpenConfig says "Open SSH Config"
+// in the language of msgs.
+func (msgs Messages) CmdRemoteOpenConfig() string {
+	return Catalog.Format(msgs.locale, "cmdRemoteOpenConfig", nil)
 }
 
 // CmdRemoteOpenFolder says "Open Remote Folder…"
@@ -3324,6 +3354,16 @@ func CmdViewTerminalMove() string { return In(i18n.Locale()).CmdViewTerminalMove
 // in the language of msgs.
 func (msgs Messages) CmdViewTerminalMove() string {
 	return Catalog.Format(msgs.locale, "cmdViewTerminalMove", nil)
+}
+
+// CmdViewTerminalRename says "Rename Terminal…"
+// in the language the app shows.
+func CmdViewTerminalRename() string { return In(i18n.Locale()).CmdViewTerminalRename() }
+
+// CmdViewTerminalRename says "Rename Terminal…"
+// in the language of msgs.
+func (msgs Messages) CmdViewTerminalRename() string {
+	return Catalog.Format(msgs.locale, "cmdViewTerminalRename", nil)
 }
 
 // CmdViewTerminalTab says "New Terminal in Editor Area"
@@ -7412,6 +7452,86 @@ func NotificationFrom(title string) string { return In(i18n.Locale()).Notificati
 // in the language of msgs.
 func (msgs Messages) NotificationFrom(title string) string {
 	return Catalog.Format(msgs.locale, "notificationFrom", map[string]any{"title": title})
+}
+
+// ProgWorking says "Working"
+// in the language the app shows.
+func ProgWorking() string { return In(i18n.Locale()).ProgWorking() }
+
+// ProgWorking says "Working"
+// in the language of msgs.
+func (msgs Messages) ProgWorking() string {
+	return Catalog.Format(msgs.locale, "progWorking", nil)
+}
+
+// ProgBlocked says "Waiting for you"
+// in the language the app shows.
+func ProgBlocked() string { return In(i18n.Locale()).ProgBlocked() }
+
+// ProgBlocked says "Waiting for you"
+// in the language of msgs.
+func (msgs Messages) ProgBlocked() string {
+	return Catalog.Format(msgs.locale, "progBlocked", nil)
+}
+
+// ProgApproval says "Waiting for your approval"
+// in the language the app shows.
+func ProgApproval() string { return In(i18n.Locale()).ProgApproval() }
+
+// ProgApproval says "Waiting for your approval"
+// in the language of msgs.
+func (msgs Messages) ProgApproval() string {
+	return Catalog.Format(msgs.locale, "progApproval", nil)
+}
+
+// ProgAnswer says "Waiting for your answer"
+// in the language the app shows.
+func ProgAnswer() string { return In(i18n.Locale()).ProgAnswer() }
+
+// ProgAnswer says "Waiting for your answer"
+// in the language of msgs.
+func (msgs Messages) ProgAnswer() string {
+	return Catalog.Format(msgs.locale, "progAnswer", nil)
+}
+
+// ProgSignIn says "Waiting for you to sign in"
+// in the language the app shows.
+func ProgSignIn() string { return In(i18n.Locale()).ProgSignIn() }
+
+// ProgSignIn says "Waiting for you to sign in"
+// in the language of msgs.
+func (msgs Messages) ProgSignIn() string {
+	return Catalog.Format(msgs.locale, "progSignIn", nil)
+}
+
+// ProgDone says "Done"
+// in the language the app shows.
+func ProgDone() string { return In(i18n.Locale()).ProgDone() }
+
+// ProgDone says "Done"
+// in the language of msgs.
+func (msgs Messages) ProgDone() string {
+	return Catalog.Format(msgs.locale, "progDone", nil)
+}
+
+// ProgFailed says "Failed"
+// in the language the app shows.
+func ProgFailed() string { return In(i18n.Locale()).ProgFailed() }
+
+// ProgFailed says "Failed"
+// in the language of msgs.
+func (msgs Messages) ProgFailed() string {
+	return Catalog.Format(msgs.locale, "progFailed", nil)
+}
+
+// ProgIdle says "Idle"
+// in the language the app shows.
+func ProgIdle() string { return In(i18n.Locale()).ProgIdle() }
+
+// ProgIdle says "Idle"
+// in the language of msgs.
+func (msgs Messages) ProgIdle() string {
+	return Catalog.Format(msgs.locale, "progIdle", nil)
 }
 
 // OnHost says "on {host}"
@@ -12082,6 +12202,26 @@ func (msgs Messages) TermKill() string {
 	return Catalog.Format(msgs.locale, "termKill", nil)
 }
 
+// TermRename says "Rename Terminal…"
+// in the language the app shows.
+func TermRename() string { return In(i18n.Locale()).TermRename() }
+
+// TermRename says "Rename Terminal…"
+// in the language of msgs.
+func (msgs Messages) TermRename() string {
+	return Catalog.Format(msgs.locale, "termRename", nil)
+}
+
+// TermRenameTitle says "Rename Terminal"
+// in the language the app shows.
+func TermRenameTitle() string { return In(i18n.Locale()).TermRenameTitle() }
+
+// TermRenameTitle says "Rename Terminal"
+// in the language of msgs.
+func (msgs Messages) TermRenameTitle() string {
+	return Catalog.Format(msgs.locale, "termRenameTitle", nil)
+}
+
 // HcAddTitle says "Run Terminals of {host} in herdr-core?"
 // in the language the app shows.
 func HcAddTitle(host string) string { return In(i18n.Locale()).HcAddTitle(host) }
@@ -14138,6 +14278,48 @@ func (msgs Messages) PrefDescTerminalBackend() string {
 	return Catalog.Format(msgs.locale, "prefDescTerminalBackend", nil)
 }
 
+// PrefTitleTerminalBackendHcPath says "hc Path"
+// in the language the app shows.
+func PrefTitleTerminalBackendHcPath() string {
+	return In(i18n.Locale()).PrefTitleTerminalBackendHcPath()
+}
+
+// PrefTitleTerminalBackendHcPath says "hc Path"
+// in the language of msgs.
+func (msgs Messages) PrefTitleTerminalBackendHcPath() string {
+	return Catalog.Format(msgs.locale, "prefTitleTerminalBackendHcPath", nil)
+}
+
+// PrefDescTerminalBackendHcPath says "The hc to run with herdr-core: a path to it, a folder that has it, or a name on the path. Found there first, then on …"
+// in the language the app shows.
+func PrefDescTerminalBackendHcPath() string { return In(i18n.Locale()).PrefDescTerminalBackendHcPath() }
+
+// PrefDescTerminalBackendHcPath says "The hc to run with herdr-core: a path to it, a folder that has it, or a name on the path. Found there first, then on …"
+// in the language of msgs.
+func (msgs Messages) PrefDescTerminalBackendHcPath() string {
+	return Catalog.Format(msgs.locale, "prefDescTerminalBackendHcPath", nil)
+}
+
+// PrefTitleTerminalBackendHcEnv says "hc Environment"
+// in the language the app shows.
+func PrefTitleTerminalBackendHcEnv() string { return In(i18n.Locale()).PrefTitleTerminalBackendHcEnv() }
+
+// PrefTitleTerminalBackendHcEnv says "hc Environment"
+// in the language of msgs.
+func (msgs Messages) PrefTitleTerminalBackendHcEnv() string {
+	return Catalog.Format(msgs.locale, "prefTitleTerminalBackendHcEnv", nil)
+}
+
+// PrefDescTerminalBackendHcEnv says "Environment variables for hc's commands, as KEY=value. Entries without an equals sign or with a NUL are ignored."
+// in the language the app shows.
+func PrefDescTerminalBackendHcEnv() string { return In(i18n.Locale()).PrefDescTerminalBackendHcEnv() }
+
+// PrefDescTerminalBackendHcEnv says "Environment variables for hc's commands, as KEY=value. Entries without an equals sign or with a NUL are ignored."
+// in the language of msgs.
+func (msgs Messages) PrefDescTerminalBackendHcEnv() string {
+	return Catalog.Format(msgs.locale, "prefDescTerminalBackendHcEnv", nil)
+}
+
 // PrefTitleDiffLayout says "Diff Layout"
 // in the language the app shows.
 func PrefTitleDiffLayout() string { return In(i18n.Locale()).PrefTitleDiffLayout() }
@@ -14376,6 +14558,26 @@ func PrefDescAiModel() string { return In(i18n.Locale()).PrefDescAiModel() }
 // in the language of msgs.
 func (msgs Messages) PrefDescAiModel() string {
 	return Catalog.Format(msgs.locale, "prefDescAiModel", nil)
+}
+
+// PrefTitleAiSecretFiles says "Secret Files for AI"
+// in the language the app shows.
+func PrefTitleAiSecretFiles() string { return In(i18n.Locale()).PrefTitleAiSecretFiles() }
+
+// PrefTitleAiSecretFiles says "Secret Files for AI"
+// in the language of msgs.
+func (msgs Messages) PrefTitleAiSecretFiles() string {
+	return Catalog.Format(msgs.locale, "prefTitleAiSecretFiles", nil)
+}
+
+// PrefDescAiSecretFiles says "Files whose lines AI commit messages leave out, after Mayoi's own: a name, a path, \"dir/\" or \"**\"; \"!\" first sends one."
+// in the language the app shows.
+func PrefDescAiSecretFiles() string { return In(i18n.Locale()).PrefDescAiSecretFiles() }
+
+// PrefDescAiSecretFiles says "Files whose lines AI commit messages leave out, after Mayoi's own: a name, a path, \"dir/\" or \"**\"; \"!\" first sends one."
+// in the language of msgs.
+func (msgs Messages) PrefDescAiSecretFiles() string {
+	return Catalog.Format(msgs.locale, "prefDescAiSecretFiles", nil)
 }
 
 // PrefTitleVim says "Vim Mode"

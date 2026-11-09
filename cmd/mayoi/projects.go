@@ -25,6 +25,7 @@ import (
 	"unicode"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 	xdraw "golang.org/x/image/draw"
 
@@ -545,9 +546,11 @@ func railName(dir string) (name, where string) {
 
 // railTab is a project's square on the rail, which shows it, with a pill
 // along the rail's edge that grows from under the pointer to the project
-// shown, a dot of unsaved changes, one of a terminal's bell or
-// notification while the project was out of sight, and a badge of a
-// remote folder's connection. label is what it shows without a logo,
+// shown, a dot of unsaved changes, a badge of what its terminals do, and
+// one of a remote folder's connection. The badge is a dot of a program
+// that waits for the user, or of a bell, a notification or work that
+// finished or failed while the project was out of sight, in the color of
+// its state, and, while a program works, a ring turning around it. label is what it shows without a logo,
 // unless the project has a label of its own.
 func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) {
 	p := a.pal
@@ -592,7 +595,24 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 	if on {
 		h.a.alert = ""
 	}
-	alert := h.a.alert
+	alert, alertCol := h.a.alert, p.accent
+	if h.a.alertState != terminal.StatusIdle {
+		alertCol = a.progColor(h.a.alertState)
+	}
+	work := projectWork(h.a)
+	// The badge's dot: a program that waits, as long as it does, before
+	// what was asked attention for.
+	mark, markCol := alert != "", alertCol
+	if len(work.blocked) > 0 {
+		mark, markCol = true, a.progColor(terminal.StatusBlocked)
+	}
+	// The dot calls for a while as a program begins to wait, as its
+	// terminal's badge does.
+	calm := c.Preferences().ReduceMotion
+	var pulse time.Time
+	if !calm && len(work.blocked) > 0 && time.Since(work.blockedSince) < pulseFor {
+		pulse = work.blockedSince
+	}
 	col := avatarColor(p, dir)
 	if k, ok := railColor(p, style.Color); ok {
 		col = k
@@ -602,8 +622,8 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 		f.scanProjectLogo(a, h, dir, icon)
 	}
 	b := ui.ButtonBase(c.Key(fmt.Sprintf("project-%d", h.a.window.ID))).Width(railW).Height(railSquare + 4).Shrink(0).
-		Label(name).Description(where).Drag(railDrag{h})
-	f.railTip(c, a, b, name, where, keys, dirty, alert, conn, connCol)
+		Label(name).Description(railDescription(where, work)).Drag(railDrag{h})
+	f.railTip(c, a, b, name, where, keys, dirty, work, alert, h.a.alertState, alertCol, conn, connCol)
 	f.railDrop(b, a, h)
 	// Another square, or a picture dragged from the sidebar or anything
 	// from another app, which may be one: it would show on this square.
@@ -624,9 +644,33 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 	}
 	pill = b.Animate("pill", pill, 160*time.Millisecond)
 	fill = b.Animate("fill", fill, 120*time.Millisecond)
-	ring := b.Animate("ring", unit(on), 160*time.Millisecond)
+	outline := b.Animate("ring", unit(on), 160*time.Millisecond)
 	drop := b.Animate("drop", unit(pic), 120*time.Millisecond)
 	sink := b.Animate("sink", unit(pressed && !dragged), 80*time.Millisecond)
+	// The ring grows in and out as work starts and stops, following how
+	// far along the work says it is; the dot pops in, fades out in the
+	// color it had, and turns from one state's color to another's.
+	// As it fades, it keeps what it last said, filled when the work
+	// finished; a ring it comes back as starts from what it says then.
+	working := len(work.working) > 0
+	busy := b.AnimateWith("work", unit(working), 240*time.Millisecond, ui.EaseInOut)
+	done := ringDone(h.a, work, time.Now())
+	if busy < 0.01 {
+		b.Jump("done", max(done, 0))
+	}
+	if done >= 0 {
+		done = b.Animate("done", done, progBar)
+	}
+	// The dot of work that just finished or failed sends out a ring.
+	var flash time.Time
+	if !calm && mark && len(work.blocked) == 0 && (h.a.alertState == terminal.StatusDone || h.a.alertState == terminal.StatusError) {
+		flash = h.a.alertAt
+	}
+	shown := b.AnimateTo("mark", unit(mark), ui.Snappy)
+	if !mark {
+		markCol = markCol.Alpha(0)
+	}
+	dotCol := b.AnimateColor("markCol", markCol, ui.Animation{Duration: 220 * time.Millisecond})
 	ground := railGround(p)
 	b.Draw(func(pt *ui.Painter, r ui.Rect) {
 		if over {
@@ -649,8 +693,8 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 			alpha = 0.4
 		}
 		pt.Fill(sq, col.Alpha(fill*alpha), railRadius)
-		if ring > 0.01 {
-			pt.Stroke(sq, col.Alpha(0.75*ring*alpha), railRadius, 1.25)
+		if outline > 0.01 {
+			pt.Stroke(sq, col.Alpha(0.75*outline*alpha), railRadius, 1.25)
 		}
 		if drop > 0.01 {
 			// A picture dropped here would show in it.
@@ -677,11 +721,27 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 			pt.Fill(d, connCol.Alpha(alpha), 6.5)
 			pt.Icon(iconServer, ui.Rect{X: d.X + 2.5, Y: d.Y + 2.5, W: 8, H: 8}, ground)
 		}
-		if alert != "" {
-			// Below the dot of unsaved changes, in the accent.
-			d := ui.Rect{X: sq.X + sq.W - 7, Y: sq.Y + sq.H - 7, W: 10, H: 10}
-			pt.Fill(ui.Rect{X: d.X - 2, Y: d.Y - 2, W: d.W + 4, H: d.H + 4}, ground, 7)
-			pt.Fill(d, p.accent, 5)
+		if dot := max(shown, 0); dot > 0.01 || busy > 0.01 {
+			// Below the dot of unsaved changes, cut out as it is: the
+			// dot, which shrinks into the ring as the project works, both
+			// growing from the corner as they come.
+			cx, cy := sq.X+sq.W-2, sq.Y+sq.H-2
+			r := (5 + busy) * max(dot, busy)
+			badge := ui.Rect{X: cx - r, Y: cy - r, W: 2 * r, H: 2 * r}
+			if mark && !beacon(pt, badge, dotCol, pulse, 0.9, 0.45) {
+				if since := pt.Now().Sub(flash); !flash.IsZero() && since < hcBurst {
+					ring(pt, badge, dotCol, float32(since)/float32(hcBurst), 1.3, 0.6)
+					pt.AnimationFrameRate(60)
+				}
+			}
+			pt.Fill(ui.Rect{X: badge.X - 2, Y: badge.Y - 2, W: badge.W + 4, H: badge.H + 4}, ground, r+2)
+			if busy > 0.01 {
+				workRing(pt, cx, cy, 3.5+1.5*busy, p.accent.Alpha(busy*alpha), done, calm)
+			}
+			if dot > 0.01 {
+				dr := (5 - 2.5*busy) * dot
+				pt.Fill(ui.Rect{X: cx - dr, Y: cy - dr, W: 2 * dr, H: 2 * dr}, dotCol, dr)
+			}
 		}
 		if dirty {
 			// Cut out of the square by a ring of the rail's ground.
@@ -733,11 +793,26 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 	}
 }
 
+// ringDone is how much of the ring of a's square is filled, from 0 to 1,
+// or -1 for an arc that turns: what its work says while it works, and
+// after what it last said, filled when the work just finished.
+func ringDone(a *app, work railWork, now time.Time) float32 {
+	if len(work.working) > 0 {
+		a.workDone = work.progress
+		return a.workDone
+	}
+	if a.workDone >= 0 && a.alertState == terminal.StatusDone && now.Sub(a.alertAt) < time.Second {
+		return 1
+	}
+	return a.workDone
+}
+
 // railTip is the tip of a project's square, to its right, where the
 // window's buttons above it leave it room: the project's name, its folder,
 // the keys that show it, how a remote folder's host is connected, in the
-// color of its badge, and whether it has unsaved changes.
-func (f *frame) railTip(c *ui.Context, a *app, b ui.Element, name, where string, keys []string, dirty bool, alert, conn string, connCol ui.Color) {
+// color of its badge, what its programs that wait and work say, what was
+// asked attention for, and whether it has unsaved changes.
+func (f *frame) railTip(c *ui.Context, a *app, b ui.Element, name, where string, keys []string, dirty bool, work railWork, alert string, alertState terminal.StatusState, alertCol ui.Color, conn string, connCol ui.Color) {
 	p := a.pal
 	ui.TooltipBase(c, b, func(tip ui.Element) {
 		tip.AttachTo(b, ui.AnchorRight, ui.AnchorLeft).Margin(0, 0, 0, 4)
@@ -750,23 +825,88 @@ func (f *frame) railTip(c *ui.Context, a *app, b ui.Element, name, where string,
 				}
 			})
 			ui.Text(c, where).FontSize(11.5).TextColor(p.muted)
-			note := func(dot ui.Color, s string) {
+			line := func(mark func(), s string, done int) {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Margin(2, 0, 0, 0).Children(func() {
-					ui.Box(c).Size(6, 6).Radius(3).Background(dot).Shrink(0)
-					ui.Text(c, s).FontSize(11.5).TextColor(p.muted)
+					ui.Box(c).Size(10, 10).Shrink(0).AlignItems(ui.Center).Justify(ui.Center).Children(mark)
+					ui.Text(c, s).FontSize(11.5).TextColor(p.muted).Grow(1).MinWidth(0)
+					if done >= 0 {
+						railTipBar(c, p.accent, float32(min(done, 100))/100)
+					}
 				})
+			}
+			note := func(dot ui.Color, s string) {
+				line(func() { ui.Box(c).Size(6, 6).Radius(3).Background(dot).Shrink(0) }, s, -1)
+			}
+			glyph := func(icon *ui.SVG, col ui.Color, s string) {
+				line(func() { ui.Icon(c, icon).FontSize(10).TextColor(col) }, s, -1)
 			}
 			if conn != "" {
 				note(connCol, conn)
 			}
-			if alert != "" {
-				note(p.accent, alert)
+			for i, r := range work.records() {
+				if i == progTipMax {
+					line(func() {}, fmt.Sprintf("+%d", len(work.blocked)+len(work.working)-i), -1)
+					break
+				}
+				switch {
+				case r.State == terminal.StatusWorking:
+					line(func() { ui.Spinner(c).Size(9, 9).TextColor(p.accent) }, railLine(r), r.Progress)
+				case r.Kind == terminal.KindAuth:
+					glyph(iconLock, a.progColor(r.State), railLine(r))
+				default:
+					glyph(iconMessageAlert, a.progColor(r.State), railLine(r))
+				}
+			}
+			switch {
+			case alert == "":
+			case alertState == terminal.StatusDone:
+				glyph(iconCheck, alertCol, alert)
+			case alertState == terminal.StatusError:
+				glyph(iconX, alertCol, alert)
+			default:
+				note(alertCol, alert)
 			}
 			if dirty {
 				note(p.text.Alpha(0.85), locales.UnsavedChanges())
 			}
 		})
 	})
+}
+
+// railTipBar is the bar of how far along work is, done of 1, at the end
+// of its line in the tip of a project's square.
+func railTipBar(c *ui.Context, col ui.Color, done float32) {
+	bar := ui.Box(c).Size(28, 3).Shrink(0)
+	done = bar.Animate("done", done, progBar)
+	bar.Draw(func(pt *ui.Painter, r ui.Rect) {
+		pt.Fill(r, col.Alpha(0.18), r.H/2)
+		pt.Fill(ui.Rect{X: r.X, Y: r.Y, W: r.W * done, H: r.H}, col, r.H/2)
+	})
+}
+
+// records are the records of w, those that wait for the user first.
+func (w railWork) records() []terminal.StatusRecord {
+	return slices.Concat(w.blocked, w.working)
+}
+
+// railLine is what a record of a project's programs says in the tip of
+// its square: who, what, and how far along it is.
+func railLine(r terminal.StatusRecord) string {
+	if r.Progress >= 0 {
+		return fmt.Sprintf("%s %d%%", progLine(r), r.Progress)
+	}
+	return progLine(r)
+}
+
+// railDescription is what assistive technology hears of a project's
+// square besides its name: its folder, and what its programs that wait
+// and work say.
+func railDescription(where string, w railWork) string {
+	lines := []string{where}
+	for _, r := range w.records() {
+		lines = append(lines, railLine(r))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // railColorName is a color a project's square may be chosen in: its name

@@ -38,6 +38,7 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"file.openRecent", t.CmdFileOpenRecent(), "", a.openRecentPicker},
 		{"file.clearRecent", t.CmdFileClearRecent(), "", a.clearRecent},
 		{"remote.connect", t.CmdRemoteConnect(), "", a.openRemotePicker},
+		{"remote.openConfig", t.CmdRemoteOpenConfig(), "", a.openSSHConfig},
 		{"remote.openFolder", t.CmdRemoteOpenFolder(), "", a.openRemoteFolder},
 		{"remote.reconnect", t.CmdRemoteReconnect(), "", a.reconnect},
 		{"remote.disconnect", t.CmdRemoteDisconnect(), "", a.disconnect},
@@ -54,6 +55,7 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"file.copyPath", t.CmdFileCopyPath(), "", func() { a.copyActivePath(false) }},
 		{"file.copyRelativePath", t.CmdFileCopyRelativePath(), "", func() { a.copyActivePath(true) }},
 		{"file.reveal", revealActiveLabel(t), "", a.revealActive},
+		{"file.rename", t.CmdFileRename(), "", a.renameActive},
 		{"file.close", t.CmdFileClose(), "CmdOrCtrl+W", a.closeActive},
 		{"file.reopenClosed", t.CmdFileReopenClosed(), "Shift+CmdOrCtrl+T", a.reopenClosed},
 		{"file.closeFolder", t.CmdFileCloseFolder(), "", a.closeFolder},
@@ -170,6 +172,7 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"view.newTerminal", t.CmdViewNewTerminal(), "Ctrl+Shift+`", func() { a.openTerminal(a.workDir()) }},
 		{"view.terminalTab", t.CmdViewTerminalTab(), "", func() { a.newTerminalTab(a.fileColumn(), a.workDir(), true) }},
 		{"view.terminalMove", t.CmdViewTerminalMove(), "", a.moveTerminal},
+		{"view.terminalRename", t.CmdViewTerminalRename(), "", a.renameTerminal},
 		{"view.installHC", t.CmdViewInstallHC(), "", a.installHC},
 		{"view.terminalLocation", t.CmdViewTerminalLocation(), "", a.toggleTerminalLocation},
 		{"view.terminalLockRight", t.CmdViewTerminalLockRight(), "", a.moveTerminalToLockedRight},
@@ -328,6 +331,28 @@ func (a *app) moveTerminal() {
 	case a.panelTerm != nil:
 		a.terminalToColumn(a.panelTerm, a.column(), a.column().active+1)
 	}
+}
+
+// renameTerminal asks for a new name for the terminal that has the
+// keyboard, or had it last.
+func (a *app) renameTerminal() {
+	switch t := a.activeTab(); {
+	case a.focus == paneTerminal && a.panelTerm != nil:
+		a.askRenameTerminal(a.panelTerm)
+	case t != nil && t.term != nil:
+		a.askRenameTerminal(t.term)
+	case a.panelTerm != nil:
+		a.askRenameTerminal(a.panelTerm)
+	}
+}
+
+// askRenameTerminal asks for a new name for s, which it keeps over the
+// titles its programs give it; an empty one has it show those again.
+func (a *app) askRenameTerminal(s *session) {
+	a.prompt = &prompt{title: locales.TermRenameTitle(), hint: s.title, value: s.label(), optional: true, done: func(name string) string {
+		s.name = strings.TrimSpace(name)
+		return ""
+	}}
 }
 
 // setAppearance makes the windows light, dark, or follow the system for
@@ -500,7 +525,8 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 		reconnect, disconnect, forward := item("remote.reconnect"), item("remote.disconnect"), item("remote.forwardPort")
 		reconnect.Disabled, disconnect.Disabled, forward.Disabled = a.conn == nil, a.conn == nil, a.conn == nil
 		file = append(file, &mygo.MenuItem{Label: locales.MenuRemoteSSH(), Submenu: []*mygo.MenuItem{
-			item("remote.connect"), item("remote.openFolder"), mygo.Separator(), reconnect, disconnect, mygo.Separator(), forward,
+			item("remote.connect"), item("remote.openFolder"), item("remote.openConfig"),
+			mygo.Separator(), reconnect, disconnect, mygo.Separator(), forward,
 		}})
 	}
 	file = append(file, mygo.Separator(),
@@ -701,7 +727,7 @@ func (a *app) showTabKey(k ui.Key) {
 // appUIMenu fills the titlebar's menu on Windows and Linux, which have no
 // menu bar, with the menu bar's items.
 func (a *app) appUIMenu(m *ui.Menu) {
-	menu := a.menu(false, func(id string, _ *mygo.Window) {
+	menu := a.menu(runtime.GOOS == "windows" && mygo.App.IsPackaged(), func(id string, _ *mygo.Window) {
 		a.post(func() { a.run(id) })
 	})
 	a.populateUIMenu(m, menu.Items())

@@ -210,6 +210,9 @@ type app struct {
 	// keyboard as it next shows.
 	filesView  ui.Handle
 	focusFiles bool
+	// filesMenuBelow is set while the menu of the space below the files
+	// shows: chosen, its item runs wherever the pointer went to choose it.
+	filesMenuBelow bool
 	// treeSynced is the document the tree last followed, selectInTree the
 	// file it should choose once its row shows.
 	treeSynced, selectInTree string
@@ -373,9 +376,17 @@ type app struct {
 	// none.
 	rail func(c *ui.Context)
 	// alert is what a terminal of the project last asked attention for,
-	// by its bell or a notification, until the project shows: the rail
-	// marks its square.
-	alert string
+	// by its bell, a notification or work that finished or failed, until
+	// the project shows: the rail marks its square, in the color of
+	// alertState, the state of that work, StatusIdle for a bell or a
+	// notification, and alertAt when work set it, for the flash its dot
+	// sends out.
+	alert      string
+	alertState terminal.StatusState
+	alertAt    time.Time
+	// workDone is how far along the project's work last said it was, from
+	// 0 to 1, or -1, for its square's ring to keep as it fades out.
+	workDone float32
 }
 
 type pane int
@@ -389,6 +400,7 @@ const (
 
 func newApp(h host, s *settings.Settings, w *settings.Window) *app {
 	a := &app{host: h, settings: s, window: w, fileRow: -1}
+	setHCConfig(s.Prefs)
 	w.Normalize(settings.DefaultLayout)
 	a.scm.row, a.inFiles.row = -1, -1
 	a.files.List.Selected = &a.fileRow

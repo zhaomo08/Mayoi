@@ -454,6 +454,20 @@ func TestTerminalBackend(t *testing.T) {
 	}
 }
 
+// terminalBackendHcPath and terminalBackendHcEnv are kept as they are
+// written, for hc to use them as its commands run.
+func TestTerminalBackendHcPreferences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	os.WriteFile(path, []byte(`{"terminalBackend":"hc","terminalBackendHcPath":"/opt/hc/bin/hc","terminalBackendHcEnv":["A=1","NOEQUAL","B=x=y"]}`), 0o644)
+	s := Load(path)
+	if s.TerminalBackendHcPath != "/opt/hc/bin/hc" {
+		t.Errorf("hc path %q", s.TerminalBackendHcPath)
+	}
+	if want := []string{"A=1", "NOEQUAL", "B=x=y"}; !slices.Equal(s.TerminalBackendHcEnv, want) {
+		t.Errorf("hc env %q, want %q", s.TerminalBackendHcEnv, want)
+	}
+}
+
 func TestScmRepositoryPreferencesRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	s := Load(path)
@@ -475,19 +489,24 @@ func TestSyncedPrefs(t *testing.T) {
 		t.Error("the defaults are not default")
 	}
 	p.FontSize, p.Theme, p.ScmRemotes, p.ScmRepositoryOpen = 15, "claude", true, true
+	p.TerminalBackendHcPath, p.TerminalBackendHcEnv = "/opt/hc/bin/hc", []string{"MY_TOKEN=secret"}
 	if p.IsDefault() {
 		t.Error("changed preferences are default")
 	}
 	m := p.Synced()
-	if _, ok := m["scmRemotes"]; ok {
-		t.Error("scmRemotes syncs")
+	for _, k := range []string{"scmRemotes", "terminalBackendHcPath", "terminalBackendHcEnv"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("%s syncs", k)
+		}
 	}
 	if string(m["fontSize"]) != "15" || string(m["theme"]) != `"claude"` {
 		t.Errorf("synced = %s", m)
 	}
 	// Another machine's: the font size is out of range, and the panels of
-	// source control stay as this machine has them.
+	// source control and hc stay as this machine has them.
 	m["fontSize"] = json.RawMessage("40")
+	m["terminalBackendHcPath"] = json.RawMessage(`"perl"`)
+	m["terminalBackendHcEnv"] = json.RawMessage(`["PERL5OPT=-e1"]`)
 	delete(m, "theme")
 	q, err := p.WithSynced(m)
 	if err != nil {
@@ -495,6 +514,9 @@ func TestSyncedPrefs(t *testing.T) {
 	}
 	if q.FontSize != 28 || q.Theme != "" || !q.ScmRemotes || !q.ScmRepositoryOpen || !q.AutoSave {
 		t.Errorf("prefs = %+v", q)
+	}
+	if q.TerminalBackendHcPath != "/opt/hc/bin/hc" || !slices.Equal(q.TerminalBackendHcEnv, []string{"MY_TOKEN=secret"}) {
+		t.Errorf("hc %q %q", q.TerminalBackendHcPath, q.TerminalBackendHcEnv)
 	}
 	if !slices.Contains(PrefKeys, "fontSize") || !slices.Contains(PrefKeys, "locale") {
 		t.Errorf("PrefKeys = %v", PrefKeys)

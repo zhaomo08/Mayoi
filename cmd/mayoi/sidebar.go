@@ -240,6 +240,10 @@ func (a *app) fileTree(c *ui.Context) {
 	// Follow the document shown: open the folders above it and choose it.
 	if activePath != a.treeSynced {
 		a.treeSynced = activePath
+		// A file outside the folder has no row: none is chosen in its place.
+		if activePath != "" && !strings.HasPrefix(activePath, a.root+string(filepath.Separator)) {
+			a.fileRow, a.selectInTree = -1, ""
+		}
 		a.revealInTree(activePath)
 	}
 	chosen := a.explorerChoice()
@@ -322,6 +326,7 @@ func (a *app) fileTree(c *ui.Context) {
 			row.Background(p.accent.Alpha(0.16)).Radius(4)
 		}
 		row.ContextMenu(func(m *ui.Menu) {
+			a.filesMenuBelow = false
 			dir := path
 			if !isDir {
 				dir = filepath.Dir(path)
@@ -488,10 +493,18 @@ func (a *app) fileTree(c *ui.Context) {
 	if out.Clicked() && clicked == "" && below {
 		a.fileRow = -1
 	}
+	if clicked != "" || out.Clicked() {
+		a.filesMenuBelow = false
+	}
 	out.ContextMenu(func(m *ui.Menu) {
 		// Beside a row, as by its arrow, no menu: an empty one does not
-		// open.
-		if !below {
+		// open. The function runs again for the item chosen, with the
+		// pointer where the item was, over the rows or the editor: the
+		// place the menu opened at decides.
+		if below {
+			a.filesMenuBelow = true
+		}
+		if !a.filesMenuBelow {
 			return
 		}
 		a.fileRow = -1
@@ -771,7 +784,9 @@ func (a *app) renamed(path, to string) {
 			}
 		}
 	}
-	a.tree.Refresh()
+	if a.tree != nil {
+		a.tree.Refresh()
+	}
 	a.indexStale, a.indexed = true, time.Time{}
 	a.rememberTabs()
 }

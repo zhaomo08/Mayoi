@@ -202,6 +202,15 @@ type Prefs struct {
 	// TerminalBackend is what runs a terminal's shell: "" Mayoi itself,
 	// or "hc" a terminal of herdr-core, which outlives the window.
 	TerminalBackend string `json:"terminalBackend,omitempty"`
+	// TerminalBackendHcPath is the hc to run when TerminalBackend is
+	// "hc": a path to the program, a folder that has it, or a name on
+	// the path. Mayoi finds hc there first, and on the path or in
+	// ~/.local/bin without it.
+	TerminalBackendHcPath string `json:"terminalBackendHcPath,omitempty"`
+	// TerminalBackendHcEnv is the environment of hc's commands when
+	// TerminalBackend is "hc", as "KEY=value". A string without "=" or
+	// with a NUL is ignored.
+	TerminalBackendHcEnv []string `json:"terminalBackendHcEnv,omitempty"`
 	// ProjectTabs keeps the folders open in one window, a rail on its left
 	// choosing which shows, rather than a window for each.
 	ProjectTabs bool `json:"projectTabs,omitempty"`
@@ -214,6 +223,13 @@ type Prefs struct {
 	// AIModel is the model of Mon's AI gateway that writes commit
 	// messages, "" for Mayoi's choice.
 	AIModel string `json:"aiModel,omitempty"`
+	// AISecretFiles are patterns of files whose lines a commit message's
+	// AI never sees, after Mayoi's own: a name, or the end of a path with
+	// "/", its start with "/" first, "**" for any folders, "/" last for a
+	// folder, and "!" first to send a file that matched before. What looks
+	// like a key is left out whatever it says. A folder can't set it, so
+	// that a repository can't send what its cloner keeps out.
+	AISecretFiles []string `json:"aiSecretFiles,omitempty"`
 	// CrashReports is what Mayoi does with the report of a crash at the
 	// next launch: "" asks whether to send it to Mon, "always" sends it
 	// and "never" doesn't.
@@ -527,6 +543,7 @@ func (p *Prefs) normalize() {
 	}
 	p.LineHeight = clamp(p.LineHeight, 1, 3)
 	p.FontFeatures = slices.DeleteFunc(p.FontFeatures, func(f string) bool { return strings.TrimSpace(f) == "" })
+	p.AISecretFiles = slices.DeleteFunc(p.AISecretFiles, func(f string) bool { return strings.TrimSpace(f) == "" })
 	if p.TerminalFontSize != 0 {
 		p.TerminalFontSize = clamp(p.TerminalFontSize, 9, 28)
 	}
@@ -965,9 +982,11 @@ func (s *Settings) OnPrefsWritten(fn func()) {
 
 // unsynced are the preferences that stay on each machine: what the
 // windows remember of source control's panels rather than what a person
-// chooses, what the person keeps on the machine, and the looks of the
-// projects on the rail, by folders of this machine.
-var unsynced = []string{"scmRepositoryOpen", "scmRemotes", "syncIgnored", "projectTabStyle"}
+// chooses, what the person keeps on the machine, the looks of the
+// projects on the rail, by folders of this machine, and the hc to run
+// with its environment, which may hold secrets and runs as a terminal
+// opens.
+var unsynced = []string{"scmRepositoryOpen", "scmRemotes", "syncIgnored", "projectTabStyle", "terminalBackendHcPath", "terminalBackendHcEnv"}
 
 // PrefKeys are the keys of the preferences in the settings' file.
 var PrefKeys = func() []string {

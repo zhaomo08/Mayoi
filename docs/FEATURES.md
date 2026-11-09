@@ -162,7 +162,8 @@ tree, with a count of them. Files are grouped as merge changes, staged changes, 
   the summary line shows its length, in a warning color past 72.
 - Signed in to your [Mon](https://mon.sorrycc.dev) account, the ✨ button at the corner of the message box has AI write
   the message from the staged changes, or from every change when nothing is staged, in the style of the branch's last
-  commits. The message streams into the box; click the button again to stop. Text already in the box goes along as
+  commits. With nothing staged, new files go along with their lines, but files that may hold secrets, as `.env` and
+  keys, go by name only. The message streams into the box; click the button again to stop. Text already in the box goes along as
   notes to follow. **Git: Write Commit Message with AI** in the command palette does the same. It uses Mon's AI gateway
   and your account's daily limit; the `aiModel` setting picks another of its models.
 - The arrow beside the commit button has **Commit & Push**, **Amend Last Commit** (which fills in the last message) and
@@ -592,6 +593,10 @@ not have it yet.
   of `~/.ssh/config`, with those it includes. Each shows the user and the machine `ssh -G` resolves it to. Type to
   filter them, or type `user@host` or `user@host:port` to connect to one it does not list. While it connects, the box
   says as whom, and after a few seconds for how long; Escape goes back to the hosts.
+- **SSH Config**, beside the box's field, **File → Remote SSH → Open SSH Config** or the command palette opens this
+  machine's `~/.ssh/config` in a tab, in a remote window too. A missing one is made empty, for its owner alone to read
+  as ssh wants, and the box lists the hosts of the one saved the next time it opens. A linked one, as dotfile managers
+  make it, opens where it points, so saving it keeps the link.
 - Once connected, the box lists the folders of the host, from the folder opened there last, or the home folder. Type a
   path (`~` for the home folder), ↑↓ choose a folder, ↵ or Tab goes into it, `..` goes up, and ↵ on the first row opens
   the folder typed. The folder opens as **Open Folder** opens one: in the window if it shows nothing, else in a window,
@@ -651,8 +656,9 @@ not have it yet.
 ## The `mayoi` command
 
 **File → Install 'mayoi' Command** installs the command into `~/.local/bin` when that directory is on your `PATH`, and
-otherwise into `/usr/local/bin`, which asks for your password. On Linux, `install.sh` puts it in `~/.local/bin`, and the
-Debian package in `/usr/bin`.
+otherwise into `/usr/local/bin`, which asks for your password. On Windows, it installs `mayoi.cmd` in
+`%LOCALAPPDATA%\Mayoi\bin`, and adds that folder to your user `PATH`; open a new terminal to use it. On Linux,
+`install.sh` puts it in `~/.local/bin`, and the Debian package in `/usr/bin`.
 
 - `mayoi .` opens the current folder, in a new window or the one that already has it, or with project tabs in a new
   tab.
