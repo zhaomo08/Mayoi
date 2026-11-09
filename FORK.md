@@ -42,6 +42,11 @@ git checkout main && git merge --ff-only upstream/main && git push
 git checkout develop && git merge upstream/main   # 冲突时我们已合入上游的改动取 --theirs
 ```
 
+## 当前版本
+
+- 2026-11-09：已跟进上游 `v0.18.2`，保留自定义图标和关闭自动更新设置。
+- 本机安装由此仓库构建；更新时合并上游、执行针对性测试，再构建安装。
+
 ## 待办
 
 - LSP（gopls 先行验证，再 jdtls）——暂缓，先用起来再说
