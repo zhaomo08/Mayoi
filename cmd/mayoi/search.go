@@ -123,7 +123,8 @@ func (s *searchState) searchKey() string {
 func (s *searchState) changed() { s.version++ }
 
 // showSearch shows search in the sidebar, with the keyboard in its query,
-// which becomes the selection's text when it is on one line.
+// which becomes the selection's text when it is on one line, and selects
+// the query so typing or pasting replaces it.
 func (a *app) showSearch(replace bool) {
 	s := &a.inFiles
 	if d := a.activeEditor(); d != nil {
@@ -137,7 +138,7 @@ func (a *app) showSearch(replace bool) {
 	s.replacing = s.replacing || replace
 	a.window.SidebarClosed, a.window.SidebarView = false, "search"
 	a.settings.Changed()
-	s.input.Focus()
+	s.input.SelectAll()
 }
 
 // searchInFolder shows search with its files to include set to a folder,
@@ -183,7 +184,9 @@ func (a *app) startSearch() {
 		s.err = locales.FindInvalid()
 		return
 	}
-	a.indexStale = a.indexStale || a.index == nil
+	if a.index == nil {
+		a.indexRead.Invalidate()
+	}
 	a.refreshIndex()
 	if a.index == nil {
 		// Once the files are listed.
@@ -808,11 +811,11 @@ func (a *app) replaceAllInFiles() {
 	if closed > 0 {
 		msg = locales.SearchClosedWritten(closed)
 	}
-	a.confirm = &confirm{
+	a.present(&confirm{
 		title:   locales.SearchReplaceQuestion(s.count, len(files), with),
 		message: msg, ok: locales.FindReplaceAll(), danger: closed > 0,
 		run: func() { a.replaceMatches(files, nil) },
-	}
+	})
 }
 
 // searchView is the search view of the sidebar: the query and its

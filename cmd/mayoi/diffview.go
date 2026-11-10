@@ -321,6 +321,9 @@ type diffView struct {
 	wrapGen  int
 
 	files []*diffFile
+	// foldFiles is the last bulk choice, including files not yet listed.
+	// Once chosen, it also replaces automatic folding of large files.
+	foldFiles *bool
 	// status is the status of the repository the files were listed from.
 	status *git.Status
 	// commit is the commit whose changes the tab shows, from its first
@@ -406,6 +409,15 @@ type diffView struct {
 	// while the diff reads as a pager.
 	edits   []*diffEdit
 	editing *diffEdit
+	// textSel is the text selected, nil for none, and textDrag is set
+	// while the pointer pressed on the text extends it. controls are the
+	// buttons over the rows as the last frame had them, in the content,
+	// which a press on the text leaves to them.
+	textSel  *diffTextSel
+	textDrag bool
+	controls []ui.Rect
+	// find is what find found in the lines the diff shows.
+	find diffFind
 }
 
 // diffBoundary is where the navigation of a diff stopped: the step that
@@ -857,6 +869,9 @@ func (a *app) listDiffFiles(v *diffView) {
 		if !ok {
 			f := newDiffFile(l.e, l.group)
 			f.repoRoot = v.repoRoot
+			if v.foldFiles != nil {
+				f.folded = *v.foldFiles
+			}
 			v.files = append(v.files, f)
 			continue
 		}
@@ -911,6 +926,9 @@ func (a *app) listCommitFiles(v *diffView) {
 					f.prPath = r.Rel(e.Path)
 					f.folded = cm.pr.viewed[f.prPath]
 				}
+				if v.foldFiles != nil {
+					f.folded = *v.foldFiles
+				}
 				v.files = append(v.files, f)
 			}
 			v.tree.gen++
@@ -958,6 +976,14 @@ func (a *app) refreshDiff(v *diffView) {
 	}
 	if lo < hi {
 		order = append(order, v.files[lo:hi]...)
+	}
+	// Find looks in every file, which it reads after those in view.
+	if v.find.on {
+		for _, f := range v.files {
+			if !f.loaded {
+				order = append(order, f)
+			}
+		}
 	}
 	for _, f := range order {
 		if reading >= diffReads {
@@ -1112,7 +1138,7 @@ func (a *app) refreshDiffFile(v *diffView, f *diffFile) bool {
 			f.spans = nil
 			setDiffSide(&f.old, old, oldLines)
 			setDiffSide(&f.new, new, newLines)
-			if add, del := f.counts(); first && add+del > foldedLines {
+			if add, del := f.counts(); first && v.foldFiles == nil && add+del > foldedLines {
 				f.folded = true
 			}
 			v.changed()
@@ -1216,6 +1242,14 @@ func (a *app) layoutRows(v *diffView, l diffGeometry) {
 	}
 	if v.anchor >= 0 && v.anchor < len(v.rows) && v.tops != nil {
 		held = v.anchorOf(v.anchor)
+	}
+	// The text selected stays on its lines, unless the layout changes
+	// what its side is.
+	var selFrom, selTo diffAnchor
+	if s := v.textSel; s != nil && (s.side < 0) != b.split {
+		selFrom, selTo = v.anchorOf(s.from.row), v.anchorOf(s.to.row)
+	} else {
+		v.clearTextSel()
 	}
 	// The file to reveal shows its lines.
 	var target *diffFile
@@ -1429,6 +1463,7 @@ func (a *app) layoutRows(v *diffView, l diffGeometry) {
 			}
 		}
 	}
+	v.remapTextSel(selFrom, selTo)
 	v.anchor = -1
 	if held.file != nil {
 		for i := range v.rows {
@@ -1978,6 +2013,32 @@ func (a *app) activateRow(v *diffView, i int, open bool) {
 	}
 }
 
+// foldDiffFiles changes only the active diff's file headers. File contents
+// keep loading on demand, and a bulk fold leaves its current file in view.
+func (a *app) foldDiffFiles(folded bool) {
+	t := a.activeTab()
+	if t == nil || t.diff == nil {
+		return
+	}
+	v := t.diff
+	if folded {
+		a.endDiffEdit(v)
+	}
+	v.place, v.reveal, v.boundary = nil, nil, nil
+	if at := v.focusRowAt(v.focusRow()); folded && at >= 0 {
+		if p := v.anchorOf(at); p.file != nil && p.kind != rowCommit {
+			v.place = &diffAnchor{kind: rowFile, file: p.file}
+			v.jump = -1
+		}
+	}
+	a.keepTopRow(v, func() {
+		v.foldFiles = &folded
+		for _, f := range v.files {
+			f.folded = folded
+		}
+	})
+}
+
 // toggleGap opens the gap of row i, or folds again the gap its line is in.
 func (a *app) toggleGap(v *diffView, i int) {
 	if i < 0 || i >= len(v.rows) || v.rows[i].gap < 0 {
@@ -2062,9 +2123,15 @@ func (a *app) diffInput(v *diffView, ev ui.InputEvent) bool {
 			return true
 		}
 	}
-	// A line of the diff copies as it is, of the side the chosen row
-	// shows, while the diff reads as a pager; rows that hold a review
-	// note copy as an excerpt.
+	// The text selected copies as it is; else a line of the diff, of the
+	// side the chosen row shows, while the diff reads as a pager; rows
+	// that hold a review note copy as an excerpt.
+	if ev.Kind == ui.InputCommand && ev.Text == "copy" {
+		if s := v.selectedText(); s != "" {
+			a.services.WriteClipboard(s)
+			return true
+		}
+	}
 	if ev.Kind == ui.InputCommand && ev.Text == "copy" && v.editing == nil {
 		if s := v.diffChosenText(); s != "" {
 			a.services.WriteClipboard(s)
@@ -2086,6 +2153,9 @@ func (a *app) diffInput(v *diffView, ev ui.InputEvent) bool {
 			return true
 		}
 	}
+	if a.diffTextInput(v, ev) {
+		return true
+	}
 	if ev.Kind != ui.InputKeyDown || ev.Mods&^ui.Shift != 0 {
 		return false
 	}
@@ -2105,9 +2175,10 @@ func (a *app) diffInput(v *diffView, ev ui.InputEvent) bool {
 			v.moveCursor(-1)
 		}
 	case ui.KeyEscape:
-		if v.anchor < 0 {
+		if v.anchor < 0 && v.textSel == nil {
 			return false
 		}
+		v.clearTextSel()
 		v.anchor = -1
 	case ui.KeyC:
 		a.commentDiff(v)

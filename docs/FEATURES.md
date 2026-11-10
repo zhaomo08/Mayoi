@@ -260,6 +260,11 @@ changed lines starts folded. Point at a header, or choose
 it, for buttons that open the file, stage or unstage it, and discard its changes. Files are read as they come near the
 view, so a long list of changes opens at once.
 
+**Git → Collapse All Files in Diff** and **Expand All Files in Diff** fold or unfold every file in the current diff
+tab, including a commit's changes. On macOS, use ⌥⌘[ to collapse and ⌥⌘] to expand. Both commands can be assigned keys
+in **Settings → Keyboard Shortcuts** (`git.collapseAllFiles` and `git.expandAllFiles`); Windows and Linux have no
+default keys for them. Folding keeps the current file's header in view. Expanding still reads files on demand.
+
 Only three unchanged lines show around each change. The rest fold into a row that says how many lines it hides, and a
 click opens it. Each run of changes starts with an `@@` header naming the lines and the block it is in, as Git writes
 it. **Show Full Files** in the breadcrumbs shows every line.
@@ -676,6 +681,30 @@ otherwise into `/usr/local/bin`, which asks for your password. On Windows, it in
   argument one doesn't take, runs none of them.
 - `mayoi commands` lists the commands, a line for each, with its identifier, name, shortcut and argument, apart by
   tabs.
+- `mayoi settings` lists every preference of `settings.json`, a line for each, with its key, a tab, and its value as
+  JSON.
+- `mayoi settings get <key>...` prints the values of preferences, a line each.
+- `mayoi settings set <key>=<value>...` changes them, as `mayoi settings set fontSize=16 theme=claude vim=true`: a
+  value is JSON when it is JSON, and any other text is the text itself, so quotes are only for a text that is JSON
+  too, as `theme=""`.
+- `mayoi settings unset <key>...` gives them their value of a first launch again.
+- `mayoi settings set <key>+=<item>` adds an item to a list, as `mayoi settings set 'fontFeatures+=calt=0'`, and
+  `<key>-=<item>` takes one away, rather than a list being written out whole. The last item taken away leaves no list,
+  and an item a list has already is no item more of it.
+- `mayoi settings set projectTabStyle.'<folder>'.label=MG` changes one field of a project's look on the rail, and
+  `.<folder>` alone the whole look; a field is `label` or `color`, and leaving it empty takes it away. The folder
+  needs no quotes, though it may have dots of its own, and may be told from the current folder or from `~`. An icon is chosen in the
+  rail's menu rather than from here, and the icon a look has stays as the command changes it.
+- `mayoi settings --folder ...` acts on the current folder's own `.mayoi/settings.json`, of the preferences a folder
+  can choose, which it lists, and changes, as `mayoi settings --folder set autoSave=false`. In a subfolder of a project
+  it acts on the nearest file up from it, the one the project reads, and `get` prints `null` of a preference the file
+  doesn't choose.
+- The `settings` commands change the files themselves, so they work while Mayoi isn't running; a Mayoi running reads
+  the file again and applies the change at once. A preference it has none of, a value of the wrong type, a number
+  out of its range or a choice that isn't one of its options says what it takes instead, changes nothing, and exits
+  with status 1.
+- `mayoi plugin <command>` installs, updates, removes, writes and packs plugins; see [PLUGINS.md](PLUGINS.md).
+- `mayoi --disable-plugins` turns off every plugin but those Mayoi comes with, until Mayoi starts again.
 - `mayoi --help` lists the options, and `mayoi --version` prints the version.
 
 A command acts on the window whose folder contains the directory it runs in, else the one in front; `--window
@@ -741,6 +770,27 @@ and own word wrap, and the folders open in the Explorer. Started without a folde
 open when it quit.
 A recent folder closed, by closing its window, **File → Close Folder** or opening another folder in its window, opens
 again with its tabs, columns and Explorer as they were. Closing the last window quits the app.
+
+## Plugins
+
+Plugins are folders of JavaScript or TypeScript in `~/.mayoi/plugins`, which Mayoi runs in its own engine, each
+apart, with no Node and no build step. They add commands, keyboard shortcuts and menu items, status bar items, views in
+the sidebar, previews beside the source, formatters, diagnostics, themes (VS Code's too), languages, snippets and
+language servers, and they work on SSH folders with nothing installed on the host. See [PLUGINS.md](PLUGINS.md).
+
+- `mayoi plugin install <git-url or owner/repo>` installs one, and **Plugins → Manage Plugins…** opens the Plugins page
+  of the settings window: install, update, remove, turn each on and off, and change its settings.
+- **Plugins → Show Plugin Log** and **Show Running Plugins** tell what plugins logged and what they use.
+- **Selection → Format Document** (⇧⌥F) formats with a plugin, and `formatOnSave` formats as you save.
+- A language server a plugin declares underlines problems, and answers **Go → Go to Definition** (F12),
+  **Go → Show Hover** and **Selection → Complete Word** (⌃Space).
+- **Show Problems** lists every problem plugins found; the status bar counts them.
+- **Selection → Insert Snippet…** inserts a snippet of a plugin's.
+- A `.ts` file in `~/.mayoi/scripts` makes each function it exports a command; **Plugins → Run Selection as Script**
+  runs the selection once.
+- Signed in, the plugins you install from Git follow you to your other machines.
+- Mayoi comes with **Word Count**, the words of a Markdown file in the status bar, and **TODOs**, the folder's TODO
+  comments in the sidebar.
 
 ## Settings
 

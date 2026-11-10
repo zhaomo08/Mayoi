@@ -57,7 +57,11 @@ func (a *app) attachRemote(dir string) {
 	c.Acquire()
 	a.conn = c
 	a.connUnsub = c.Subscribe(func() { a.post(a.connChanged) })
-	a.connState, a.connErr = c.State()
+	// Another project may have connected it already.
+	a.link = link{kind: linkConnecting}
+	if s, _ := c.State(); s == remote.Connected {
+		a.link = link{kind: linkOnline}
+	}
 	c.Connect()
 }
 
@@ -69,16 +73,88 @@ func (a *app) detachRemote() {
 		return
 	}
 	a.connUnsub()
-	a.stopRetry()
-	a.retries = 0
-	a.conn, a.connUnsub, a.connState, a.connErr = nil, nil, remote.Offline, nil
+	a.link.stopTimer()
+	a.conn, a.connUnsub, a.link = nil, nil, link{}
 	// Ending it waits on ssh.
 	go c.Release()
 }
 
 // online reports whether the folder's files can be reached: always for a
 // folder of this machine.
-func (a *app) online() bool { return a.conn == nil || a.connState == remote.Connected }
+func (a *app) online() bool { return a.conn == nil || a.link.kind == linkOnline }
+
+// linkKind is where the connection of a remote folder is in its cycle.
+type linkKind int
+
+const (
+	// linkStopped is not connected, until asked: disconnected on purpose,
+	// or refused.
+	linkStopped linkKind = iota
+	// linkConnecting connects when asked to.
+	linkConnecting
+	// linkOnline is connected.
+	linkOnline
+	// linkBackoff waits to connect again, after the connection was lost or
+	// the host did not answer.
+	linkBackoff
+	// linkReconnecting connects again by itself, after waiting.
+	linkReconnecting
+)
+
+// link is how the connection to the host of a remote folder goes, as the
+// app follows it. n counts the connections that failed in a row while it
+// waits or reconnects; at is when the reconnection waited for starts, and
+// timer starts it. why says why it is lost or stopped: nil when
+// disconnected on purpose.
+type link struct {
+	kind  linkKind
+	n     int
+	at    time.Time
+	timer *time.Timer
+	why   error
+}
+
+// dialing reports whether the connection is being made.
+func (l link) dialing() bool { return l.kind == linkConnecting || l.kind == linkReconnecting }
+
+// offline reports whether the connection is neither made nor being made.
+func (l link) offline() bool { return l.kind == linkStopped || l.kind == linkBackoff }
+
+// stopTimer cancels the reconnection waited for, if any.
+func (l link) stopTimer() {
+	if l.timer != nil {
+		l.timer.Stop()
+	}
+}
+
+// next is the link once the connection is seen in state s, with err.
+// What starts or stops the timer is the caller's.
+func (l link) next(s remote.State, err error) link {
+	switch {
+	case s == remote.Connected:
+		return link{kind: linkOnline}
+	case s == remote.Connecting:
+		switch l.kind {
+		case linkBackoff, linkReconnecting:
+			return link{kind: linkReconnecting, n: l.n}
+		case linkStopped:
+			return link{kind: linkConnecting}
+		}
+		return l
+	case err != nil && !remote.Refused(err):
+		// Lost, or the host did not answer: tried again by itself, ever
+		// less often, as the network may be back in a moment.
+		switch l.kind {
+		case linkBackoff:
+			return l
+		case linkConnecting, linkReconnecting:
+			return link{kind: linkBackoff, n: l.n + 1, why: err}
+		}
+		return link{kind: linkBackoff, why: err}
+	}
+	// Disconnected on purpose, or refused: until asked.
+	return link{kind: linkStopped, why: err}
+}
 
 // connChanged follows the connection as it connects or goes: back online,
 // what could not be read is read now, and what changed meanwhile again.
@@ -86,25 +162,16 @@ func (a *app) connChanged() {
 	if a.conn == nil {
 		return
 	}
-	was := a.connState
-	a.connState, a.connErr = a.conn.State()
+	was := a.link
+	a.link = was.next(a.conn.State())
+	if was.kind == linkBackoff && a.link.kind != linkBackoff {
+		was.stopTimer()
+	}
 	switch {
-	case a.connState == remote.Connected:
-		a.stopRetry()
-		a.retries = 0
-		if was != remote.Connected {
-			a.reconnected()
-		}
-	case a.connState == remote.Offline && a.connErr != nil && !remote.Refused(a.connErr):
-		// Lost, or the host did not answer: tried again by itself, ever
-		// less often, as the network may be back in a moment.
-		if was == remote.Connecting && a.retry == nil {
-			a.retries++
-		}
+	case a.link.kind == linkOnline && was.kind != linkOnline:
+		a.reconnected()
+	case a.link.kind == linkBackoff && was.kind != linkBackoff:
 		a.scheduleRetry()
-	default:
-		// Disconnected on purpose, or refused: until asked.
-		a.stopRetry()
 	}
 }
 
@@ -114,39 +181,32 @@ func retryDelay(n int) time.Duration {
 	return min(2*time.Second<<min(n, 5), 30*time.Second)
 }
 
-// scheduleRetry connects again once retryDelay passed, unless it is due.
+// scheduleRetry connects again once retryDelay passed.
 func (a *app) scheduleRetry() {
-	if a.retry != nil || a.conn == nil {
-		return
-	}
-	d := retryDelay(a.retries)
-	a.retryAt = time.Now().Add(d)
-	a.retry = time.AfterFunc(d, func() {
+	d := retryDelay(a.link.n)
+	var t *time.Timer
+	t = time.AfterFunc(d, func() {
 		a.post(func() {
-			if a.retry == nil {
-				return
-			}
-			a.retry = nil
-			if a.conn != nil {
-				a.conn.Connect()
+			if a.link.kind == linkBackoff && a.link.timer == t {
+				a.redial()
 			}
 		})
 	})
+	a.link.at, a.link.timer = time.Now().Add(d), t
 }
 
-func (a *app) stopRetry() {
-	if a.retry != nil {
-		a.retry.Stop()
-		a.retry = nil
-	}
+// redial connects again a connection that waits to.
+func (a *app) redial() {
+	a.link.stopTimer()
+	a.link = link{kind: linkReconnecting, n: a.link.n}
+	a.conn.Connect()
 }
 
 // wake connects at once a folder whose host was lost, as the window comes
 // back to the front: after sleep the network is often back by then.
 func (a *app) wake() {
-	if a.conn != nil && a.retry != nil {
-		a.stopRetry()
-		a.conn.Connect()
+	if a.conn != nil && a.link.kind == linkBackoff {
+		a.redial()
 	}
 }
 
@@ -174,9 +234,9 @@ func (a *app) reconnected() {
 			continue
 		}
 		switch {
-		case d.loadErr != nil:
+		case d.sync == syncLoadFailed:
 			a.loadRemote(d)
-		case !d.loading && !d.dirty():
+		case d.sync != syncLoading && !d.dirty():
 			a.reloadDoc(d)
 		}
 	}
@@ -191,17 +251,18 @@ func (a *app) reconnected() {
 	for _, ctx := range a.rootRepositoryList() {
 		ctx.git.meta, ctx.git.refsMeta = time.Time{}, time.Time{}
 	}
-	a.repositories.dirty = true
-	a.indexStale, a.ignoredStale = true, true
+	a.repositories.scan.Invalidate()
+	a.indexRead.Invalidate()
+	a.ignoredRead.Invalidate()
 	a.gitChanged()
 	a.restartTerminals()
 }
 
 // reconnect connects the folder's host again.
 func (a *app) reconnect() {
-	if a.conn != nil {
-		a.stopRetry()
-		a.retries = 0
+	if a.conn != nil && a.link.offline() {
+		a.link.stopTimer()
+		a.link = link{kind: linkConnecting}
 		a.conn.Connect()
 	}
 }
@@ -215,10 +276,17 @@ func (a *app) disconnect() {
 }
 
 // markOffline makes the documents of a host that is not connected
-// read-only. It runs once a frame.
+// read-only: the folder's host as its link says. It runs once a frame.
 func (a *app) markOffline() {
 	for _, d := range a.docs {
-		d.offline = remote.Is(d.path) && !remote.IsConnected(d.path)
+		switch host := remote.HostOf(d.path); {
+		case host == "":
+			d.offline = false
+		case a.conn != nil && host == a.conn.Host:
+			d.offline = a.link.kind != linkOnline
+		default:
+			d.offline = !remote.IsConnected(d.path)
+		}
 	}
 }
 
@@ -226,10 +294,10 @@ func (a *app) markOffline() {
 // document is empty and read-only until it is read, or says why it could
 // not be.
 func (a *app) loadRemote(d *document) {
-	d.loading, d.loadErr = true, nil
+	d.sync, d.loadErr = syncLoading, nil
 	path := d.path
 	if !remote.IsConnected(path) {
-		d.loading, d.loadErr = false, remote.ErrOffline
+		d.sync, d.loadErr = syncLoadFailed, remote.ErrOffline
 		return
 	}
 	go func() {
@@ -246,13 +314,13 @@ func (a *app) remoteLoaded(d *document, path string, info fs.FileInfo, data []by
 	if !slices.Contains(a.docs, d) || d.path != path {
 		return
 	}
-	d.loading = false
 	if err == nil && isBinary(data) {
 		err = errBinary
 	} else if err == nil && hasLongLine(data) {
 		err = errLongLine
 	}
 	if err != nil {
+		d.sync, d.loadErr = syncLoadFailed, err
 		if errors.Is(err, remote.ErrOffline) || !remote.IsConnected(path) {
 			d.loadErr = remote.ErrOffline
 			return
@@ -260,7 +328,6 @@ func (a *app) remoteLoaded(d *document, path string, info fs.FileInfo, data []by
 		var re *remote.Error
 		if errors.As(err, &re) && !errors.Is(err, fs.ErrNotExist) {
 			// The host said something else went wrong: it may be tried again.
-			d.loadErr = err
 			return
 		}
 		switch {
@@ -274,7 +341,7 @@ func (a *app) remoteLoaded(d *document, path string, info fs.FileInfo, data []by
 		a.dropDocTabs(d)
 		return
 	}
-	d.loadErr = nil
+	d.sync, d.loadErr = syncIdle, nil
 	crlf := bytes.Contains(data, []byte("\r\n"))
 	if crlf {
 		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
@@ -311,11 +378,15 @@ func (a *app) dropDocTabs(d *document) {
 // does, unless the file is as the document last read or wrote it: that
 // costs a stat, not the file.
 func (a *app) reloadRemote(d *document) {
-	if d.loading || d.saving || !remote.IsConnected(d.path) {
+	if !remote.IsConnected(d.path) {
 		return
 	}
-	if d.loadErr != nil {
+	switch d.sync {
+	case syncLoadFailed:
 		a.loadRemote(d)
+		return
+	case syncIdle, syncConflict:
+	default:
 		return
 	}
 	path, old := d.path, d.stamp
@@ -332,11 +403,17 @@ func (a *app) reloadRemote(d *document) {
 			return
 		}
 		a.post(func() {
-			if !slices.Contains(a.docs, d) || d.path != path || d.loading || d.saving || d.dirty() {
+			// A read or a save since, as an overwrite, has the newer text.
+			if !slices.Contains(a.docs, d) || d.path != path || d.sync != syncIdle && d.sync != syncConflict || d.dirty() || d.stamp != old {
 				return
 			}
 			d.takeText(data)
 			d.stamp = stampOf(info)
+			// The file's text, unchanged here, settles a conflict.
+			if d.sync == syncConflict {
+				d.sync = syncIdle
+				a.answerSaves(d, errNotSaved)
+			}
 		})
 	}()
 }
@@ -345,15 +422,17 @@ func (a *app) reloadRemote(d *document) {
 // or failed with why it could not. A save asked for while one runs
 // follows it.
 func (a *app) saveRemote(d *document, done func(), failed func(error)) {
-	if d.saving {
-		d.resave, d.resaveDone, d.resaveFailed = true, done, failed
-		return
-	}
+	a.requestSave(d, saveWaiter{done: done, failed: failed})
+}
+
+// writeRemote writes a remote document in the background, for the saves
+// waiting, which it answers.
+func (a *app) writeRemote(d *document) {
 	if !remote.IsConnected(d.path) {
-		failed(errors.New(locales.ErrNotConnectedTo(remote.HostOf(d.path))))
+		a.answerSaves(d, errors.New(locales.ErrNotConnectedTo(remote.HostOf(d.path))))
 		return
 	}
-	d.saving = true
+	d.sync = syncSaving
 	snap, data := d.encode()
 	crlf, path := d.crlf, d.path
 	// The file as it was read, unless it changed on the host since.
@@ -369,12 +448,20 @@ func (a *app) saveRemote(d *document, done func(), failed func(error)) {
 			info = ri
 		}
 		a.post(func() {
-			d.saving = false
-			if errors.Is(err, remote.ErrChanged) && d.path == path {
-				a.saveConflict(d, done, failed)
-			} else if err != nil {
-				failed(err)
-			} else {
+			d.sync = syncIdle
+			switch {
+			case errors.Is(err, remote.ErrChanged) && d.path == path:
+				if len(d.queued) > 0 {
+					// A save asked for since, as an overwrite, has the last
+					// word, for these saves too.
+					d.queued = append(d.waiters, d.queued...)
+					d.waiters = nil
+				} else {
+					a.saveConflict(d)
+				}
+			case err != nil:
+				a.answerSaves(d, err)
+			default:
 				if d.path == path {
 					d.wrote(snap, crlf)
 					d.stamp = stampOf(info)
@@ -382,17 +469,9 @@ func (a *app) saveRemote(d *document, done func(), failed func(error)) {
 				if a.tree != nil {
 					a.tree.Stamp(path, info)
 				}
-				if done != nil {
-					done()
-				}
+				a.answerSaves(d, nil)
 			}
-			if d.resave {
-				next, nextFailed := d.resaveDone, d.resaveFailed
-				d.resave, d.resaveDone, d.resaveFailed = false, nil, nil
-				if d.dirty() || next != nil {
-					a.saveRemote(d, next, nextFailed)
-				}
-			}
+			a.nextSave(d)
 		})
 	}()
 }
@@ -412,7 +491,7 @@ func (a *app) askSavePath(name string, done func(path string)) {
 		}
 		done(remote.Path(host, p))
 		return ""
-	}}
+	}, cancel: func() { done("") }}
 }
 
 // hostPath is how a path is copied or shown as text: a remote one as its
@@ -428,7 +507,7 @@ func hostPath(p string) string {
 // is not connected: connecting, the reconnection due, or why it is not,
 // and a button to connect now.
 func (a *app) remoteBanner(c *ui.Context) {
-	if a.conn == nil || a.connState == remote.Connected {
+	if a.conn == nil || a.link.kind == linkOnline {
 		return
 	}
 	p := a.pal
@@ -447,22 +526,23 @@ func (a *app) remoteBanner(c *ui.Context) {
 	}
 	var spans []ui.Span
 	button := locales.RemoteReconnect()
+	l := a.link
 	switch {
-	case a.connState == remote.Connecting && a.retries > 0:
-		spans = append(about(locales.RemoteReconnectingTo(host)), faint(locales.RemoteAttempt(a.retries+1)))
-	case a.connState == remote.Connecting:
+	case l.kind == linkReconnecting:
+		spans = append(about(locales.RemoteReconnectingTo(host)), faint(locales.RemoteAttempt(l.n+1)))
+	case l.kind == linkConnecting:
 		spans = about(locales.RemoteConnectingTo(host))
-	case remote.Refused(a.connErr):
-		tint, icon, iconCol = p.danger.Alpha(0.10), iconLock, p.danger
-		spans = append(about(locales.RemoteRefused(host)), faint(a.connErr.Error()))
-		button = locales.RemoteTryAgain()
-	case a.connErr != nil:
+	case l.kind == linkBackoff:
 		tint, icon, iconCol = p.danger.Alpha(0.08), iconWifiOff, p.danger
 		spans = about(locales.RemoteLostTo(host))
-		if !errors.Is(a.connErr, remote.ErrLost) {
-			spans = append(spans, faint(a.connErr.Error()))
+		if !errors.Is(l.why, remote.ErrLost) {
+			spans = append(spans, faint(l.why.Error()))
 		}
 		button = locales.RemoteReconnectNow()
+	case remote.Refused(l.why):
+		tint, icon, iconCol = p.danger.Alpha(0.10), iconLock, p.danger
+		spans = append(about(locales.RemoteRefused(host)), faint(l.why.Error()))
+		button = locales.RemoteTryAgain()
 	default:
 		spans = append(about(locales.RemoteDisconnectedFrom(host)), faint(locales.RemoteReadOnly()))
 	}
@@ -472,21 +552,21 @@ func (a *app) remoteBanner(c *ui.Context) {
 	}
 	ui.Row(c.Key("remote-banner")).Tooltip(full).Height(34).Padding(0, 6, 0, 12).Gap(10).AlignItems(ui.Center).Background(tint).
 		BorderWidth(0, 0, 1, 0).BorderColor(p.border).Children(func() {
-		if a.connState == remote.Connecting {
+		if l.dialing() {
 			ui.Spinner(c).Size(13, 13)
 		} else {
 			ui.Icon(c, icon).FontSize(14).TextColor(iconCol)
 		}
 		ui.RichText(c, spans...).FontSize(12.5).SingleLine().Shrink(1)
 		ui.Spacer(c)
-		if a.connState == remote.Connecting {
+		if l.dialing() {
 			return
 		}
-		if a.retry != nil {
-			left := max(time.Until(a.retryAt).Round(time.Second), time.Second)
+		if l.kind == linkBackoff {
+			left := max(time.Until(l.at).Round(time.Second), time.Second)
 			ui.Text(c, locales.RemoteRetryingIn(int(left.Seconds()))).FontSize(12).TextColor(p.muted).SingleLine().Shrink(0)
 			// Again as the count goes down.
-			time.AfterFunc(max(time.Until(a.retryAt)%time.Second, 0)+20*time.Millisecond, a.invalidate)
+			time.AfterFunc(max(time.Until(l.at)%time.Second, 0)+20*time.Millisecond, a.invalidate)
 		}
 		if a.barButton(c, "remote-banner-connect", button).Clicked() {
 			a.reconnect()
@@ -501,19 +581,19 @@ func (a *app) remoteTreeWaits(c *ui.Context) {
 	host := a.conn.Host
 	ui.Column(c).Padding(28, 20, 16, 20).Gap(8).AlignItems(ui.Center).Children(func() {
 		popUp(ui.Box(c.Key("badge")).Size(44, 44).Radius(22).Background(p.text.Alpha(0.06)).Justify(ui.Center).AlignItems(ui.Center)).Children(func() {
-			if a.connState == remote.Connecting {
+			if a.link.dialing() {
 				ui.Spinner(c).Size(18, 18)
 			} else {
 				ui.Icon(c, iconWifiOff).FontSize(20).TextColor(p.muted)
 			}
 		})
 		title, msg := locales.RemoteConnecting(), locales.RemoteFilesShowOnce(host)
-		if a.connState == remote.Offline {
+		if a.link.offline() {
 			title, msg = locales.RemoteNotConnected(), locales.RemoteFilesOfShow(host)
 		}
 		ui.Text(c, title).FontSize(13).FontWeight(600).TextColor(p.text).Margin(4, 0, 0, 0)
 		ui.Text(c, msg).FontSize(12).TextColor(p.muted).TextAlign(ui.Center).LineHeight(1.45)
-		if a.connState == remote.Offline {
+		if a.link.offline() {
 			ui.Box(c).Height(4)
 			if ui.Button(c.Key("tree-reconnect"), locales.RemoteReconnect()).FillWidth().Clicked() {
 				a.reconnect()
@@ -551,13 +631,13 @@ func (a *app) remoteStatus(c *ui.Context, text func(string) ui.Element) {
 	host := a.conn.Host
 	label, tip, tint := "SSH: "+host, locales.RemoteConnectedTo(host), p.accent
 	switch {
-	case a.connState == remote.Connected:
+	case a.link.kind == linkOnline:
 		if info := a.conn.Info(); info.OS != "" {
 			tip += " (" + info.OS + ")"
 		}
-	case a.connState == remote.Connecting:
+	case a.link.dialing():
 		tip = locales.RemoteConnectingTip(host)
-	case a.retry != nil:
+	case a.link.kind == linkBackoff:
 		tip, tint = locales.RemoteLostReconnecting(host), p.danger
 	default:
 		tip, tint = locales.RemoteDisconnectedTip(host), p.danger
@@ -570,11 +650,11 @@ func (a *app) remoteStatus(c *ui.Context, text func(string) ui.Element) {
 	}
 	b.Transition(hoverFade)
 	b.Children(func() {
-		if a.connState == remote.Connecting {
+		if a.link.dialing() {
 			ui.Spinner(c).Size(11, 11)
 		} else {
 			icon, col := iconServer, p.statusFg
-			if a.connState == remote.Offline {
+			if a.link.offline() {
 				icon, col = iconWifiOff, p.danger
 			}
 			ui.Icon(c, icon).FontSize(12).TextColor(col)
@@ -582,10 +662,10 @@ func (a *app) remoteStatus(c *ui.Context, text func(string) ui.Element) {
 		text(label)
 	})
 	b.Menu(func(m *ui.Menu) {
-		if m.Item(locales.RemoteReconnect()).Disabled(a.connState != remote.Offline).Chosen() {
+		if m.Item(locales.RemoteReconnect()).Disabled(!a.link.offline()).Chosen() {
 			a.reconnect()
 		}
-		if m.Item(locales.RemoteDisconnect()).Disabled(a.connState == remote.Offline).Chosen() {
+		if m.Item(locales.RemoteDisconnect()).Disabled(a.link.offline()).Chosen() {
 			a.disconnect()
 		}
 		m.Separator()
@@ -610,7 +690,7 @@ func (a *app) remoteStatus(c *ui.Context, text func(string) ui.Element) {
 func (a *app) loadingView(c *ui.Context, d *editor) {
 	p := a.pal
 	ui.Column(c).Fill().Center().Gap(10).Background(p.editor).Padding(24).Children(func() {
-		if d.loading {
+		if d.sync == syncLoading {
 			ui.Spinner(c).Size(16, 16)
 			ui.Text(c, locales.RemoteReading(d.name())).FontSize(13).TextColor(p.muted)
 			return
@@ -641,28 +721,40 @@ func (a *app) shutdown() {
 
 // saveConflict asks what to do with a remote document whose file changed
 // on the host since it was read: write it over the file, or take the
-// file's text, as a step that undo takes back. An autosave asks once,
-// until the document is saved by hand.
-func (a *app) saveConflict(d *document, done func(), failed func(error)) {
-	if d.conflict {
-		return
-	}
-	d.conflict = true
+// file's text, as a step that undo takes back. The saves waiting wait for
+// the answer; put off, they are not made, and autosave waits until the
+// document is saved by hand, which asks again.
+func (a *app) saveConflict(d *document) {
+	d.sync = syncConflict
 	host := remote.HostOf(d.path)
-	a.confirm = &confirm{
+	a.ask(&confirm{
 		title:   locales.RemoteChangedOn(d.name(), host),
 		message: locales.RemoteChangedDetail(host),
 		ok:      locales.RemoteOverwrite(), danger: true, okShort: locales.RemoteOverwrite(),
 		run: func() {
-			d.conflict, d.stamp = false, nil
-			a.saveRemote(d, done, failed)
+			if d.sync != syncConflict {
+				return
+			}
+			d.sync, d.stamp = syncIdle, nil
+			d.queued = append(d.waiters, d.queued...)
+			d.waiters = nil
+			a.nextSave(d)
 		},
 		alternate: locales.RemoteRevertToFile(), alternateShort: locales.RemoteRevert(),
 		runAlternate: func() {
-			d.conflict = false
+			if d.sync != syncConflict {
+				return
+			}
+			d.sync = syncIdle
+			a.answerSaves(d, errNotSaved)
 			a.revertRemote(d)
 		},
-	}
+		cancel: func() {
+			if d.sync == syncConflict {
+				a.answerSaves(d, errNotSaved)
+			}
+		},
+	})
 }
 
 // revertRemote makes a remote document's text the file's, changes and

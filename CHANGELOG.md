@@ -3,6 +3,109 @@
 The update window shows the section of the version it offers. Every release
 needs a `## <version>` section here, or its build fails.
 
+## Unreleased
+
+- Language server plugins can run a `resolve` command that sets the server's arguments, environment and settings.
+- Language server plugins can map paths so definitions and diagnostics keep the workspace's symlinked paths.
+- Mayoi no longer waits on a language server that has already stopped.
+- Inline blame now shows with **View → Word Wrap** on, after the caret line's last row.
+- When a wrapped line's last row is too full, its inline blame is cut short with `…`.
+- Dragging over code in a diff selects text across lines; dragging on the line numbers still selects rows.
+- Double-clicking a word in a diff selects it, and a triple click selects the line; `E` opens the file.
+- `Cmd+C` in a diff copies the selected code with its indent, without line numbers or `+`/`-` marks.
+- Side by side, a selection stays on the side where it started.
+- `Cmd+F` in a diff tab finds in the lines it shows on both sides, in every file, with a match count.
+- `Enter` and `Shift+Enter` in a diff's Find go to each match, unfolding a collapsed file to show it.
+- **Git → Collapse All Files in Diff** and **Expand All Files in Diff** fold the current diff's files.
+- On macOS, `Option+Cmd+[` collapses all diff files and `Option+Cmd+]` expands them.
+- `mayoi settings` reads and changes preferences, with Mayoi running or not.
+- `mayoi settings --folder` in a project's subfolder changes the project's `.mayoi/settings.json`.
+- Choosing **Overwrite** for a remote file that changed on its host no longer asks again while an autosave runs.
+- After a remote connection is lost, the banner shows its first try to reconnect as attempt 1.
+- A question that comes up in the background now waits instead of replacing the dialog you're answering.
+- Questions that come up in the background, as a remote file's conflict, wait for an open picker to close.
+- Pressing `Cmd+Q` or a window's close button again while the unsaved-changes question shows brings it forward.
+- Saving a remote file while another save is under way no longer loses a pending save and close.
+- **Revert** or `Escape` on the "changed on host" question keeps the tab open instead of dropping the save.
+- Autosave no longer writes to the host while the "changed on host" question waits for an answer.
+- With format on save, saving twice in a row waits for the formatter instead of writing unformatted text.
+- Chained shortcuts from `runCommands` wait for Git commands in a selected submodule or nested repository.
+- During a merge, rebase or cherry-pick, branch switching, stash, fetch, pull and push stay disabled.
+- The mascot hops for Git commands in the selected repository, not only the folder's own.
+- After switching folders, **Quick Open** lists the new folder's files without waiting for the old folder's listing.
+- Files Git ignores show faint right after switching folders, without waiting for the old folder's read.
+- Submodules and nested repositories are still found when **Initialize Repository** runs during a scan for them.
+- **Running Plugins** and the **Plugins** settings page agree on the state of a plugin that is off or can't load.
+- A language server that failed to start tries again when you open a file of its language 30 seconds later.
+- Reloading, restarting or turning on a plugin starts again its language servers that failed to start.
+- A language server that fails to start shows its error once, when it fails, instead of on every completion.
+
+## 0.19.2
+
+- With `terminalBackend` `"hc"`, terminals show up in the Herdr app, in a space for each folder.
+- Terminals already running in herdr-core show up in Herdr too once Mayoi attaches them again.
+- Set `terminalBackendHcShowInHerdr` to `false` to keep new terminals out of the Herdr app.
+- Overwriting an SSH file that changed on its host no longer swaps the editor back to the host's old text.
+
+## 0.19.1
+
+- **Word Count** and **TODOs** come with Mayoi but start off; turn them on in **Settings → Plugins**.
+- A plugin's `plugin.json` can say `"enabled": false` to start off until you turn it on.
+
+## 0.19.0
+
+- **Plugins → Show Running Plugins** opens a live table of each plugin's state, CPU time, memory and crashes.
+- Click a column head in **Running Plugins** to sort by it; values refresh every second while the tab shows.
+- Each row of **Running Plugins** can restart its plugin, turn it off, open its details, or show its log.
+- **Plugins → Show Plugin Log** opens a live log that follows new lines, with a **Jump to latest** pill.
+- Filter the **Plugin Log** by plugin, level and text, and use **Copy** and **Clear** in its bar.
+- The **Plugin Log** keeps the last 10,000 lines and stays fast however long it gets.
+- A plugin view's open folders and selection are now kept per window.
+- Two lists in the same plugin view no longer show the same row as selected.
+- Built-in status bar items that do nothing on click, such as the problem at the cursor, show their tooltip again.
+- A plugin's settings now live only in its details; its row on **Settings → Plugins** links to them.
+- Plugin sidebar views, such as **TODOs**, match the Explorer's rows, file icons, hover and selection.
+- Plugin sidebar views show a loading state, a clear empty state, and fade in when their content arrives.
+- Plugin status bar items, such as the word count, glide to a new width instead of shifting their neighbours.
+- Plugin status bar items sink when pressed and show their tooltip even when they have no command.
+- Plugin pick boxes look like the command palette, with its key hints and a shake when nothing matches.
+- The command palette, pickers and prompts fade and scale in as they open, unless Reduce Motion is on.
+- Click a plugin on the **Settings → Plugins** page to open its details; `Esc` goes back to the list.
+- A plugin's details list its commands with their shortcuts, menus, status items, views, themes and more.
+- A plugin's details show its memory, CPU time and start time, refreshed every second while open.
+- A plugin's details show its recent log lines and its settings, with **Open Full Log** for the whole log.
+- Plugin errors now show on the Plugins page as soon as they happen.
+- The disabled **Install** button on the Plugins page now looks clearly disabled in dark themes.
+- `mayoi plugin new` fills in `author` from your Git user name.
+- **Find in Files** (`Shift+Cmd+F`) selects the previous query, so typing or pasting replaces it.
+- Drag a file's tab onto a project in the rail to move it there; hold `Option` to copy it instead.
+- Rest a dragged tab on a project in the rail to switch to it, then drop the tab where you want it.
+- Unsaved changes come along when a tab moves to another project.
+- Right-click a tab and choose **Move to Project** to send it to another project.
+- New plugins: folders of JavaScript or TypeScript in `~/.mayoi/plugins`, which Mayoi runs with no Node or build step.
+- Plugins add commands, shortcuts, menu items, status bar items, sidebar views, previews, themes, languages and snippets.
+- `mayoi plugin install <git-url>` installs a plugin, and `list`, `update` and `remove` manage them.
+- `mayoi plugin new <name>` writes a new plugin, and `mayoi plugin dev` reloads it each time you save.
+- `mayoi plugin pack` copies the npm packages a plugin imports into it.
+- The **Plugins** menu, and the **Plugins** page of the settings window, install, update, remove and configure plugins.
+- **Plugins → Show Plugin Log** and **Show Running Plugins** show what plugins logged and how much they use.
+- A plugin that loops or keeps too much memory is stopped, and `mayoi --disable-plugins` turns plugins off.
+- The **Plugins** settings page shows each plugin's version, author, source, and a colored dot for its state.
+- The **Plugins** page asks before it removes a plugin, and shows install and update errors on the plugin's row.
+- While the plugin index loads, the **Plugins** page shows placeholder rows, and **Try Again** if it fails.
+- Switches in the settings window respond to hover and stretch while held.
+- A plugin's `plugin.json` and its index entry can name an `author`.
+- The **Plugins** page shows no error while the plugin index isn't published yet.
+- **Selection → Format Document** (⇧⌥F) formats with a plugin, and the `formatOnSave` setting formats as you save.
+- Plugins underline problems in the editor; the status bar counts them, and **Show Problems** lists them.
+- Plugins can bring language servers, for **Go to Definition** (F12), **Show Hover** and **Complete Word** (⌃Space).
+- Plugins can add themes, including VS Code color themes as they are.
+- **Selection → Insert Snippet…** inserts snippets that plugins bring, in VS Code's format.
+- Each function a `.ts` file in `~/.mayoi/scripts` exports is a command; **Run Selection as Script** runs code once.
+- Signed in, the plugins you installed from Git follow you to your other machines.
+- New **Word Count** plugin shows the words of a Markdown file and its reading time in the status bar.
+- New **TODOs** plugin lists the folder's TODO, FIXME and HACK comments in the sidebar.
+
 ## 0.18.2
 
 - On Windows, right-click menus no longer cut off the end of their labels, as in Chinese.

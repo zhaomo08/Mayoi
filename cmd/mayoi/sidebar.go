@@ -28,12 +28,14 @@ func (a *app) sidebar(c *ui.Context) {
 		view = ""
 	}
 	scm, search := view == "git", view == "search"
+	pluginView := a.root != "" && a.pluginSidebarView() != ""
 	sb.Children(func() {
 		ui.Row(c).Height(34).Padding(0, 6, 0, 8).Gap(2).AlignItems(ui.Center).Children(func() {
 			if a.root != "" {
-				a.sidebarSwitch(c, iconFiles, a.withKey(locales.SidebarExplorer(), "view.explorer"), !scm && !search, 0, a.showExplorer)
+				a.sidebarSwitch(c, iconFiles, a.withKey(locales.SidebarExplorer(), "view.explorer"), !scm && !search && !pluginView, 0, a.showExplorer)
 				a.sidebarSwitch(c, iconSearch, a.withKey(locales.SidebarSearch(), "edit.findInFiles"), search, 0, func() { a.showSearch(false) })
 				a.sidebarSwitch(c, iconBranch, a.withKey(locales.SidebarScm(), "view.scm"), scm, a.changeCount(), a.showSourceControl)
+				a.pluginSwitches(c)
 			}
 			title, short, actions := locales.SidebarTitleExplorer(), "", 0
 			switch {
@@ -47,12 +49,15 @@ func (a *app) sidebar(c *ui.Context) {
 				if hovered {
 					actions = 3
 				}
+			case pluginView:
+				title = a.pluginSidebarTitle()
 			}
 			// The switches, the gaps, the paddings and the actions' buttons
 			// take the rest of the row.
 			room := a.window.SidebarWidth - 1 - 14 - 6 - float32(actions)*28
 			if a.root != "" {
-				room -= 3*26 + 2*3
+				n := float32(3 + len(pluginSlots()))
+				room -= n*26 + (n-1)*3
 			}
 			size, spacing := p.titleLook(11, titleSpacing)
 			title = fitTitle(c, p.title(title), p.title(short), room, size, spacing)
@@ -78,6 +83,10 @@ func (a *app) sidebar(c *ui.Context) {
 			}
 			if search {
 				a.searchView(c)
+				return
+			}
+			if pluginView {
+				a.pluginSidebar(c)
 				return
 			}
 			// The folder's row, with the explorer's actions while the pointer
@@ -106,7 +115,7 @@ func (a *app) sidebar(c *ui.Context) {
 				}
 				if a.iconButton(c, iconRefresh, locales.RefreshExplorer(), false).Clicked() {
 					a.tree.Refresh()
-					a.indexStale = true
+					a.indexRead.Invalidate()
 				}
 				if a.iconButton(c, iconCollapse, locales.CollapseFolders(), false).Clicked() {
 					a.files.Open.Clear()
@@ -327,6 +336,7 @@ func (a *app) fileTree(c *ui.Context) {
 		}
 		row.ContextMenu(func(m *ui.Menu) {
 			a.filesMenuBelow = false
+			a.pluginMenuItems(m, "explorer/context", path)
 			dir := path
 			if !isDir {
 				dir = filepath.Dir(path)
@@ -721,7 +731,7 @@ func (a *app) askNewEntry(dir string, folder bool) {
 		}
 		a.files.Open.Add(dir)
 		a.tree.Refresh()
-		a.indexStale = true
+		a.indexRead.Invalidate()
 		if !folder {
 			// A file made anew opens as its source, to edit.
 			a.openText(func() { a.openFile(path, true) })
@@ -787,7 +797,8 @@ func (a *app) renamed(path, to string) {
 	if a.tree != nil {
 		a.tree.Refresh()
 	}
-	a.indexStale, a.indexed = true, time.Time{}
+	a.indexRead.Invalidate()
+	a.indexed = time.Time{}
 	a.rememberTabs()
 }
 
@@ -812,7 +823,8 @@ func (a *app) newRemoteEntry(dir, path string, folder bool) {
 			}
 			a.files.Open.Add(dir)
 			a.tree.Refresh()
-			a.indexStale, a.indexed = true, time.Time{}
+			a.indexRead.Invalidate()
+			a.indexed = time.Time{}
 			if !folder {
 				// A file made anew opens as its source, to edit.
 				a.openText(func() { a.openFile(path, true) })
@@ -832,7 +844,7 @@ func (a *app) trashLabel() string {
 
 func (a *app) trash(path string) {
 	if remote.Is(path) {
-		a.confirm = &confirm{title: locales.DeleteQuestion(filepath.Base(path)),
+		a.present(&confirm{title: locales.DeleteQuestion(filepath.Base(path)),
 			message: locales.DeleteRemoteDetail(remote.HostOf(path)),
 			ok:      locales.ButtonDelete(), danger: true, run: func() {
 				go func() {
@@ -843,10 +855,11 @@ func (a *app) trash(path string) {
 							return
 						}
 						a.tree.Refresh()
-						a.indexStale, a.indexed = true, time.Time{}
+						a.indexRead.Invalidate()
+						a.indexed = time.Time{}
 					})
 				}()
-			}}
+			}})
 		return
 	}
 	if err := a.host.trash(path); err != nil {
@@ -854,7 +867,7 @@ func (a *app) trash(path string) {
 		return
 	}
 	a.tree.Refresh()
-	a.indexStale = true
+	a.indexRead.Invalidate()
 }
 
 func (a *app) relOrPath(path string) string {

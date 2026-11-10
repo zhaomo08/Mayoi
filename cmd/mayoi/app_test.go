@@ -32,10 +32,14 @@ type fakeHost struct {
 	saveTo   string
 	choice   int
 	asked    []string
-	title    string
-	locale   string // the language setLocale chose
-	closed   bool
-	trashed  []string
+	// holdClose keeps the questions about changes open, their answers
+	// waiting in held.
+	holdClose bool
+	held      []func(int)
+	title     string
+	locale    string // the language setLocale chose
+	closed    bool
+	trashed   []string
 	// revealed are the paths asked to show in the Finder.
 	revealed []string
 	// others are the folders other windows have open, and windows those
@@ -73,6 +77,10 @@ func (h *fakeHost) saveAs(name string, done func(string)) {
 }
 func (h *fakeHost) confirmClose(name string, done func(int)) {
 	h.asked = append(h.asked, "close "+name)
+	if h.holdClose {
+		h.held = append(h.held, done)
+		return
+	}
 	done(h.choice)
 }
 func (h *fakeHost) trash(path string) error {
@@ -132,17 +140,20 @@ func (h *fakeHost) syncInfo() syncInfo {
 	si.name = h.signedIn
 	return si
 }
-func (h *fakeHost) syncPicture() *ui.Bitmap { return nil }
-func (h *fakeHost) syncConflictResolved()   { h.resolved++ }
-func (h *fakeHost) ai() *mon.Client         { return h.aiClient }
-func (h *fakeHost) aiSignedOut()            { h.aiSignOuts++ }
-func (h *fakeHost) update() string          { return h.newVersion }
-func (h *fakeHost) installUpdate()          { h.updateOpens++ }
-func (h *fakeHost) stepProject(int)         {}
-func (h *fakeHost) showProject(int)         {}
-func (h *fakeHost) closeProject()           {}
-func (h *fakeHost) projectTabsChanged()     {}
-func (h *fakeHost) nativeDrags() bool       { return false }
+func (h *fakeHost) syncPicture() *ui.Bitmap      { return nil }
+func (h *fakeHost) syncConflictResolved()        { h.resolved++ }
+func (h *fakeHost) ai() *mon.Client              { return h.aiClient }
+func (h *fakeHost) aiSignedOut()                 { h.aiSignOuts++ }
+func (h *fakeHost) update() string               { return h.newVersion }
+func (h *fakeHost) installUpdate()               { h.updateOpens++ }
+func (h *fakeHost) stepProject(int)              {}
+func (h *fakeHost) showProject(int)              {}
+func (h *fakeHost) closeProject()                {}
+func (h *fakeHost) projectTabsChanged()          {}
+func (h *fakeHost) nativeDrags() bool            { return false }
+func (h *fakeHost) otherProjects() []*app        { return nil }
+func (h *fakeHost) projectOf(*colTab) *app       { return nil }
+func (h *fakeHost) carryTab(*colTab, *app, bool) {}
 
 // Off screen, the pull request of the branch is not asked of gh.
 func (h *fakeHost) shown() bool { return false }
@@ -1108,7 +1119,7 @@ func TestReopenClosedTab(t *testing.T) {
 
 	// Close All, then each comes back, the last closed first.
 	a.run("file.reopenClosed") // nothing left: nothing happens
-	a.closeTabs(slices.Clone(a.column().tabs), nil)
+	a.closeTabs(slices.Clone(a.column().tabs), nil, nil)
 	hs.settle()
 	if n := len(a.editorTabs()); n != 0 {
 		t.Fatalf("%d tabs after Close All", n)
@@ -1197,7 +1208,7 @@ func TestReopenClosedTerminal(t *testing.T) {
 	a.run("view.terminalTab")
 	hs.settle()
 	a.activate(a.column(), 0, true)
-	a.closeTab(a.column().tabs[1], nil)
+	a.closeTab(a.column().tabs[1], nil, nil)
 	hs.settle()
 	a.run("file.reopenClosed")
 	hs.settle()

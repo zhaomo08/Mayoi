@@ -26,7 +26,7 @@ const prefsShortcuts = "shortcuts"
 var prefsIcons = map[string]*ui.SVG{
 	settings.CatAppearance: iconPalette, settings.CatFonts: iconType, settings.CatEditor: iconFileCode,
 	settings.CatMarkdown: iconFileText, settings.CatTerminal: iconTerminal, settings.CatDiff: iconDiff,
-	settings.CatGit: iconBranch, settings.CatVim: iconCommand, settings.CatGeneral: iconSettings,
+	settings.CatGit: iconBranch, settings.CatVim: iconCommand, settings.CatPlugins: iconPlug, settings.CatGeneral: iconSettings,
 	prefsShortcuts: iconKeyboard,
 }
 
@@ -62,6 +62,8 @@ type prefsWindow struct {
 	// notes are the toasts to show next, as a reset's with its Undo.
 	notes []ui.Toast
 	keys  keysPane
+	// plugins is what the Plugins page keeps.
+	plugins pluginsPage
 	// searchH and sectionsH are the search and the sections of the
 	// sidebar, and sectionH each section, of whose place the mark under
 	// the one chosen slides.
@@ -115,6 +117,11 @@ func (m *mayoi) showPrefs(section, key string, from *desktop) {
 	}
 	if section != "" {
 		w.section, w.query = section, ""
+	}
+	// The details of a plugin, on the Plugins page.
+	if name, ok := strings.CutPrefix(key, pluginDetailKey); ok {
+		w.section, w.query, key = prefsPlugins, "", ""
+		w.openDetail(name)
 	}
 	if key != "" {
 		if f, ok := settings.FieldOf(key); ok {
@@ -266,11 +273,17 @@ func (w *prefsWindow) view(c *ui.Context) {
 		w.finding = true
 	}
 	w.focusSearch(c)
+	// The details of a plugin close as the Plugins page does.
+	if pg := &w.plugins; (pg.detail != "" || pg.back) && (w.section != settings.CatPlugins || w.query != "") {
+		pg.detail, pg.back, pg.info = "", false, pluginInfo{}
+	}
 	ui.Row(c).Fill().Background(p.editor).AlignItems(ui.Stretch).Children(func() {
 		w.sidebar(c)
 		ui.Column(c.Key("prefs-main")).Grow(1).MinWidth(0).Children(func() {
 			if w.section == prefsShortcuts && w.query == "" {
 				w.keys.view(c)
+			} else if w.section == settings.CatPlugins && w.query == "" && w.scope() == nil {
+				w.pluginsPane(c)
 			} else {
 				w.prefsPane(c)
 			}
@@ -758,7 +771,7 @@ func (w *prefsWindow) control(c *ui.Context, f settings.Field, raw json.RawMessa
 	case settings.KindBool:
 		var on bool
 		json.Unmarshal(raw, &on)
-		if w.first(ui.Switch(k, &on).Label(prefTitle(f.Key))).Changed() {
+		if w.first(w.toggle(k, &on).Label(prefTitle(f.Key))).Changed() {
 			apply(on)
 		}
 	case settings.KindEnum:
@@ -841,6 +854,10 @@ func (w *prefsWindow) control(c *ui.Context, f settings.Field, raw json.RawMessa
 		}
 	case settings.KindStyles:
 		w.stylesControl(c, raw)
+	case settings.KindJSON:
+		if ui.Button(k, locales.PrefsEditInJSON()).FontSize(12).Padding(3, 10).Clicked() {
+			w.inFront(func(a *app) { a.openSettings() })
+		}
 	}
 }
 

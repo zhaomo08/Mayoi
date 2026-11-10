@@ -25,6 +25,8 @@ All of Mayoi's files are in one data folder:
 | `crash.log`         | Mayoi         | Mayoi's version and system, then what ended it if it crashed, with every stack    |
 | `crashes/`          | Mayoi         | The last 10 crash logs, by time; `.sent` or `.unsent` once asked about            |
 
+Plugins, user scripts and what plugins store are in `~/.mayoi` instead: see [PLUGINS.md](PLUGINS.md#where-they-are).
+
 To keep the files somewhere else, start Mayoi with `MAYOI_DATA_DIR` set to a folder. Mayoi then reads and writes all
 of these files there instead, which is a way to try a setup without touching your own. Create the folder first, and
 quit Mayoi before, since a Mayoi already running takes over a second one. On macOS:
@@ -74,6 +76,7 @@ takes its default.
 | `terminalBackend`       | `""`          | `""` (Mayoi), `"hc"` (herdr-core)                           |                                                |
 | `terminalBackendHcPath` | `""`          | A path to `hc`, a folder that has it, or a name on `PATH`   |                                                |
 | `terminalBackendHcEnv`  | none          | A list of `KEY=value` environment variables for `hc`        |                                                |
+| `terminalBackendHcShowInHerdr` | `true` | `true`, `false`                                      |                                                |
 | `projectTabs`           | `false`       | `true`, `false`                                             | **View → Project Tabs**                        |
 | `projectTabStyle`       | none          | A label, color and icon for each folder                     | A square's context menu on the rail            |
 | `locale`                | `""`          | `""` (follow the system), `"en"`, `"zh-Hans"`, `"ja"`       | **View → Language**                            |
@@ -101,6 +104,9 @@ takes its default.
 | `aiModel`               | `""`          | `""` (`deepseek-flash`), or a model of the AI gateway       | Only this file                                 |
 | `aiSecretFiles`         | none          | Patterns of files AI commit messages send by name only      | Only this file                                 |
 | `crashReports`          | `""`          | `""` (ask), `"always"`, `"never"`                           | **Don't ask again** when Mayoi asks           |
+| `plugins`               | none          | Each plugin's own settings, and `"enabled": false` to turn it off | The **Plugins** page of the settings window |
+| `formatOnSave`          | none          | `true` for each language to format as it saves, or `"*"` for all | Only this file                          |
+| `formatters`            | none          | The formatter of each language, where plugins offer several | Only this file                                 |
 
 ### Language
 
@@ -176,6 +182,10 @@ differ in width lines them up only roughly.
   list of `KEY=value` strings, as `["HC_NO_UPDATE=1"]`. Strings without `=` or with a NUL are ignored. It reaches the
   commands Mayoi starts, not a terminal already attached; a server hc already has running keeps the environment it
   started with.
+- **`terminalBackendHcShowInHerdr`** shows Mayoi's terminals in the Herdr app when `terminalBackend` is `"hc"`, in a
+  space for each folder, a tab for each terminal. Terminals already running there show up as Mayoi attaches them again.
+  Turned off, new terminals stay out of Herdr, and those already there stay until closed. Closing one in either app
+  ends its shell, which closes it in the other. Terminals of a remote folder stay out of Herdr.
 - **`projectTabs`** keeps every folder open in one window, as project tabs on a rail on its left, rather than a
   window for each. Changing it gathers the windows into one, or parts them, at once.
 - **`projectTabStyle`** gives a project's square on the rail its own label, up to two characters, in place of its
@@ -234,6 +244,24 @@ differ in width lines them up only roughly.
   `"!.env.local"`. Whatever the patterns say, keys and tokens in any file's lines are left out, line by line. A
   folder's `.mayoi/settings.json` can't set it.
 
+### Plugins
+
+- **`plugins`** holds each plugin's settings under its name, as its `plugin.json` declares them, and `"enabled":
+  false` turns a plugin off. A folder can't set it, so that a repository can't turn on a plugin. See
+  [PLUGINS.md](PLUGINS.md).
+- **`formatOnSave`** formats a document with a plugin's formatter as it saves, by language, as `{"go": true}`, or
+  `{"*": true}` for every language that has a formatter.
+- **`formatters`** chooses the formatter of a language where plugins offer several, by the formatter's id or its
+  plugin's name, as `{"typescript": "prettier"}`.
+
+```json
+{
+  "plugins": { "word-count": { "wordsPerMinute": 200 }, "prettier": { "enabled": false } },
+  "formatOnSave": { "typescript": true },
+  "formatters": { "typescript": "biome" }
+}
+```
+
 ### Example
 
 ```json
@@ -261,6 +289,43 @@ differ in width lines them up only roughly.
 - **Older files still work.** Themes used to be appearances, so Mayoi reads `"appearance": "matrix"` or `"claude"`
   as that `theme`.
 
+### From the command line
+
+The `mayoi` command reads and changes the preferences itself, while Mayoi runs or not, as the [`mayoi`
+command](FEATURES.md#the-mayoi-command) of the app does:
+
+```sh
+mayoi settings                         # every preference, its key and its value
+mayoi settings get theme fontSize      # a value a line
+mayoi settings set theme=claude fontSize=16
+mayoi settings unset theme             # its value of a first launch again
+mayoi settings set fontFeatures+=ss01  # one item more of a list
+mayoi settings set 'aiSecretFiles-=*.pem'
+mayoi settings set projectTabStyle.'<folder>'.label=MG
+mayoi settings --folder set vim=true   # the current folder's own file
+```
+
+- **A value is JSON when it is JSON,** so `16`, `true` and `["calt=0"]` give a number, a switch and a list, and any
+  other text is the text itself, as `theme=claude` and `fontFamily=Fira Code`, `""` being the empty one.
+- **A list changes an item at a time with `+=` and `-=`,** so a long list needs no writing out: `fontFeatures+=calt=0`
+  appends one that isn't there already, and `fontFeatures-=calt=0` takes one away, the last leaving no list.
+- **A project's look on the rail is told a field at a time,** as `projectTabStyle.'<folder>'.label=MG`, or `.<folder>`
+  for the whole of it, `{"label": "MG", "color": "cyan"}`. A field is `label` of up to two characters as you see
+  them, or `color` of `red`, `green`, `yellow`, `blue`, `magenta` or `cyan`; a field left empty takes it away, and a
+  look left with no field is the project's own. A folder with dots of its own needs no quotes, as
+  `projectTabStyle.~/src/my.app.label`, and one told from the current folder or from `~` is the folder whole. An icon is no field here: it names a
+  picture the app copied into its own folder, which the rail's menu chooses, so a look the command changes keeps the
+  icon it has.
+- **A value Mayoi has none of changes nothing,** and says what the preference takes instead: an unknown key, a value
+  of the wrong type, a number out of its range or a choice that isn't one of its options exits with status 1.
+- **Only the preference you change is written,** the others stay as the file has them, a key a line in the order of
+  their names, and the folder is made when the file is new.
+- **A Mayoi running reads the file again** and applies the change at once, as it does one you save in an editor, so
+  the window and every other window change with it.
+- **`--folder` (`-f`) acts on the current folder's own `.mayoi/settings.json`,** of the preferences a folder can
+  choose, which `mayoi settings --folder` lists, and `get` prints `null` of one it doesn't choose. In a subfolder of a
+  project it acts on the nearest `.mayoi/settings.json` up from it, the one the project reads.
+
 ### Folder settings
 
 A folder can choose some preferences for itself in `.mayoi/settings.json`, which overrides yours in that folder's
@@ -270,7 +335,7 @@ beside one returns it to your setting.
 
 A folder can set these: `autoSave`, `wordWrap`, `markdownPreview`, `previewMermaid`, `previewMath`,
 `terminalCopyOnSelect`, `diffHighlight`, `diffWhitespace`, `diffContext`, `diffCrossFiles`, `mergeAutoApply`,
-`blame`, `aiModel`, `vim` and `vimCtrlKeys`.
+`blame`, `aiModel`, `vim`, `vimCtrlKeys`, `formatOnSave` and `formatters`.
 
 ```json
 {

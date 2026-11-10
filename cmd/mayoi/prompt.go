@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"mayoi/locales"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -19,6 +20,18 @@ type prompt struct {
 	selected    bool
 	// optional lets the value be empty.
 	optional bool
+	// cancel runs as the prompt closes without a value, when set.
+	cancel func()
+}
+
+// cancelPrompt closes the prompt without a value.
+func (a *app) cancelPrompt() {
+	if pr := a.prompt; pr != nil {
+		a.prompt = nil
+		if pr.cancel != nil {
+			pr.cancel()
+		}
+	}
 }
 
 func (a *app) promptView(c *ui.Context) {
@@ -66,7 +79,7 @@ func (a *app) promptView(c *ui.Context) {
 				}
 				ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
 					if ui.Button(c, locales.ButtonCancel()).Clicked() {
-						a.prompt = nil
+						a.cancelPrompt()
 					}
 					if ui.PrimaryButton(c, strings.TrimSuffix(pr.title, "…")).Disabled(!pr.optional && strings.TrimSpace(pr.value) == "").Clicked() {
 						submit()
@@ -74,7 +87,7 @@ func (a *app) promptView(c *ui.Context) {
 				})
 			})
 			if box.PressedOutside() || back.OverlayShortcut(0, ui.KeyEscape) {
-				a.prompt = nil
+				a.cancelPrompt()
 			}
 		})
 	})
@@ -90,8 +103,11 @@ type confirm struct {
 	run                func()
 	alternate          string
 	runAlternate       func()
-	okShort            string
-	alternateShort     string
+	// cancel runs as the dialog is put off, by Cancel, Escape or a click
+	// outside it.
+	cancel         func()
+	okShort        string
+	alternateShort string
 	// choices are the ways to go on that the dialog offers, choice the
 	// one chosen, whose message it shows: a danger one makes the button
 	// red.
@@ -105,7 +121,55 @@ type confirmChoice struct {
 	danger         bool
 }
 
+// present shows a question the person asked for, as with a command: one
+// shown already waits its turn again, first.
+func (a *app) present(cf *confirm) {
+	if a.confirm != nil {
+		a.asks = slices.Insert(a.asks, 0, a.confirm)
+	}
+	a.confirm = cf
+	a.invalidate()
+}
+
+// ask asks a question in the background, as a save's conflict: it waits
+// for the box shown, if any, to close.
+func (a *app) ask(cf *confirm) {
+	a.asks = append(a.asks, cf)
+	a.nextAsk()
+}
+
+// dismiss closes the question shown without going on, telling whoever
+// asked.
+func (a *app) dismiss() {
+	cf := a.confirm
+	a.confirm = nil
+	if cf != nil && cf.cancel != nil {
+		cf.cancel()
+	}
+	a.nextAsk()
+}
+
+// nextAsk shows the question waiting first once no box is shown.
+func (a *app) nextAsk() {
+	if len(a.asks) == 0 || a.overlaid() {
+		return
+	}
+	a.confirm, a.asks = a.asks[0], a.asks[1:]
+	a.invalidate()
+}
+
+// overlaid tells whether a box is shown over the window: a question, a
+// prompt or a picker.
+func (a *app) overlaid() bool {
+	return a.confirm != nil || a.prompt != nil || a.signin != nil || a.diagram != nil ||
+		a.quick.open || a.branches.open || a.stashes.open || a.prs.open || a.checks.open ||
+		a.worktrees.open || a.repositories.picker.open || a.recents.open || a.pluginPick.open ||
+		a.themes.open || a.remotePick.open || a.conflicts.open
+}
+
 func (a *app) confirmView(c *ui.Context) {
+	// A box closed since, as a picker, makes way for the question waiting.
+	a.nextAsk()
 	cf := a.confirm
 	if cf == nil {
 		return
@@ -152,7 +216,7 @@ func (a *app) confirmView(c *ui.Context) {
 						cancel.FontSize(12).Padding(6, 8)
 					}
 					if cancel.Clicked() {
-						a.confirm = nil
+						a.dismiss()
 					}
 					if alternate != "" {
 						button := ui.Button(c, alternate)
@@ -185,7 +249,7 @@ func (a *app) confirmView(c *ui.Context) {
 				})
 			})
 			if box.PressedOutside() || back.OverlayShortcut(0, ui.KeyEscape) {
-				a.confirm = nil
+				a.dismiss()
 			}
 		})
 	})

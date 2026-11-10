@@ -53,11 +53,17 @@ type frame struct {
 	// to, once it has drawn.
 	services    ui.Services
 	hasServices bool
-	// merged is set as the window closes once its projects moved to
-	// another, and closing once the changes of its projects are settled.
-	merged, closing bool
+	// life is how far the window is along closing: closing once the
+	// changes of its projects are settled, or once they moved to another.
+	life lifecycle
 	// shown is the project the window built last.
 	shown *desktop
+	// hoverOn is the project whose square a tab of another has been
+	// dragged over since hoverSince, which shows once it rests there for
+	// railHoverSwitch; hoverWake is set while a frame is asked for then.
+	hoverOn    *desktop
+	hoverSince time.Time
+	hoverWake  bool
 }
 
 // newFrame opens a window that shows h.
@@ -95,14 +101,9 @@ func (m *mayoi) newFrame(h *desktop) *frame {
 	// Closing the window saves the files that save themselves, and with
 	// other unsaved changes asks about each first.
 	win.OnClose(func(e *mygo.CloseEvent) {
-		if f.merged || f.closing || m.quitting || !slices.ContainsFunc(f.tabs, func(d *desktop) bool { return d.a.anyDirty() }) {
-			return
+		if !f.beforeClose() {
+			e.PreventDefault()
 		}
-		e.PreventDefault()
-		m.settle(slices.Clone(f.tabs), false, func() {
-			f.closing = true
-			win.Close()
-		})
 	})
 	// Back from another app, which may have committed.
 	win.OnFocus(func() {
@@ -143,16 +144,14 @@ func (m *mayoi) newFrame(h *desktop) *frame {
 	// their folders' sessions.
 	win.OnClosed(func() {
 		m.frames = slices.DeleteFunc(m.frames, func(o *frame) bool { return o == f })
-		if f.merged {
-			return
-		}
+		// A window whose projects moved to another has none left here.
 		for _, h := range f.tabs {
 			h.a.keepSession()
 			h.a.closeTerminals()
 			h.a.shutdown()
 			m.wins = slices.DeleteFunc(m.wins, func(w *desktop) bool { return w == h })
 		}
-		if !m.quitting && len(m.wins) > 0 {
+		if m.life != lifeClosing && len(m.wins) > 0 {
 			for _, h := range f.tabs {
 				m.s.Forget(h.a.window)
 			}
@@ -164,6 +163,30 @@ func (m *mayoi) newFrame(h *desktop) *frame {
 		}
 	})
 	return f
+}
+
+// beforeClose tells whether the window may close now. With changes of
+// its projects to ask about, it asks first, then closes again. Asked
+// again meanwhile, or while the app settles its changes to quit, it
+// brings the question shown to the front.
+func (f *frame) beforeClose() bool {
+	m := f.m
+	switch {
+	case f.life == lifeClosing || m.life == lifeClosing:
+		return true
+	case m.settling():
+		m.frontAsking()
+		return false
+	case !slices.ContainsFunc(f.tabs, func(d *desktop) bool { return d.a.anyDirty() }):
+		f.life = lifeClosing
+		return true
+	}
+	f.life = lifeSettling
+	m.settle(slices.Clone(f.tabs), false, func() {
+		f.life = lifeClosing
+		f.win.Close()
+	}, func() { f.life = lifeOpen })
+	return false
 }
 
 // view builds the project the window shows. Those it does not show run
@@ -191,7 +214,17 @@ func (f *frame) view(c *ui.Context) {
 	}
 	// Each project's elements are its own, as its tabs are numbered as
 	// another's are.
-	ui.Column(c.Key(fmt.Sprintf("project-%d", h.a.window.ID))).Fill().Children(func() { h.a.view(c) })
+	a := h.a
+	a.dragSeen = false
+	root := ui.Column(c.Key(fmt.Sprintf("project-%d", a.window.ID))).Fill()
+	// A tab carried in from another project shows where it would drop
+	// until the drag ends, as nothing here sees it any more.
+	_, over := a.dragOver(root)
+	root.Children(func() { a.view(c) })
+	if a.carried != nil && !over && !a.dragSeen {
+		a.carried = nil
+		a.invalidate()
+	}
 }
 
 // add puts h at the end of the rail, without showing it.
@@ -250,6 +283,10 @@ func (f *frame) activate(h *desktop) {
 
 // show brings the window to the front.
 func (f *frame) show() {
+	if f.win == nil {
+		// A tester's, which has no window.
+		return
+	}
 	if f.win.IsMinimized() {
 		f.win.Restore()
 	}
@@ -312,11 +349,92 @@ func (h *desktop) closeProjectThen(done func()) {
 			return
 		}
 		h.show()
-		a.closeKeeping(drop)
+		a.closeKeeping(drop, nil)
 	})
 }
 
 func (h *desktop) projectTabsChanged() { h.m.projectTabsChanged() }
+
+func (h *desktop) otherProjects() []*app {
+	var out []*app
+	for _, d := range h.f.tabs {
+		if d != h {
+			out = append(out, d.a)
+		}
+	}
+	return out
+}
+
+func (h *desktop) projectOf(t *colTab) *app {
+	if d := h.f.owner(t); d != nil && d != h {
+		return d.a
+	}
+	return nil
+}
+
+func (h *desktop) carryTab(t *colTab, to *app, copy bool) {
+	for _, d := range h.f.tabs {
+		if d.a == to {
+			h.f.carryTab(t, d, copy)
+		}
+	}
+}
+
+// owner is the project of the window that has the tab t, nil for none.
+func (f *frame) owner(t *colTab) *desktop {
+	for _, d := range f.tabs {
+		if col, _ := d.a.locate(t); col != nil {
+			return d
+		}
+	}
+	return nil
+}
+
+// carryTab shows the project to and opens the file of t there, after
+// the tab it shows, moving t from its own project, or copying it.
+func (f *frame) carryTab(t *colTab, to *desktop, copy bool) {
+	from := f.owner(t)
+	if from == nil || !carriable(t) {
+		return
+	}
+	f.activate(to)
+	if from == to {
+		return
+	}
+	// Once it has started, which a project not shown yet does as it is
+	// built.
+	a := to.a
+	a.post(func() {
+		col := a.fileColumn()
+		a.takeTab(from.a, t, col, col.active+1, copy)
+	})
+}
+
+// railHoverSwitch is how long a tab dragged over the square of another
+// project rests there before that project shows, to drop the tab in it.
+const railHoverSwitch = 500 * time.Millisecond
+
+// hoverTab shows the project h once a tab t of another has been dragged
+// over its square for railHoverSwitch. a is the project shown.
+func (f *frame) hoverTab(a *app, h *desktop, t *colTab) {
+	now := time.Now()
+	if f.hoverOn != h {
+		f.hoverOn, f.hoverSince = h, now
+	}
+	if wait := railHoverSwitch - now.Sub(f.hoverSince); wait > 0 {
+		if !f.hoverWake {
+			f.hoverWake = true
+			time.AfterFunc(wait, func() {
+				a.post(func() { f.hoverWake = false })
+				a.invalidate()
+			})
+		}
+		return
+	}
+	f.hoverOn = nil
+	h.a.carried = t
+	a.post(func() { f.activate(h) })
+}
 
 // dropProject takes h off its window's rail, keeping its session for
 // the next time its folder opens, and shows its neighbor.
@@ -364,7 +482,7 @@ func (m *mayoi) projectTabsChanged() {
 			h.a.park()
 			into.add(h)
 			if len(from.tabs) == 0 {
-				from.merged = true
+				from.life = lifeClosing
 				from.win.Close()
 			}
 		}
@@ -463,7 +581,11 @@ func (f *frame) railDrop(e ui.Element, a *app, before *desktop) {
 		case railDrag:
 			a.post(func() { f.move(it.h, before) })
 		case dragItem:
-			if it.file != nil && isIconFile(it.file.path) {
+			switch {
+			case carriable(it.tab):
+				h, copy := before, a.copyDrop
+				a.post(func() { f.carryTab(it.tab, h, copy) })
+			case it.file != nil && isIconFile(it.file.path):
 				a.post(func() { f.setProjectIcon(a, dir, it.file.path) })
 			}
 		}
@@ -569,14 +691,14 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 	var conn string
 	var connCol ui.Color
 	if host := remote.HostOf(dir); host != "" {
-		state := remote.Offline
+		l := link{}
 		if h.a.conn != nil {
-			state = h.a.connState
+			l = h.a.link
 		}
-		switch state {
-		case remote.Connected:
+		switch {
+		case l.kind == linkOnline:
 			conn, connCol = locales.RemoteConnectedTo(host), p.muted
-		case remote.Connecting:
+		case l.dialing():
 			conn, connCol = locales.RemoteConnectingTip(host), p.modifiedFg
 		default:
 			conn, connCol = locales.RemoteDisconnectedTip(host), p.dangerFg
@@ -627,12 +749,21 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 	f.railDrop(b, a, h)
 	// Another square, or a picture dragged from the sidebar or anything
 	// from another app, which may be one: it would show on this square.
-	over, pic := false, b.FileDragOver() && f.canSetIcon(dir)
+	// A tab of another project would open in this one, which shows as
+	// the drag rests here.
+	over, pic, carry := false, b.FileDragOver() && f.canSetIcon(dir), false
 	switch it, _ := ui.DragOver[railTake](b); it := it.(type) {
 	case railDrag:
 		over = true
 	case dragItem:
+		a.dragSeen = true
 		pic = pic || it.file != nil && isIconFile(it.file.path) && f.canSetIcon(dir)
+		if carry = carriable(it.tab) && f.owner(it.tab) != h; carry && !on {
+			f.hoverTab(a, h, it.tab)
+		}
+	}
+	if !carry && f.hoverOn == h {
+		f.hoverOn = nil
 	}
 	hovered, pressed, dragged := b.Hovered(), b.Pressed(), b.Dragging()
 	pill, fill := float32(0), float32(0.14)
@@ -645,7 +776,7 @@ func (f *frame) railTab(c *ui.Context, a *app, h *desktop, i int, label string) 
 	pill = b.Animate("pill", pill, 160*time.Millisecond)
 	fill = b.Animate("fill", fill, 120*time.Millisecond)
 	outline := b.Animate("ring", unit(on), 160*time.Millisecond)
-	drop := b.Animate("drop", unit(pic), 120*time.Millisecond)
+	drop := b.Animate("drop", unit(pic || carry), 120*time.Millisecond)
 	sink := b.Animate("sink", unit(pressed && !dragged), 80*time.Millisecond)
 	// The ring grows in and out as work starts and stops, following how
 	// far along the work says it is; the dot pops in, fades out in the
@@ -964,7 +1095,7 @@ func (f *frame) setTabStyle(dir string, edit func(st *settings.TabStyle)) {
 func (f *frame) askRailLabel(a *app, dir, name string) {
 	a.prompt = &prompt{title: locales.RailRename(), hint: locales.RailRenameHint(name), value: f.m.s.ProjectTabStyle[dir].Label, done: func(v string) string {
 		v = strings.TrimSpace(v)
-		if len(labelChars(v)) > 2 {
+		if settings.LabelTooLong(v) {
 			return locales.RailRenameTooLong()
 		}
 		f.setTabStyle(dir, func(st *settings.TabStyle) {
@@ -980,39 +1111,7 @@ func (f *frame) askRailLabel(a *app, dir, name string) {
 
 // railLabel is a project's own label as the rail shows it: its first two
 // characters, "" for none.
-func railLabel(s string) string {
-	cs := labelChars(strings.TrimSpace(s))
-	return strings.Join(cs[:min(len(cs), 2)], "")
-}
-
-// labelChars splits s into the characters a person sees: a letter with
-// its accents, an emoji with its modifiers and those it joins, a flag of
-// its two letters.
-func labelChars(s string) []string {
-	var out []string
-	var prev rune
-	start, flag := 0, false
-	for i, r := range s {
-		joined := i > 0 && (unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) ||
-			r == 0x200d || prev == 0x200d || r == 0xfe0f || r == 0xfe0e ||
-			r >= 0x1f3fb && r <= 0x1f3ff || r >= 0xe0020 && r <= 0xe007f)
-		regional := r >= 0x1f1e6 && r <= 0x1f1ff
-		if regional && flag {
-			joined, flag = true, false
-		} else {
-			flag = regional
-		}
-		if i > 0 && !joined {
-			out = append(out, s[start:i])
-			start = i
-		}
-		prev = r
-	}
-	if start < len(s) {
-		out = append(out, s[start:])
-	}
-	return out
-}
+func railLabel(s string) string { return settings.RailLabel(s) }
 
 // railLabels are the labels of the projects named names on the rail, in
 // their order: the initials of a name of words, the first two letters of
@@ -1108,10 +1207,10 @@ func (f *frame) railAdd(c *ui.Context, a *app, folders bool) {
 // confirmCloseOthers asks in a, the app shown, before closing the
 // projects of the window but h.
 func (f *frame) confirmCloseOthers(a *app, h *desktop) {
-	a.confirm = &confirm{
+	a.present(&confirm{
 		title: locales.CloseOtherProjectsQuestion(len(f.tabs) - 1), message: locales.CloseOtherProjectsDetail(),
 		ok: locales.TabClose(), danger: true, run: func() { f.closeOthers(h) },
-	}
+	})
 }
 
 // closeOthers closes the projects of the window but h, one after the

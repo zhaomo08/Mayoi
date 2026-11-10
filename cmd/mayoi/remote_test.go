@@ -96,7 +96,7 @@ func TestRemoteNewMarkdownFileOpensAsSource(t *testing.T) {
 	tt.Key(0, ui.KeyEnter)
 	hs.untilLong("the new remote file", func() bool {
 		d := a.activeEditor()
-		return d != nil && d.path == hs.path("notes.md") && !d.loading && d.loadErr == nil
+		return d != nil && d.path == hs.path("notes.md") && !d.unread()
 	})
 	d := a.activeEditor()
 	if d.preview != nil {
@@ -108,14 +108,14 @@ func TestRemoteNewMarkdownFileOpensAsSource(t *testing.T) {
 		t.Fatalf("the new remote file holds %q", got)
 	}
 	a.saveDoc(d.document, nil)
-	hs.untilLong("the save", func() bool { return !d.saving && !d.dirty() })
+	hs.untilLong("the save", func() bool { return d.sync != syncSaving && !d.dirty() })
 	if got, err := c.ReadFile(dir+"/notes.md", 0); err != nil || string(got) != "# hello" {
 		t.Fatalf("on the host: %q, %v", got, err)
 	}
 	a.openFile(hs.path("README.md"), true)
 	hs.untilLong("the remote preview", func() bool {
 		d := a.activeEditor()
-		return d != nil && d.path == hs.path("README.md") && !d.loading && d.preview != nil && d.preview.loaded
+		return d != nil && d.path == hs.path("README.md") && d.sync != syncLoading && d.preview != nil && d.preview.loaded
 	})
 }
 
@@ -305,7 +305,7 @@ func TestRemoteFolder(t *testing.T) {
 	a.openFile(main, true)
 	hs.untilLong("main.go to be read", func() bool {
 		d := a.activeEditor()
-		return d != nil && !d.loading && strings.HasPrefix(d.buf.String(), "package main")
+		return d != nil && d.sync != syncLoading && strings.HasPrefix(d.buf.String(), "package main")
 	})
 	d := a.activeEditor()
 	hs.shot("remote-02-connected")
@@ -314,7 +314,7 @@ func TestRemoteFolder(t *testing.T) {
 	}
 	d.edit(d.sel, textEdit{0, 0, "// edited\n"})
 	a.saveDoc(d.document, nil)
-	hs.untilLong("the save", func() bool { return !d.saving && !d.dirty() })
+	hs.untilLong("the save", func() bool { return d.sync != syncSaving && !d.dirty() })
 	got, err := c.ReadFile(dir+"/main.go", 0)
 	if err != nil || !strings.HasPrefix(string(got), "// edited\npackage main") {
 		t.Fatalf("on the host: %q, %v", got, err)
@@ -337,14 +337,14 @@ func TestRemoteFolder(t *testing.T) {
 	})
 	// Disconnected, the file is read-only and the banner says so.
 	a.disconnect()
-	hs.untilLong("the disconnection", func() bool { return a.connState == remote.Offline })
+	hs.untilLong("the disconnection", func() bool { return a.link.kind == linkStopped })
 	if !hs.tt.HasText("Reconnect") || !d.locked() {
 		t.Fatalf("offline: banner %v, locked %v", hs.tt.HasText("Reconnect"), d.locked())
 	}
 	hs.shot("remote-03-offline")
 	// The box of the folders of the host.
 	a.reconnect()
-	hs.untilLong("the connection", func() bool { return a.connState == remote.Connected })
+	hs.untilLong("the connection", func() bool { return a.link.kind == linkOnline })
 	a.openRemoteFolder()
 	hs.untilLong("the box of the folders", func() bool { return a.remotePick.stage == pickFolder })
 	if a.remotePick.query != c.Info().Home+"/" {
@@ -355,12 +355,12 @@ func TestRemoteFolder(t *testing.T) {
 	hs.untilLong("the folders of the host", func() bool { return slices.Contains(a.pickRows(), filepath.Base(dir)) })
 	hs.shot("remote-04-folders")
 	a.closeRemotePicker()
-	hs.untilLong("the connection again", func() bool { return a.connState == remote.Connected && !d.locked() })
+	hs.untilLong("the connection again", func() bool { return a.link.kind == linkOnline && !d.locked() })
 	// New files and folders go to the host.
 	a.newRemoteEntry(a.root, hs.path("made/by/mayoi.txt"), false)
 	hs.untilLong("the new file to open", func() bool {
 		ed := a.activeEditor()
-		return ed != nil && ed.path == hs.path("made/by/mayoi.txt") && !ed.loading
+		return ed != nil && ed.path == hs.path("made/by/mayoi.txt") && ed.sync != syncLoading
 	})
 	if _, err := c.Stat(dir + "/made/by/mayoi.txt"); err != nil {
 		t.Fatal(err)
@@ -380,7 +380,7 @@ func TestRemoteFolder(t *testing.T) {
 	hs2 := &harness{t: t, a: a2, h: &fakeHost{}, tt: tt2, root: hs.root}
 	hs2.untilLong("the tab of the last session", func() bool {
 		ed := a2.activeEditor()
-		return ed != nil && ed.path == main && !ed.loading && ed.buf.Len() > 0
+		return ed != nil && ed.path == main && ed.sync != syncLoading && ed.buf.Len() > 0
 	})
 	if got := a2.activeEditor().sel; got != [2]int{3, 5} {
 		t.Errorf("the tab restored has %v selected", got)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,8 @@ const remoteIndexEvery = 30 * time.Second
 // Its functions return at once and call back on the main thread.
 type host interface {
 	openFolder(done func(path string))
+	// saveAs asks where to save a file, calling done with "" when the
+	// person puts it off.
 	saveAs(name string, done func(path string))
 	// confirmClose asks whether to save a changed document before closing
 	// it: 0 saves, 1 discards the changes, 2 keeps it open.
@@ -117,6 +120,13 @@ type host interface {
 	showProject(i int)
 	closeProject()
 	projectTabsChanged()
+	// otherProjects are the other projects of the window's rail, which a
+	// tab moves to; projectOf is the one of them that has a tab, nil for
+	// none; carryTab moves a tab of this project to another, or copies
+	// it, and shows that project.
+	otherProjects() []*app
+	projectOf(t *colTab) *app
+	carryTab(t *colTab, to *app, copy bool)
 	// nativeDrags reports whether a drag can leave the app as a system
 	// drag other apps read. The headless test host has no system
 	// pasteboard, and says no, which keeps drags in-process value drags
@@ -186,18 +196,11 @@ type app struct {
 	root string
 	tree *workspace.Tree
 	// conn is the connection to the host of a remote folder, nil for one
-	// of this machine, connState and connErr how it was last seen, and
-	// connUnsub stops following it.
+	// of this machine, link how it goes as last seen, and connUnsub stops
+	// following it.
 	conn      *remote.Conn
-	connState remote.State
-	connErr   error
+	link      link
 	connUnsub func()
-	// retry is the reconnection due while a connection lost waits for the
-	// host to come back: retries counts those that failed in a row, and
-	// retryAt is when the next starts.
-	retry   *time.Timer
-	retries int
-	retryAt time.Time
 	// indexed is when the files of a remote folder were last listed,
 	// which is done again at most every remoteIndexEvery.
 	indexed  time.Time
@@ -227,13 +230,14 @@ type app struct {
 
 	// ignored is what Git ignores in the workspace, which the tree shows
 	// faint.
-	ignored                map[string]bool
-	ignoring, ignoredStale bool
+	ignored     map[string]bool
+	ignoredRead bg.Refresher[folderKey]
 
-	index      []string
-	recent     []string // the files shown last, latest first
-	indexing   bool
-	indexStale bool
+	// index is the workspace's files, for quick open, which indexRead
+	// lists again when they may have changed.
+	index     []string
+	recent    []string // the files shown last, latest first
+	indexRead bg.Refresher[folderKey]
 	// opening is set while a file opens as a preview tab.
 	opening bool
 	// openingText is set while a file opens for its text — a search
@@ -314,6 +318,13 @@ type app struct {
 	builds int
 	// dragging is set while a tab is dragged, as the frame before found.
 	dragging, dragNow bool
+	// carried is a tab of another project dragged in over the rail, until
+	// the drag ends: the frame clears it once nothing here sees the drag,
+	// dragSeen, any more. copyDrop says Alt is held, which copies a tab
+	// dropped from another project rather than moves it.
+	carried  *colTab
+	dragSeen bool
+	copyDrop bool
 	// middle is the tab a middle press is on, until it is let go of: the
 	// press closes it rather than shows it.
 	middle *colTab
@@ -332,13 +343,22 @@ type app struct {
 	checks     checksPicker      // the box of the checks of the pull request
 	worktrees  worktreePicker    // the box that switches worktrees
 	recents    recentPicker      // the box of the recent folders
+	pluginPick pluginPicker      // the box of a plugin's window.pick
 	themes     themePicker       // the box of the color themes
 	remotePick remotePicker      // the box that connects to a host
 	conflicts  conflictsList     // the box of the files in conflict
+	// pluginSeen is what the plugins were last told of the documents:
+	// each one's version, and the editor in front.
+	pluginSeen pluginSeen
+	// viewStates are the folders open and the row chosen in each plugin
+	// view the sidebar showed, by view id: this window's own.
+	viewStates map[string]*pluginView
+	hover      *hoverCard // the card Show Hover shows
 	find       findState
 	inFiles    searchState // search in the files, of the sidebar
 	prompt     *prompt
 	confirm    *confirm
+	asks       []*confirm // the questions asked in the background, waiting their turn
 	signin     *signin
 	diagram    *diagramOverlay // a preview's diagram shown over the window
 	// syncOpen shows the account's panel above its part of the status
@@ -526,8 +546,9 @@ func (a *app) openFolder(dir string) {
 	a.explorer = explorerTree{}
 	a.fileRow = -1
 	a.files.List.Selected = &a.fileRow
-	a.index, a.indexStale = nil, true
-	a.ignored, a.ignoredStale = nil, true
+	a.index, a.ignored = nil, nil
+	a.indexRead.Invalidate()
+	a.ignoredRead.Invalidate()
 	a.resetRepositories()
 	a.git = gitState{}
 	a.resetSearch()
@@ -584,21 +605,31 @@ func (a *app) closeFolder() {
 		a.closed = nil
 		a.window.Folder = ""
 		a.settings.Changed()
-	})
+	}, nil)
 }
 
 // saveDoc saves a document, asking where an untitled one goes.
-func (a *app) saveDoc(d *document, then func()) {
+func (a *app) saveDoc(d *document, then func()) { a.saveDocElse(d, then, nil) }
+
+// saveDocElse saves a document as saveDoc does, then calls then, or
+// cancelled when it was not saved: no path chosen, or the save failed.
+func (a *app) saveDocElse(d *document, then, cancelled func()) {
+	stop := func() {
+		if cancelled != nil {
+			cancelled()
+		}
+	}
 	if d.path == "" {
 		a.askSavePath(d.name(), func(path string) {
 			if path == "" {
+				stop()
 				return
 			}
 			a.dropKept(d)
 			d.path = path
 			d.hl.Close()
 			d.hl = highlight.New(highlight.Lexer(path), a.invalidate)
-			a.saveDoc(d, then)
+			a.saveDocElse(d, then, cancelled)
 			if a.tree != nil {
 				a.tree.Watch(path)
 			}
@@ -607,23 +638,45 @@ func (a *app) saveDoc(d *document, then func()) {
 	}
 	saved := func() {
 		d.diskGone, d.autoSave.failed = false, false
-		a.repositoryForPath(d.path).git.stale = true
+		a.repositoryForPath(d.path).git.statusRead.Invalidate()
 		a.rememberTabs()
 		if then != nil {
 			then()
 		}
 	}
-	if remote.Is(d.path) {
-		// Saved by hand, a file that changed on its host asks again.
-		d.conflict = false
-		a.saveRemote(d, saved, func(err error) { a.fail("%s", locales.FailSave(d.name(), err.Error())) })
-		return
+	failed := func(err error) {
+		if !errors.Is(err, errNotSaved) {
+			a.fail("%s", locales.FailSave(d.name(), err.Error()))
+		}
+		stop()
 	}
-	if err := d.save(); err != nil {
-		a.fail("%s", locales.FailSave(d.name(), err.Error()))
-		return
+	// Saved by hand, a file that changed on its host asks again, unless
+	// its question is still waiting for an answer, as a save waits on it.
+	asked := d.sync == syncConflict && len(d.waiters) > 0
+	// A plugin's formatter first, as formatOnSave asks, for so long.
+	a.requestSave(d, saveWaiter{done: saved, failed: failed, format: a.formatsOnSave(d)})
+	if d.sync == syncConflict && !asked {
+		a.saveConflict(d)
 	}
-	saved()
+}
+
+// formatOnSaveLimit is how long saving waits for a formatter, which
+// saves without its changes past it.
+const formatOnSaveLimit = 1500 * time.Millisecond
+
+// docEditor is an editor of a document, the one shown first, nil for none.
+func (a *app) docEditor(d *document) *editor {
+	if t := a.activeTab(); t != nil && t.ed != nil && t.ed.document == d {
+		return t.ed
+	}
+	for _, col := range a.cols {
+		for _, t := range col.tabs {
+			if t.ed != nil && t.ed.document == d {
+				return t.ed
+			}
+		}
+	}
+	return nil
 }
 
 func (a *app) saveActive() {
@@ -669,10 +722,11 @@ func (a *app) saveAll() {
 func (a *app) diskChanged(changed, removed []string) {
 	for _, path := range append(slices.Clone(changed), removed...) {
 		if filepath.Base(path) == ".gitmodules" || a.git.repo == nil && a.mayHoldWorkTree(path) {
-			a.repositories.dirty = true
+			a.repositories.scan.Invalidate()
 		}
 	}
-	a.indexStale, a.ignoredStale = true, true
+	a.indexRead.Invalidate()
+	a.ignoredRead.Invalidate()
 	a.diffsOnDisk(append(changed, removed...))
 	a.searchAgain(append(changed, removed...))
 	// An image shows the file's new picture, or that it is gone.
@@ -816,7 +870,7 @@ func (a *app) imageViewers() []*viewer {
 // refreshIndex lists the workspace's files again in the background, for
 // quick open, when they may have changed.
 func (a *app) refreshIndex() {
-	if a.root == "" || a.indexing || !a.indexStale || !a.online() {
+	if a.root == "" || !a.indexRead.Stale() || !a.online() {
 		return
 	}
 	// A remote folder's files are listed on its host, which a busy folder
@@ -824,15 +878,18 @@ func (a *app) refreshIndex() {
 	if a.conn != nil && a.index != nil && time.Since(a.indexed) < remoteIndexEvery {
 		return
 	}
+	// A folder opened meanwhile is listed at once: the listing of the one
+	// before is dropped as it ends.
+	key := a.folderKey()
+	if !a.indexRead.Start(key) {
+		return
+	}
 	a.indexed = time.Now()
-	a.indexing, a.indexStale = true, false
-	root := a.root
 	bg.Go(func() {
 		defer recoverCrash()
-		files := workspace.Index(root)
+		files := workspace.Index(key.root)
 		a.post(func() {
-			a.indexing = false
-			if a.root == root {
+			if a.indexRead.Done(key) && a.folderKey() == key {
 				a.index = files
 				a.quick.stale = true
 			}
@@ -843,25 +900,35 @@ func (a *app) refreshIndex() {
 // refreshIgnored asks Git again in the background what it ignores, when
 // the files may have changed.
 func (a *app) refreshIgnored() {
-	if a.root == "" || a.ignoring || !a.ignoredStale || !a.online() {
+	if a.root == "" || !a.ignoredRead.Stale() || !a.online() {
 		return
 	}
 	if a.conn != nil && a.ignored != nil && time.Since(a.indexed) < remoteIndexEvery {
 		return
 	}
-	a.ignoring, a.ignoredStale = true, false
-	root := a.root
+	key := a.folderKey()
+	if !a.ignoredRead.Start(key) {
+		return
+	}
 	bg.Go(func() {
 		defer recoverCrash()
-		ignored := workspace.Ignored(root)
+		ignored := workspace.Ignored(key.root)
 		a.post(func() {
-			a.ignoring = false
-			if a.root == root {
+			if a.ignoredRead.Done(key) && a.folderKey() == key {
 				a.ignored = ignored
 			}
 		})
 	})
 }
+
+// folderKey names the folder as it was opened: opened again, it is
+// another, so what was read of it before is not taken for the new one's.
+type folderKey struct {
+	root string
+	tree *workspace.Tree
+}
+
+func (a *app) folderKey() folderKey { return folderKey{a.root, a.tree} }
 
 // isIgnored reports whether Git ignores path, or a folder above it.
 func (a *app) isIgnored(path string) bool {

@@ -100,7 +100,13 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"sel.camelCase", t.CmdSelCamelCase(), "", a.editActive(camelCase)},
 		{"sel.sortAsc", t.CmdSelSortAsc(), "", a.editActive(func(d *editor) { sortLines(d, false) })},
 		{"sel.sortDesc", t.CmdSelSortDesc(), "", a.editActive(func(d *editor) { sortLines(d, true) })},
+		{"sel.format", t.CmdSelFormat(), "Shift+Alt+F", a.formatActive},
+		{"sel.insertSnippet", t.CmdSelInsertSnippet(), "", a.insertSnippet},
+		// ⌃Space, which the editor takes itself, so that a terminal keeps it.
+		{"sel.complete", t.CmdSelComplete(), "", a.complete},
 		{"go.bracket", t.CmdGoBracket(), "Shift+CmdOrCtrl+\\", a.editActive(goToBracket)},
+		{"go.definition", t.CmdGoDefinition(), "F12", a.goToDefinition},
+		{"go.hover", t.CmdGoHover(), "", a.showHover},
 		{"go.quickOpen", t.CmdGoQuickOpen(), "CmdOrCtrl+P", func() { a.openQuick("") }},
 		{"go.commands", t.CmdGoCommands(), "Shift+CmdOrCtrl+P", func() { a.openQuick(">") }},
 		{"go.line", t.CmdGoLine(), "Ctrl+G", func() { a.openQuick(":") }},
@@ -128,6 +134,8 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"git.prevChange", t.CmdGitPrevChange(), "Shift+Alt+F5", func() { a.stepChange(-1) }},
 		{"git.nextFile", t.CmdGitNextFile(), "", func() { a.stepDiffFile(1) }},
 		{"git.prevFile", t.CmdGitPrevFile(), "", func() { a.stepDiffFile(-1) }},
+		{"git.collapseAllFiles", t.CmdGitCollapseAllFiles(), "Alt+CmdOrCtrl+[", func() { a.foldDiffFiles(true) }},
+		{"git.expandAllFiles", t.CmdGitExpandAllFiles(), "Alt+CmdOrCtrl+]", func() { a.foldDiffFiles(false) }},
 		{"git.toggleCommitFiles", t.CmdGitToggleCommitFiles(), "", a.toggleCommitFiles},
 		{"git.appendChange", t.CmdGitAppendChange(), "", a.appendAtCursor},
 		{"git.showChange", t.CmdGitShowChange(), "", a.editActive(func(d *editor) { d.peekHunk(caretLine(d)) })},
@@ -225,6 +233,8 @@ func (a *app) commandsIn(t locales.Messages) []command {
 	for _, tag := range mygo.App.Languages() {
 		cmds = append(cmds, command{localeCommand + tag, i18n.Autonym(tag), "", func() { a.setLocale(tag) }})
 	}
+	cmds = append(cmds, command{"plugins.problems", t.CmdPluginsProblems(), "", a.showProblems})
+	cmds = append(cmds, a.pluginCommands(t, cmds)...)
 	for i := range cmds {
 		cmds[i].accel = platformAccel(cmds[i].id, cmds[i].accel)
 	}
@@ -317,7 +327,7 @@ func (a *app) closeActive() {
 		a.host.closeWindow()
 		return
 	}
-	a.closeTab(t, nil)
+	a.closeTab(t, nil, nil)
 }
 
 // moveTerminal moves the terminal that has the keyboard, or had it last,
@@ -605,7 +615,8 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 			item("sel.comment"), item("sel.indent"), item("sel.outdent"), mygo.Separator(),
 			item("sel.moveUp"), item("sel.moveDown"), item("sel.copyUp"), item("sel.copyDown"), mygo.Separator(),
 			item("sel.lineBelow"), item("sel.lineAbove"), item("sel.deleteLine"), mygo.Separator(),
-			item("sel.sortAsc"), item("sel.sortDesc"), item("sel.camelCase"),
+			item("sel.sortAsc"), item("sel.sortDesc"), item("sel.camelCase"), mygo.Separator(),
+			item("sel.format"), item("sel.insertSnippet"), item("sel.complete"),
 		}},
 		{Label: locales.MenuView(), Submenu: []*mygo.MenuItem{
 			item("view.sidebar"), checkbox("view.sidebarRight", a.settings.SidebarRight), item("view.explorer"), item("view.search"), item("view.scm"), mygo.Separator(),
@@ -636,13 +647,14 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 		}},
 		{Label: locales.MenuGo(), Submenu: []*mygo.MenuItem{
 			item("go.quickOpen"), item("go.commands"), item("go.symbol"), item("go.line"), item("go.bracket"), mygo.Separator(),
+			item("go.definition"), item("go.hover"), mygo.Separator(),
 			item("go.nextTab"), item("go.prevTab"), mygo.Separator(),
 			item("go.nextProject"), item("go.prevProject"),
 		}},
 		{Label: locales.MenuGit(), Submenu: []*mygo.MenuItem{
 			item("git.commit"), item("git.commitPush"), item("git.amend"), item("git.undoCommit"), mygo.Separator(),
 			item("git.openChanges"), item("git.openAllChanges"), item("git.compareFiles"), item("git.nextChange"), item("git.prevChange"), item("git.nextFile"), item("git.prevFile"),
-			checkbox("git.toggleCommitFiles", a.window.CommitFilesOpen), mygo.Separator(),
+			item("git.collapseAllFiles"), item("git.expandAllFiles"), checkbox("git.toggleCommitFiles", a.window.CommitFilesOpen), mygo.Separator(),
 			item("git.showChange"), item("git.revertChange"), item("git.appendChange"), item("git.stageChange"), mygo.Separator(),
 			item("git.stageFile"), item("git.unstageFile"), item("git.stageAll"), mygo.Separator(),
 			item("git.switchBranch"), item("git.switchWorktree"), item("git.createBranch"), item("git.fetch"), item("git.pull"), item("git.push"), mygo.Separator(),
@@ -652,6 +664,7 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 			item("review.comment"), reviewItem("review.next"), reviewItem("review.previous"),
 			reviewItem("review.copy"), reviewItem("review.send"), reviewItem("review.clear"),
 		}},
+		a.pluginMenu(item),
 		{Role: mygo.RoleWindowMenu},
 	}
 	if len(help) > 0 {

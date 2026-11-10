@@ -75,6 +75,7 @@ func (a *app) view(c *ui.Context) {
 		a.frame++
 		a.dragging, a.dragNow = a.dragNow, false
 	}
+	a.copyDrop = c.Modifiers()&ui.Alt != 0
 	a.shortcuts(c)
 	c.SetZoom(float32(math.Pow(1.2, float64(a.settings.ZoomLevel))))
 	// Which pane has the keyboard focus, as the frame before left it, and
@@ -90,6 +91,8 @@ func (a *app) view(c *ui.Context) {
 		case t.view != nil && t.view.pane.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
 		case t.diff != nil && t.diff.pane.FocusWithin(c):
+			a.focus, a.col = paneEditor, i
+		case t.tool != nil && t.tool.pane.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
 		case t.ed != nil && t.ed.preview != nil && t.ed.preview.pane.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
@@ -177,6 +180,8 @@ func (a *app) view(c *ui.Context) {
 	a.worktreePickerView(c)
 	a.repositoryPickerView(c)
 	a.recentPickerView(c)
+	a.pluginPickerView(c)
+	a.hoverView(c)
 	a.themePickerView(c)
 	a.remotePickerView(c)
 	a.conflictsView(c)
@@ -205,6 +210,7 @@ func (a *app) view(c *ui.Context) {
 		}
 	}
 	a.notes = a.notes[:0]
+	a.pluginTick()
 	a.tick()
 }
 
@@ -593,7 +599,7 @@ func (a *app) columnView(c *ui.Context, col *column) {
 	}
 	a.tabStrip(c, col)
 	shown := col.tab()
-	if shown != nil && shown.term == nil {
+	if shown != nil && shown.term == nil && shown.tool == nil {
 		a.breadcrumbs(c, col, shown)
 	}
 	for _, t := range col.tabs {
@@ -613,9 +619,16 @@ func (a *app) columnView(c *ui.Context, col *column) {
 					a.viewerView(c, shown.view, shown.name())
 				case shown.diff != nil:
 					a.diffViewUI(c, shown.diff)
+					if col == a.findCol {
+						a.diffFindView(c, shown.diff)
+					} else {
+						shown.diff.find.on = false
+					}
 				case shown.merge != nil:
 					a.mergeViewUI(c, shown.merge)
-				case shown.ed.loading || shown.ed.loadErr != nil:
+				case shown.tool != nil:
+					a.toolViewUI(c, shown.tool)
+				case shown.ed.unread():
 					a.hideEditor(shown.ed)
 					a.loadingView(c, shown.ed)
 				case shown.ed.preview != nil:
@@ -727,9 +740,17 @@ func (a *app) owns(it dragItem) bool {
 	return false
 }
 
-// dropInColumn puts what was dragged at place at of a column.
+// dropInColumn puts what was dragged at place at of a column. A tab of
+// another project opens its file there.
 func (a *app) dropInColumn(it dragItem, col *column, at int) {
-	if slices.Index(a.cols, col) < 0 || !a.owns(it) {
+	if slices.Index(a.cols, col) < 0 {
+		return
+	}
+	if from := a.carrier(it); from != nil {
+		a.takeTab(from, it.tab, col, at, a.copyDrop)
+		return
+	}
+	if !a.owns(it) {
 		return
 	}
 	switch {
@@ -745,7 +766,19 @@ func (a *app) dropInColumn(it dragItem, col *column, at int) {
 // dropBeside puts what was dragged in a column of its own, before a
 // column or after it.
 func (a *app) dropBeside(it dragItem, col *column, after bool) {
-	if slices.Index(a.cols, col) < 0 || !a.owns(it) {
+	if slices.Index(a.cols, col) < 0 {
+		return
+	}
+	if from := a.carrier(it); from != nil {
+		nc := a.splitColumn(col, after)
+		a.takeTab(from, it.tab, nc, 0, a.copyDrop)
+		if len(nc.tabs) == 0 {
+			// It could not be opened.
+			a.removeColumn(nc)
+		}
+		return
+	}
+	if !a.owns(it) {
 		return
 	}
 	if it.file != nil {
@@ -770,18 +803,19 @@ func (a *app) takeFiles(body ui.Element, col *column) bool {
 
 // dropZones are where a tab or files dragged over a column are dropped:
 // on a side, for a column of their own there, or between them, in this
-// one. They are there only while something is dragged over the editor;
-// over says files are over the column's body.
+// one. They are there only while something is dragged over the editor,
+// a tab of another project too; over says files are over the column's
+// body.
 func (a *app) dropZones(c *ui.Context, col *column, over bool) {
 	files := over || col.filesOver
-	if !a.dragging && !files {
+	if !a.dragging && a.carried == nil && !files {
 		return
 	}
 	w := col.body.Bounds(c).W
 	side := min(w/4, 140)
 	zone := func(key string, left, width, markLeft, markW float32, drop func(it dragItem), dropFiles func([]string)) {
 		z := ui.Box(c.Key(key)).Absolute().Top(0).Bottom(0).Left(left).Width(width)
-		_, ok := ui.DragOver[dragItem](z)
+		_, ok := a.dragOver(z)
 		if files && z.FileDragOver() {
 			ok, over = true, true
 		}
@@ -1014,7 +1048,7 @@ func (a *app) statusFit(c *ui.Context, width float32) statusVisibility {
 		w, _ := m.size(1)
 		used += w + 12 + 2
 	}
-	if busy := a.repository().git.busy; busy != "" {
+	if busy := a.repository().git.label(); busy != "" {
 		used += measure(busy, true)
 	}
 	if a.conn != nil {
@@ -1132,11 +1166,11 @@ func (a *gitContext) gitSyncStatus(c *ui.Context, showCounts bool) {
 	if g.status.Upstream == "" {
 		label, tip, icon = locales.ScmPublishBranch(), locales.ScmPublishBranch(), iconPush
 	}
-	if g.busy != "" {
-		tip = g.busy
+	if busy := g.label(); busy != "" {
+		tip = busy
 	}
 	b := ui.ButtonBase(c.Key("status:git-sync")).Height(statusBarH-6).Padding(0, 6).Gap(5).Radius(4).
-		AlignItems(ui.Center).Label(label).Tooltip(tip).Disabled(g.busy != "")
+		AlignItems(ui.Center).Label(label).Tooltip(tip).Disabled(!g.canMutate())
 	if b.Hovered() {
 		b.Background(p.hover)
 	}
@@ -1209,7 +1243,13 @@ func (a *app) statusBar(c *ui.Context) {
 		// item is a part of the bar, a button when it does something.
 		item := func(key, label, tip string, icon *ui.SVG, fn func()) {
 			if fn == nil {
-				ui.Row(c.Key("status:"+key)).Height(statusBarH).Padding(0, 6).Gap(5).AlignItems(ui.Center).Children(func() {
+				// It does nothing, but tells what it is under the pointer, as
+				// the plugins' items do.
+				r := ui.Row(c.Key("status:"+key)).Height(statusBarH).Padding(0, 6).Gap(5).AlignItems(ui.Center)
+				if tip != "" {
+					r.Label(tip).Tooltip(tip)
+				}
+				r.Children(func() {
 					if icon != nil {
 						ui.Icon(c, icon).FontSize(12).TextColor(p.statusFg)
 					}
@@ -1258,7 +1298,7 @@ func (a *app) statusBar(c *ui.Context) {
 		a.portsStatus(c, text)
 		if b := repo.branch(); b != "" {
 			bb := ui.ButtonBase(c.Key("status:branch")).Height(statusBarH-6).Padding(0, 6).Gap(5).Radius(4).
-				AlignItems(ui.Center).Label(locales.BranchLabel(b)).Tooltip(locales.BranchStatusTip(b)).Disabled(repo.git.busy != "")
+				AlignItems(ui.Center).Label(locales.BranchLabel(b)).Tooltip(locales.BranchStatusTip(b)).Disabled(!repo.git.canMutate())
 			if bb.Hovered() {
 				bb.Background(p.hover)
 			}
@@ -1283,7 +1323,7 @@ func (a *app) statusBar(c *ui.Context) {
 				text(busy)
 			})
 		}
-		if busy := repo.git.busy; busy != "" && a.settings.Theme == themeClaude {
+		if busy := repo.git.label(); busy != "" && a.settings.Theme == themeClaude {
 			a.claudeSpinner(c, busy)
 		} else if busy != "" {
 			ui.Row(c.Key("status:busy")).Height(statusBarH).Padding(0, 6).Gap(5).AlignItems(ui.Center).Children(func() {
@@ -1307,7 +1347,9 @@ func (a *app) statusBar(c *ui.Context) {
 			}
 		}
 		a.reviewStatus(c, text)
+		a.pluginStatusItems(c, false, item, text)
 		ui.Spacer(c)
+		a.pluginStatusItems(c, true, item, text)
 		// Settings sync is last, at the right, whatever shows before it,
 		// and a new version of Mayoi before it.
 		defer a.syncStatus(c)

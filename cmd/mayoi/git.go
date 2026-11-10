@@ -49,16 +49,16 @@ type gitState struct {
 	// the command ends or another starts.
 	mergeDone   map[string]bool
 	mergeDoneOp git.Op
-	// stale has the next frame read the status again, unless running;
-	// read is when it was read last.
-	stale, running bool
-	read           time.Time
+	// status reads the status of the work tree again when it may have
+	// changed; read is when it was read last.
+	statusRead bg.Refresher[*git.Repo]
+	read       time.Time
 
 	// meta is when the files Git changes as HEAD moves last changed, and
-	// checked when the app last looked; metaRunning is set while a remote
-	// work tree is looked at.
+	// checked when the app last looked; metaRead looks at a remote work
+	// tree.
 	meta, checked time.Time
-	metaRunning   bool
+	metaRead      bg.Refresher[*git.Repo]
 	// refsMeta is when the refs last changed, and refsGen counts the
 	// changes, for the history to be read again.
 	refsMeta time.Time
@@ -97,35 +97,81 @@ type gitState struct {
 	reachOf string
 
 	// pr is the pull request of prBranch of prRepo, as gh last told, nil
-	// for none; prRead is when it was asked last, of the state prOf names.
-	// prRunning is set while gh runs, prOff once gh could not tell, and
-	// prWake draws a frame when it is time to ask again. ghOK is set once
-	// gh answered, which it does only when installed and signed in, and
-	// ghProbed once it was asked so without a branch checked out.
-	pr        *git.PR
-	prRepo    *git.Repo
-	prBranch  string
-	prOf      string
-	prRead    time.Time
-	prRunning bool
-	prOff     bool
-	prWake    *time.Timer
-	ghOK      bool
-	ghProbed  bool
+	// for none; prPoll asks gh again as the branch, its commit or its
+	// upstream changes, or the answer gets old, and prOff is set once gh
+	// could not tell. ghOK is set once gh answered, which it does only
+	// when installed and signed in, and ghProbed once it was asked so
+	// without a branch checked out.
+	pr       *git.PR
+	prRepo   *git.Repo
+	prBranch string
+	prPoll   bg.Poller[prAsked]
+	prOff    bool
+	ghOK     bool
+	ghProbed bool
 
 	// prHeads is the pull requests open of prHeadsRepo by the commit at
-	// their head, as gh last told, which the history marks; prHeadsRead
-	// is when it was asked last, of the refs prHeadsOf counts. As for pr,
-	// prHeadsRunning is set while gh runs, prHeadsOff once gh could not
-	// tell, and prHeadsWake draws a frame when it is time to ask again.
-	prHeads        map[string][]git.PRHead
-	prHeadsRepo    *git.Repo
-	prHeadsOf      int
-	prHeadsRead    time.Time
-	prHeadsRunning bool
-	prHeadsOff     bool
-	prHeadsWake    *time.Timer
+	// their head, as gh last told, which the history marks; prHeadsPoll
+	// asks gh again as the refs change, or the answer gets old, and
+	// prHeadsOff is set once gh could not tell.
+	prHeads     map[string][]git.PRHead
+	prHeadsRepo *git.Repo
+	prHeadsPoll bg.Poller[prHeadsAsked]
+	prHeadsOff  bool
 }
+
+// prAsked is what gh was asked the pull request of: a work tree, and its
+// branch, the commit at its head and its upstream.
+type prAsked struct {
+	repo *git.Repo
+	of   string
+}
+
+// prHeadsAsked is what gh was asked the open pull requests of: a work
+// tree, as of the count of its refs' changes.
+type prHeadsAsked struct {
+	repo *git.Repo
+	refs int
+}
+
+// gitActivity is what Git is doing in a work tree in the background.
+type gitActivity int
+
+const (
+	activityIdle    gitActivity = iota
+	activityCommand             // a command runs
+	activityReading             // the status is read, or is to be
+)
+
+// activity is what Git is doing in the work tree, worked out from the
+// commands pending and the status read. A command wins over a read.
+func (g *gitState) activity() gitActivity {
+	switch {
+	case g.busy != "" || g.pending > 0:
+		return activityCommand
+	case g.statusRead.Running() || g.statusRead.Stale():
+		return activityReading
+	}
+	return activityIdle
+}
+
+// quiet reports whether Git does nothing in the work tree: no command
+// runs and the status read is up to date, as for the next of a chain.
+func (g *gitState) quiet() bool { return g.repo == nil || g.activity() == activityIdle }
+
+// commanding reports whether a named command runs, which the controls
+// that end a merge, rebase or cherry-pick wait for.
+func (g *gitState) commanding() bool { return g.busy != "" }
+
+// canMutate reports whether a command may change the work tree: none
+// runs and no merge, rebase or cherry-pick is in progress, which only
+// committing, continuing or aborting ends.
+func (g *gitState) canMutate() bool {
+	return g.busy == "" && (g.status == nil || g.status.Op == "")
+}
+
+// label names the command running, as "Pushing…", "" while none does.
+func (g *gitState) label() string { return g.busy }
 
 // historyPage is how many commits the history reads at first, and more
 // each time more are asked for.
@@ -163,7 +209,8 @@ func (a *app) lookUpRepo() {
 			}
 			g.looking, g.looked = false, true
 			if err == nil {
-				g.repo, g.stale, g.remotesStale = r, true, true
+				g.repo, g.remotesStale = r, true
+				g.statusRead.Invalidate()
 			}
 		})
 	})
@@ -183,17 +230,18 @@ func (a *gitContext) refreshGit() {
 	switch {
 	case a.app.conn != nil:
 		// On the host, at one round trip, in the background.
-		if !g.metaRunning && now.Sub(g.checked) >= remoteMetaEvery {
-			g.checked, g.metaRunning = now, true
-			r := g.repo
+		if !g.metaRead.Running() && now.Sub(g.checked) >= remoteMetaEvery {
+			g.metaRead.Invalidate()
+		}
+		if r := g.repo; g.metaRead.Start(r) {
+			g.checked = now
 			bg.Go(func() {
 				defer recoverCrash()
 				t, refs, err := remoteGitMeta(r)
 				a.app.post(func() {
-					if g.repo != r {
+					if !g.metaRead.Done(r) || g.repo != r {
 						return
 					}
-					g.metaRunning = false
 					if err == nil {
 						a.tookGitMeta(t, refs)
 					}
@@ -205,11 +253,13 @@ func (a *gitContext) refreshGit() {
 		a.tookGitMeta(gitMeta(g.repo))
 	}
 	a.refreshHistory()
-	if g.running || !g.stale && now.Sub(g.read) < statusEvery {
+	if !g.statusRead.Running() && now.Sub(g.read) >= statusEvery {
+		g.statusRead.Invalidate()
+	}
+	r := g.repo
+	if !g.statusRead.Start(r) {
 		return
 	}
-	g.running, g.stale = true, false
-	r := g.repo
 	// The remotes change seldom: they are read again with the status after
 	// a command, or as HEAD moves, not every few seconds, and of a work
 	// tree here only once the config they are in changed.
@@ -238,10 +288,10 @@ func (a *gitContext) refreshGit() {
 			remotes, remotesErr = r.Remotes()
 		}
 		a.app.post(func() {
-			if g.repo != r {
+			if !g.statusRead.Done(r) || g.repo != r {
 				return
 			}
-			g.running, g.read = false, a.app.gitNow()
+			g.read = a.app.gitNow()
 			if err != nil {
 				return
 			}
@@ -316,7 +366,7 @@ func (a *gitContext) refreshHistory() {
 func (a *gitContext) tookGitMeta(t, refs time.Time) {
 	g := a.git
 	if !t.Equal(g.meta) {
-		a.app.repositories.dirty = true
+		a.app.repositories.scan.Invalidate()
 		if !g.meta.IsZero() {
 			a.gitChanged()
 		}
@@ -459,10 +509,11 @@ func (a *gitContext) gitChanged() {
 		}
 	}
 	a.app.diffsChanged(a.git.repo.Root)
-	a.git.stale, a.git.remotesStale = true, true
+	a.git.statusRead.Invalidate()
+	a.git.remotesStale = true
 	for _, ctx := range a.app.repositories.contexts {
 		if ctx.git.repo != nil && a.git.repo != nil && ctx.git.repo.Root != a.git.repo.Root && ctx.git.repo.Contains(a.git.repo.Root) {
-			ctx.git.stale = true
+			ctx.git.statusRead.Invalidate()
 		}
 	}
 }
@@ -638,7 +689,7 @@ func (a *gitContext) checkOutCommit(cm git.Commit) {
 		a.switchBranch(b, false)
 		return
 	}
-	a.app.confirm = &confirm{title: locales.CheckOutQuestion(cm.Short()), ok: locales.CheckOutButton(),
+	a.app.present(&confirm{title: locales.CheckOutQuestion(cm.Short()), ok: locales.CheckOutButton(),
 		message: locales.CheckOutDetached(),
 		run: func() {
 			if !a.docsSaved(locales.BeforeCheckout()) {
@@ -646,7 +697,7 @@ func (a *gitContext) checkOutCommit(cm git.Commit) {
 			}
 			hash := cm.Hash
 			a.gitDo(locales.BusyCheckingOut(cm.Short()), func(r *git.Repo) error { return r.Checkout(hash) }, nil)
-		}}
+		}})
 }
 
 // localBranch is the one local branch at a commit, "" when it has none
@@ -746,24 +797,24 @@ func (a *gitContext) runOp(op git.Op, busy, done string, fn func(r *git.Repo) er
 // out, once asked.
 func (a *gitContext) mergeCommit(cm git.Commit) {
 	rev, into := revOf(cm), a.branch()
-	a.app.confirm = &confirm{title: locales.MergeQuestion(cmp.Or(localBranch(cm), cm.Short()), into), ok: locales.MergeButton(),
+	a.app.present(&confirm{title: locales.MergeQuestion(cmp.Or(localBranch(cm), cm.Short()), into), ok: locales.MergeButton(),
 		message: ellipsize(cm.Subject, 80),
 		run: func() {
 			a.runOp(git.OpMerge, locales.BusyMerging(), locales.MergedInto(cmp.Or(localBranch(cm), cm.Short()), into),
 				func(r *git.Repo) error { return r.Merge(rev) })
-		}}
+		}})
 }
 
 // rebaseOnto moves the commits of the branch checked out that a commit
 // of the history lacks on top of it, once asked.
 func (a *gitContext) rebaseOnto(cm git.Commit) {
 	rev, branch, onto := revOf(cm), a.branch(), cmp.Or(localBranch(cm), cm.Short())
-	a.app.confirm = &confirm{title: locales.RebaseQuestion(branch, onto), ok: locales.RebaseButton(),
+	a.app.present(&confirm{title: locales.RebaseQuestion(branch, onto), ok: locales.RebaseButton(),
 		message: locales.RebaseDetail(branch, onto),
 		run: func() {
 			a.runOp(git.OpRebase, locales.BusyRebasing(), locales.RebasedOnto(branch, onto),
 				func(r *git.Repo) error { return r.Rebase(rev) })
-		}}
+		}})
 }
 
 // cherryPick makes a commit of a commit's changes on the branch checked
@@ -782,10 +833,10 @@ func (a *gitContext) revertCommit(cm git.Commit) {
 	if merge {
 		msg += " " + locales.RevertMergeDetail()
 	}
-	a.app.confirm = &confirm{title: locales.RevertQuestion(cm.Short()), ok: locales.RevertButton(), message: msg, run: func() {
+	a.app.present(&confirm{title: locales.RevertQuestion(cm.Short()), ok: locales.RevertButton(), message: msg, run: func() {
 		a.runOp(git.OpRevert, locales.BusyReverting(), locales.Reverted(ellipsize(cm.Subject, 48)),
 			func(r *git.Repo) error { return r.Revert(hash, merge) })
-	}}
+	}})
 }
 
 // resetModes are the ways a reset may go, in the order resetChoices offers
@@ -818,7 +869,7 @@ func (a *gitContext) resetTo(cm git.Commit) {
 			a.app.tell(note{message: locales.ResetDone(branch, git.ShortHash(hash), strings.ToLower(choices[cf.choice].label))})
 		})
 	}
-	a.app.confirm = cf
+	a.app.present(cf)
 }
 
 // continueOp goes on with the command stopped for conflicts, once they
@@ -826,7 +877,7 @@ func (a *gitContext) resetTo(cm git.Commit) {
 // message written, when one is.
 func (a *gitContext) continueOp() {
 	g := a.git
-	if g.status == nil || g.status.Op == "" || g.busy != "" {
+	if g.status == nil || g.status.Op == "" || g.commanding() {
 		return
 	}
 	op := g.status.Op
@@ -873,7 +924,7 @@ func (a *gitContext) abortOp() {
 // abortOpOf undoes op, stopped for conflicts, once asked.
 func (a *gitContext) abortOpOf(op git.Op) {
 	g := a.git
-	a.app.confirm = &confirm{title: locales.AbortQuestion(opNoun(op)), ok: locales.ButtonAbort(), danger: true,
+	a.app.present(&confirm{title: locales.AbortQuestion(opNoun(op)), ok: locales.ButtonAbort(), danger: true,
 		message: locales.AbortDetail(),
 		run: func() {
 			a.gitDo(locales.BusyAborting(), func(r *git.Repo) error { return r.Abort(op) }, func() {
@@ -882,7 +933,7 @@ func (a *gitContext) abortOpOf(op git.Op) {
 					g.message = ""
 				}
 			})
-		}}
+		}})
 }
 
 // askRefAt asks for the name of a branch, or a tag, to make at a commit
@@ -921,13 +972,13 @@ func (a *gitContext) askRefAt(cm git.Commit, tag bool) {
 
 // askNewBranch asks for the name of a branch to make and check out.
 func (a *gitContext) askNewBranch() {
-	if !a.live() || a.git.busy != "" {
+	if !a.live() || !a.git.canMutate() {
 		return
 	}
 	defer a.bindPanelDialogs(a.git.repo)
 	a.app.prompt = &prompt{title: locales.CreateBranchEllipsis(), hint: locales.BranchFrom(a.branch()), done: func(name string) string {
-		if a.git.busy != "" {
-			return a.git.busy
+		if busy := a.git.label(); busy != "" {
+			return busy
 		}
 		name = strings.TrimSpace(name)
 		if !validBranch(name) {

@@ -1336,6 +1336,9 @@ const (
 
 // alwaysDark is whether a theme is dark whatever the Appearance is.
 func alwaysDark(theme string) bool {
+	if pluginThemeDark(theme) {
+		return true
+	}
 	switch theme {
 	case themeMatrix, themePurpleGold, themePumpkin, themeWitchsBrew, themeBloodMoon:
 		return true
@@ -1346,6 +1349,9 @@ func alwaysDark(theme string) bool {
 // paletteFor returns the palette of a theme of the settings, in a window
 // that is dark or not.
 func paletteFor(theme string, dark bool) *palette {
+	if p := pluginPalette(theme, dark); p != nil {
+		return p
+	}
 	switch {
 	case theme == themeMatrix:
 		return matrixPal
@@ -1787,9 +1793,16 @@ var fieldFocus = ui.ElementTransition{Colors: true, Duration: 120 * time.Millise
 // floating styles a box that floats over the window: a dialog, as quick
 // open's, a picker's or a prompt's, or a smaller box over an editor, as
 // find's. The shadow is lighter on a light window, where a dark one looks
-// smudged.
+// smudged. A dialog comes in as it opens: it fades in and grows to its
+// size from a little smaller, from its top, where it hangs; with less
+// motion, it is there at once.
 func (a *app) floating(c *ui.Context, box ui.Element, dialog bool) ui.Element {
 	p := a.pal
+	if dialog {
+		k := box.Keyframes("dialog-in", []ui.Keyframe{{Value: 0}, {At: showFor, Value: 1, Ease: ui.EaseOut}})
+		s := 0.98 + 0.02*k
+		box.Opacity(k).TransformOrigin(0.5, 0).Scale(s, s)
+	}
 	box.Background(c.Theme().Surface).Border(1, p.border)
 	if dialog && a.settings.Theme == themeClaude {
 		// In the accent, as Claude Code boxes what it asks.
