@@ -17,6 +17,8 @@
 |---|---|
 | `mygo.json` 删除 `updates` | 关闭自动更新，否则会被上游 Release 覆盖掉定制 |
 | 图标换成简单的编辑器窗口（`cmd/mayoi/icon-art.png`，再 `go run ./tools/icongen` 生成 `resources/icon.png`） | 自用偏好 |
+| `scripts/sync-upstream.sh` | 一键合并上游、维持定制（自动去 updates、维持自用图标）、编译并安装脚本 |
+| `scripts/watch-upstream.sh` | 上游版本定时检查、去重与 Telegram 提醒脚本（配合 LaunchAgent） |
 
 定制尽量写成新文件（`cmd/mayoi/x_*.go`、`internal/<新包>`），上游文件只留挂载点，降低 cherry-pick 冲突。
 自己的改动不写进 `CHANGELOG.md`（上游文件，必冲突），记在上表。
@@ -33,8 +35,19 @@ ditto build/darwin-arm64/Mayoi.app /Applications/Mayoi.app
 
 安装前先退出正在运行的 Mayoi。`mayoi` 命令：菜单 **File → Install 'mayoi' Command**。
 
-## 跟进上游
+## 跟进上游与自动化更新
 
+### 自动化监控 (LaunchAgent)
+本机已配置后台定时监控任务（`com.mesay.mayoi-watch`），每天 10:30 自动检查上游新提交/Release。有新更新时自动通过 Telegram 推送通知与一键更新指令。
+
+### 一键更新脚本
+收到通知或想手动更新时：
+```sh
+./scripts/sync-upstream.sh --install   # 自动合并上游、维持自用定制、编译并替换安装
+./scripts/sync-upstream.sh --check-only # 仅查看上游是否有新变动
+```
+
+也可以按传统方式手动操作：
 ```sh
 git fetch upstream
 git log --oneline develop..upstream/main      # 看新提交
@@ -44,6 +57,7 @@ git checkout develop && git merge upstream/main   # 冲突时我们已合入上�
 
 ## 当前版本
 
+- 2026-11-23：建立定时检查（LaunchAgent: `com.mesay.mayoi-watch`）与一键更新脚本（`scripts/sync-upstream.sh`）；跟进上游 `v0.23.2`。
 - 2026-11-10：已跟进上游 `v0.19.2`（插件系统、`mayoi settings`），保留自定义图标和关闭自动更新设置。
 - 本机安装由此仓库构建；更新时合并上游、执行针对性测试，再构建安装。
 
