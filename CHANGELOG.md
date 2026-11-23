@@ -5,9 +5,535 @@ needs a `## <version>` section here, or its build fails.
 
 ## Unreleased
 
+- **Sessions** no longer lists Pi subagent sessions such as `general-purpose#3c8c2fa2`; Pi forks still show.
+- **Download** and **Upload** of remote files and folders now work on Windows and in WSL.
+- Dragging a file in the explorer no longer stops when you scroll with the wheel.
+- Plugins can compare two open buffers, including unsaved tabs, in the native Diff view.
+- Buffer comparisons follow edits and keep the last text when a source tab closes.
+- Edit either live source directly in a buffer comparison, including unsaved tabs.
+- Plugins can supply syntax rules for their languages.
+- Plugins can change a document's language without editing its text.
+- Plugins can open reusable text output beside its source document.
+- Plugin output stays to the right of its source when columns are stacked.
+- Plugin text output uses plain text when its language is not recognized.
+- Plugins can show clickable actions above source lines, with stale actions removed on edits or reload.
+- Plugin text output can target its source window and display JSON with syntax highlighting.
+- Plugins keep targeting their source documents when you switch windows.
+- Plugins can read a document's text and version together and track untitled documents closing.
+- Plugin tab actions receive the tab you chose, including unsaved buffers.
+- Right-click a local branch in Source Control and choose **Pull Branch** to update it in place.
+- Pulling an inactive branch uses its upstream even if another fetch runs at the same time.
+- Local branches checked out in another worktree show a worktree icon and a folder tooltip.
+- Hover over a worktree branch to open its checkout in a new window.
+- Branches behind their upstream are highlighted and show a pull shortcut on hover.
+- Branches ahead of their upstream are highlighted and show a push shortcut on hover.
+- Branches ahead or behind their upstream show both commit counts, including zero.
+
+## 0.23.2
+
+- In Live Preview, clicking a table cell edits its Markdown in place inside the rendered table.
+- In a table cell, `Tab` and `Shift+Tab` move between cells, and `Return` and the arrow keys move between rows.
+- `Escape` in a table cell, or moving past the table, returns to the text beside the table.
+- Typing `|` in a table cell escapes it as `\|`, and `Cmd+Z` undoes a cell's edits as it does typing.
+- In a table cell, `Tab` after the last cell or `Return` on the last row adds a new row below.
+- `Return` on an empty last row of a table removes that row and returns to the text below the table.
+- Right-click a table cell in Live Preview to insert or delete rows and columns; `Cmd+Z` undoes each change.
+- In Live Preview, a table with only a header row renders and edits in place; `Tab` or `Return` adds its first row.
+- Long tables in Live Preview stay smooth to scroll and edit, even with thousands of rows.
+- Moving to a table cell with `Tab`, `Return` or the arrow keys scrolls it into view if it was off screen.
+- Editing a cell or adding a row in a long Live Preview table no longer closes the cell or jumps the view.
+- Scrolling with the wheel or trackpad over a Live Preview table, or the cell you're editing, now scrolls the note.
+- The buttons over a Mermaid diagram in Live Preview now open, copy, export or show its source as they say.
+
+- On macOS, `Cmd+D` and `Cmd+Shift+D` open an empty column to the right or below, as in iTerm2.
+- **View → Split Down** stacks a new column under the current one, and you drag the line between them to resize.
+- Splitting a terminal opens a new one in the same folder, and the original keeps running.
+- Stacked columns come back when you reopen the project.
+- On macOS, **Add Next Occurrence** moves to `Ctrl+Cmd+G`; `Cmd+\` still splits right.
+- Vim's `:split` now splits down, and `:vsplit` splits right.
+
+- On Linux, opening or saving a file no longer crashes Mayoi when the system's MIME data can't be found.
+- On macOS, VoiceOver no longer crashes Mayoi when a notice it reads has text that isn't valid UTF-8.
+- On Windows, plugin update checks and installs no longer flash a console window.
+- Opening a file to the side from Quick Open with `Cmd+Return` uses an existing column instead of adding one.
+- **Layout → One File at a Time** no longer applies to a commit's changes, which list every file.
+- `Cmd+Q` and **Mayoi → Quit Mayoi** ask before quitting, with **Don't ask again** to skip it.
+- **Settings → General → Confirm Before Quit** turns the quit question back on.
+- `Shift`-click in the Explorer selects a range of files and folders, and `Cmd`-click (`Ctrl`) adds or removes one.
+- `Cmd+C` and **Copy** in the Explorer copy every selected file; **Copy Path** copies their paths, one per line.
+- **Rename…** and **Move to Trash** stay off while several Explorer rows are selected.
+- Headings in the breadcrumbs and their outline show plain text, so `[label](url)` reads as its label.
+- Updating a plugin installed from Git no longer fails on Windows with Access is denied while Mayoi is open.
+- Quick Open no longer crashes when opened after **File → Close Folder**.
+
+## 0.23.1
+
+- Set the TypeScript plugin's `path` to `tsrs` to use tsrs.
+- Set the Python plugin's `path` to `ty` to use ty.
+- Closing the settings window keeps what was typed in a text field, rather than losing it.
+- Archive sessions from a row's menu, its archive button or `⌫`, and **Undo** from the toast.
+- Choose several sessions to archive them together.
+- The archive button in the Sessions title, or **View → Archived Sessions**, lists archived sessions to restore.
+- Resuming an archived session brings it back to the list; its terminal and transcript are left alone.
+- Give a language server your own startup options with `languageServers` in settings.json, by the server's id.
+- Options go over the plugin's own, deeply, and `null` takes one away, as in `{"tsserver": {"path": null}}`.
+- Saving changed options restarts only the servers they're for, in every folder.
+- A language server plugin's details show where to set its `initializationOptions`.
+- Holding `Cmd` (`Ctrl` on Windows and Linux) over a name shows a hand, as a click goes to its definition.
+- Drag a file or folder onto a folder in the Explorer to move it there; open tabs follow it.
+- On Windows a new terminal is titled by its shell, as `pwsh`, rather than the shell's full path.
+- The **Go** menu finds type definitions, source definitions, implementations and references.
+- Language server plugins can start a bundled runtime on this machine.
+
+## 0.23.0
+
+- Type at several places at once: **Selection → Add Cursor Above** and **Below** add a caret on the next line.
+- Alt-click (`⌥`-click on macOS) adds a caret or takes one away; `⌘`-click still goes to a definition.
+- `⌘D` selects the next match of the word or selection, and `⇧⌘L` selects every match at once.
+- Drag with `Shift+Alt` or the middle button to select a column; `⇧⌥⌘` with the arrows does it from the keyboard.
+- Typing, delete, Enter, Tab, copy, cut, paste and the arrows act at every caret, and one undo takes an edit back.
+- The status bar counts the selections, and Escape or a plain click goes back to one caret.
+- **Go → Show Hover** now opens a small card by the word at the caret instead of a dialog in mid-window.
+- The hover card stays inside its editor and split, above the line or below it near the top.
+- A hover's signature shows first in the code font and colors, with its documentation below.
+- Plaintext hovers from language servers show as written, without turning `*` or `_` into formatting.
+- The hover closes on `Esc`, a click elsewhere, typing, or moving the caret; long hovers scroll.
+- **Go → Show Hover** has a shortcut: `⌘K ⌘I` on macOS, `Ctrl+K Ctrl+I` on Windows and Linux.
+- Pressing Show Hover again while the card shows lets the arrows and `Page Up`/`Page Down` scroll it.
+- Rest the pointer on a name in code to see its hover card; move into the card to read or scroll it.
+- Turn off the pointer's hover cards with the `editorHover` setting.
+- In Vim mode, `gd` goes to the definition and `K` shows the hover.
+- A late definition or hover no longer replaces Quick Open or a list you opened while waiting.
+- Lists in hovers and plugin views now show their bullets and numbers.
+- A language server that refuses to start now shows its own reason instead of "the server stopped".
+- The TypeScript server says when a folder has no TypeScript, and how to add it or point to one.
+- With TypeScript 7, set the TypeScript plugin's `path` to `tsc` to use its own server.
+- The TypeScript plugin's `tsserverPath` setting names a `tsserver.js` when the folder has none.
+- Mayoi no longer crashes when a language server exits without an error as it starts; it says so.
+- Mayoi comes with language servers for Go, TypeScript, Python, Rust and C/C++, off until you turn them on.
+- Opening a file whose built-in server is off offers **Turn On** when its program is installed.
+- If a built-in server's program is missing, Mayoi says how to install it.
+- Each built-in server has a `path` setting on the **Plugins** page for a program that isn't on your PATH.
+- A plugin you install under the name of a built-in one now takes its place.
+- C++, JSX and TSX files now reach language servers as `cpp`, `javascriptreact` and `typescriptreact`.
+- Files dropped from the Finder on a project's square switch to that project and open there as tabs.
+- Files dropped on the empty part of the project rail open in the project shown.
+- Pictures dropped from the Finder on a square open as files; use **Choose Icon…** to set an icon.
+- Splitting a Live Preview note with tables, diagrams or formulas into two columns no longer crashes Mayoi.
+- Fold blocks of code: click the chevron beside a line number, shown as the pointer comes over the gutter.
+- JSON objects and arrays fold, as do Go, JavaScript and TypeScript blocks, Python by indent and Markdown sections.
+- A folded line ends in `⋯`; click it, or its chevron, to show the lines again.
+- On macOS, **Edit → Fold** and **Unfold** use `⌥⌘[` and `⌥⌘]`, which also fold a focused diff's files.
+- **Edit → Fold All** (`⌘K ⌘0`) and **Unfold All** (`⌘K ⌘J`) fold or open every block of the file at once.
+- The caret moves past folded lines; Find and Go to Line open the folds that hide what they go to.
+- Folds stay as you edit above them, each split view keeps its own, and they come back with your session.
+- ⌘-click a name, or Ctrl-click on Windows and Linux, to go to its definition, as `F12` does.
+- **Go → Back** (`⌃-`) and **Go → Forward** (`⌃⇧-`) return to where a jump, as to a definition, left.
+- On Windows and Linux, `Alt+←` and `Alt+→` go back and forward; the mouse's side buttons do too.
+- Go back lands where you were even after edits above it, and reopens a file you closed since.
+- A name defined in several places offers them in a list instead of going to the first.
+- Go to Definition ignores an answer that arrives after you moved the caret or asked again.
+- Definitions on the same line each show in the list, with their column so you can tell them apart.
+- A language server restarted while asked for a definition no longer says none was found.
+- **Go → Show Hover** ignores an answer that arrives after you moved the caret, typed or asked again.
+- **Selection → Complete Word** no longer opens a late list or says "No completions here" once you've moved on.
+- An older completion list no longer replaces or closes the one you asked for since.
+- A language server restarted while asked for a hover or completions shows nothing from the old one.
+- Show Hover and Complete Word say when the language server isn't running instead of finding nothing.
+- Go to Definition uses the text as you just typed it, and stays put if you moved on before it answered.
+- Opening a file whose language has no server offers its plugin, once, when the server is installed.
+- When that server isn't installed, Mayoi says once how to install it.
+- Once you install a server Mayoi said was missing, opening a file of its language offers its plugin.
+- A plugin that fails to install from that offer says why and offers **Try Again**.
+- The installed plugin's server starts at once for the files already open.
+- **Plugins → Show Language Servers** lists this folder's servers, whether each runs, and where.
+- Choose a server there to restart it, even after Mayoi stopped retrying it on its own.
+- A server that can't start says why: its program isn't installed, it quit, or it didn't answer.
+- On an SSH host, a server ending with status 127 is only called not installed once the host confirms it.
+- A server that fails to start or stops offers **Restart**; files already open reconnect to it.
+- Terminals no longer crash Mayoi on macOS while many files are open.
+- Selecting text in a file with invalid UTF-8 past its first 8 KB no longer crashes Mayoi.
+- **Settings → Terminal → Shell** picks the program new terminals run, as PowerShell 7 Preview or Git Bash.
+- **Shell Arguments** passes each argument to that program exactly as written, never through a shell.
+- A click past bold text or hidden Markdown marks puts the caret where you click, without selecting text.
+- **Toggle Line Comment** works in JSX, Emacs Lisp and GDScript, and a typed backtick closes in JSX too.
+- Turn on `trimTrailingWhitespace` to remove the spaces and tabs at the ends of lines as you save.
+- Trimming on save keeps Markdown's two-space line breaks and comes back with one **Undo**.
+- **Trim Trailing Whitespace** in the command palette trims the open file now.
+- Find and replace take a selection of several lines as the query, and highlight every line of a match.
+- The find and replace fields grow with the lines of their text, the buttons beside them staying put.
+- Heading crumbs show just the heading's name, without its `#` marks, and the heading you're in stands out.
+- A deep chain of headings in the breadcrumbs shows the outermost and innermost two, with `…` for the rest.
+- A heading crumb you move into opens in smoothly, and the crumbs after it slide along.
+- The breadcrumbs' heading outline tags each heading with its level, as `H2`, and marks the one you're in.
+- Type in the breadcrumbs' heading outline to filter it; `↑`/`↓` pick a match and `Enter` goes there.
+- The TODOs plugin finds tags with symbols or non-Latin letters, such as `[TODO]`, `@todo` or `待办`.
+- With **Layout → One File at a Time**, a diff shows the whole file; **Show Full Files** folds it.
+- `Cmd+S` keeps a preview tab open, even with no changes, so the next file you click opens beside it.
+- Right-click a tab and choose **Pin Tab** to keep it at the left of the tab bar, marked with a pin.
+- **Close Others** and **Close All** leave pinned tabs open; **Unpin Tab** in the same menu releases one.
+- SVG previews show the text in the picture, Chinese labels included, in its fonts, sizes and colors.
+- `.jsonl` and `.ndjson` files open as a table, a row per line and a column per key; `⇧⌘V` shows the source.
+- **View → Open JSON Lines As** chooses whether JSON Lines files open as their table or their source.
+- The table shows the chosen row whole below it, indented and colored; `Space` hides or shows it.
+- Type in **Filter rows**, or press `⌘F`, to keep only the rows that hold the text, across the whole file.
+- Click a column's header to sort by it: numbers by value, text as people read it, versions included.
+- Right-click a header to hide, show or sort a column, or expand an object or array into its own columns.
+- Lines that aren't JSON stay in the table in red; the status bar counts them and a click goes to the next.
+- `Enter` or a double-click on a row shows that line in the source; `⌘C` copies the cell or the whole line.
+- The JSON Lines table marks what **Filter rows** matched, in its cells and in the row's details.
+- A row's details name the field of the chosen column and mark it in the indented JSON.
+- The chosen row's line number stands out in the table, as the caret's line does in the editor.
+- The details' copy button turns to a check for a moment after it copies the line.
+- A JSON Lines row's details scroll to the field of the chosen column, and start at the top for each row.
+- `⌘C` in a JSON Lines table flashes the cell or row it copied, and copying a line checks the details' copy button.
+- Right-click a JSON Lines cell and choose **Filter to This Value** or **Hide Rows with This Value**.
+- Value filters show as chips beside **Filter rows**; click a chip's `×` to remove it, or press `Esc` to clear all.
+- When no row matches, the table offers **Clear Filters** to show every row again.
+- JSON Lines files with records over 64 KB open as their table again; their source names the long line.
+
+## 0.22.4
+
+- Clicking a link in Live Preview to a note already open in that column switches to its tab, not another column.
+- Double-click the empty tab bar, past the last tab, to open a new untitled file in that column.
+- The Markdown Reading view shows an HTML `<table>` as a table, with its cells' alignment and pictures.
+- HTML `<ul>`, `<ol>` and `<li>` show as lists in the Reading view, nested and numbered.
+- A `<details>` folds under its `<summary>` in the Reading view; click the summary to open it.
+- `<sup>` and `<sub>` show raised and lowered, `<u>` and `<ins>` underlined, `<small>` smaller.
+- `align="right"` aligns HTML text to the right in the Reading view.
+- A `<picture>` shows its dark-theme image in the dark theme, as a README's logo does on GitHub.
+- An HTML `<pre>` shows as a code block with its spaces kept; a `<blockquote>` shows as a quote.
+- The link icon in centered text, as a README's centered links, now stands right after its link.
+- Scrolling past a long wrapped line of Chinese or other non-ASCII text is smooth again.
+- In Live Preview, a file path in the text, like `~/notes/a.md` or `./a.md:12`, is a link that opens it.
+- On Windows, a path like `C:\notes\a.md` or `.\a.md` in Live Preview is a link too.
+- Markdown links to `~/` paths and whole paths, like `[a](~/a.md)`, open their file in Live Preview.
+- In a Markdown file, the breadcrumbs show the headings you're in after its name, as `# Title > ## Section`.
+- In the Reading view, the breadcrumbs name the heading at the top of what shows, and follow as you scroll.
+- Click a heading in the breadcrumbs for an outline of all the note's headings; click one to go to it.
+- A folder's box in the breadcrumbs now fits all its rows instead of cutting off the last one.
+
+## 0.22.3
+
+- Codex subagents no longer appear as duplicate entries in **Sessions**.
+- On Windows, **File → Remote SSH** opens a folder with the system `ssh`.
+- On Windows, **File → Open WSL Folder…** opens a folder in a WSL distribution.
+- On Windows, a Remote SSH or WSL file keeps a `/ssh:` or `/wsl:` path and opens in one tab.
+- On Windows, adding or removing a file at the root of a remote folder updates Explorer.
+- On Windows, a nested repository's changes tab stays with that repository after a restart.
+- On Windows, Source Control shows a remote file's folder with slashes.
+- A diff can show one file at a time: **Layout → One File at a Time**, or the `diffFiles` setting.
+- With one file at a time, clicking a file in Source Control or a commit's files shows that file.
+- With one file at a time, the next change or next file goes on to the next file, as `diffCrossFiles` says.
+- With one file at a time, the diff's tab is named after the file it shows.
+- Mayoi asks before installing plugins that settings sync brings from another machine.
+- Settings sync installs plugins only from `https://`, `ssh://` or `git@` URLs.
+- Hovering an inline blame cut off at the edge of the editor shows all of it in a tip.
+- **View → Toggle Preview** and the other preview commands show an unsaved new file as Markdown.
+- A preview command on a file that has no preview says so instead of doing nothing.
+
+## 0.22.2
+
+- Scrolling over a Mermaid diagram in Live Preview scrolls the text, and clicking it edits its source.
+- Windows Security is less likely to flag the Mayoi installer as a virus.
+- The Windows installer shows Mayoi's name, version and publisher in its file properties.
+- List numbers and bullets in issue and pull request comments line up with the first line of their item.
+- On macOS 14, the terminal now opens and shows its prompt instead of closing at once.
+- Opened from the Finder or the Dock, Mayoi pushes over SSH with your shell's ssh agent.
+- Git operations go through the proxy your shell sets in `HTTPS_PROXY`, `ALL_PROXY` and the like.
+- Git hooks find `node` and `pnpm` even when iTerm2's shell integration is installed.
+- A session open in a terminal shows a chip saying where: **In tab**, or the other window's project.
+- A pull request opens in one tab with **Conversation**, **Changes**, **Commits** and **Checks** pages.
+- Switch a pull request's pages with `⌥⌘1`–`⌥⌘4`; the tab remembers the page it showed.
+- A pull request's **Conversation** shows whether it can merge, its reviewers, reviews and comments.
+- **Review** approves a pull request, requests changes or comments, from its tab.
+- **Merge** squashes, rebases or makes a merge commit, and can delete the branch on GitHub.
+- A pull request's **⋯** menu marks it ready or a draft, closes or reopens it, and copies its branch.
+- Review threads show under their lines in a pull request's changes, to reply to, resolve or reopen.
+- Failed checks run again with **Rerun Failed Jobs** from a pull request's tab.
+- The status bar's pull request opens its changes; its checks icon opens the **Checks** page.
+
+## 0.22.1
+
+- Mayoi no longer stops responding about 20 seconds after it opens or after the Mac wakes from sleep.
+
+## 0.22.0
+
+- The Matrix and Claude themes use the same interface font as the other themes, not the code's font.
+- **View → Theme** adds GTA VI: the game's HUD in graphite, white and mission gold, always dark.
+- In GTA VI, wanted stars light up in the status bar as uncommitted files pile up, and flash while Git works.
+- On Windows, right-click a file, a folder or a folder's background in Explorer and choose **Open with Mayoi**.
+- The Windows installer adds **Open with Mayoi**; on Windows 11 it is under **Show more options**.
+- **File → Add 'Open with Mayoi' to Explorer** and **Remove…** add or remove it without reinstalling.
+- Files in GBK, Big5, Shift JIS or UTF-16, such as CSVs from Excel, open as text instead of as binary.
+- Such files save back in the encoding they were read in, and the status bar shows it, as `GB18030`.
+- Drag to select and copy the text of an issue or pull request's description and comments.
+- Select several items in the GitHub view with `⌘`-click, `Shift`-click or `Shift` with the arrow keys.
+- `⌘C` and **Copy Links** in the GitHub view copy the links of every selected issue and pull request.
+- Drag issues and pull requests from the GitHub view into a terminal to type their links.
+- Drop issues and pull requests from the GitHub view on an editor to open them in tabs.
+- `mayoi plugin search` says so when the index of plugins lists none yet, instead of printing nothing.
+- The help of `mayoi plugin` no longer shows an install example for a plugin that does not exist.
+
+- Closing a terminal while its agent is working or waiting for you now asks first, as `⌘W` does for changes.
+- The buttons on the selected row of the CI checks and stash lists respond to clicks again.
+- A GitHub view in the sidebar lists the open issues and pull requests of a GitHub repository, via `gh`.
+- The GitHub view puts reviews asked of you, your pull requests and your issues first, and counts reviews.
+- Type in the GitHub view to find an issue or pull request; `⌘C` copies the link of the one chosen.
+- `⌘C` copies the chosen item's link while you type in the GitHub view, and a list's link on "more on GitHub".
+- The GitHub view highlights the issue or pull request whose tab is shown, as you switch tabs.
+- Double-click an issue or pull request in the GitHub view to open it in a tab that stays, not a preview.
+- Without `gh`, signed out, or with several repositories as remotes, the GitHub view says what to do next.
+- Issues open in tabs with their labels, comments and pictures; comment, close or reopen them there.
+- **New Issue**, in the GitHub view or **Git → New Issue…**, writes and creates an issue in a tab.
+- **Work on Issue** makes a worktree for an issue and hands it to the agent you start in its terminal.
+- **Address Review Comments** shows a pull request's open review threads as notes to send to an agent.
+- Pull requests open in a tab right away and load inside it, with any error and **Try Again** shown there.
+- Clicking a pull request in the GitHub view opens a preview tab, as clicking an issue does.
+- A review note from GitHub has **Resolve on GitHub**, which resolves its thread there.
+- A pull request's tab has **Open Conversation** to read its description and comments.
+- In the GitHub view, labels that don't fit are left out whole instead of cut off, and an item's age always shows.
+- GitHub view rows mark pull requests approved or with changes requested in color, and leave out your own name.
+- The GitHub view's sections have room between them, and their headers darken under the pointer.
+- Rows of a section you open, or that a refresh brings, fade in instead of popping in the GitHub view.
+- While the GitHub view first loads, its placeholder has the list's shape, so nothing jumps when rows arrive.
+- Hover a GitHub view row for **Check Out** or **Work on Issue**, **Open on GitHub** and **Copy Link** buttons.
+- Rest the pointer on a GitHub view row for a card with its full title, all labels, assignees and branch.
+- The GitHub view's card shows a pull request's size, each check that passed, failed or runs, and its review.
+- When GitHub can't be read again or you're offline, the GitHub view says so at its foot without moving the list.
+- A GitHub view row under the pointer is no longer darker than other hovered rows in the sidebar.
+- In the GitHub view, the selected row's highlight glides to the next row within a section, as in Sessions.
+- A pull request's check icon in the GitHub view fades to its new state when a refresh shows checks finishing.
+- `Space` shows or hides the selected GitHub view row's card; **Show Details** in its menu does too.
+- `⌘Enter` checks out the selected pull request or works on the selected issue; `⌥Enter` opens it on GitHub.
+- With the GitHub view's list focused, the selected row shows its buttons, and their tooltips name their keys.
+- Commit cards in the Source Control history open toward the editor when the sidebar is on the right.
+- GitHub view rows show the author's picture, with their initials until it arrives.
+- The GitHub view's card shows pictures of the author and assignees.
+- A pull request's card lists each reviewer: approved, changes requested, commented or pending.
+- A pull request's title in the GitHub view no longer shifts when its checks first appear.
+- Arrow keys in the GitHub view skip notes such as "No issues" that have nothing to open.
+- Pull request rows in the GitHub view show up to three reviewers' pictures, with a count of the rest.
+- A pull request that asks for your review again says **Re-review** in its GitHub view row and card.
+- The GitHub view loads on repositories with many open pull requests instead of timing out.
+- When GitHub doesn't answer in time, the GitHub view keeps what it showed and tries again within a minute.
+- While checks run, a pull request's row and card show a turning ring, held still by Reduce Motion.
+- Issue and pull request tabs show pictures of the author, assignees and everyone who commented.
+- The GitHub view refreshes quietly on its own; only **Refresh** or **Retry** shows a progress line, and only if slow.
+- The GitHub view's Refresh button turns into a spinning ring until GitHub answers.
+- You can type in the GitHub view's search field while it first loads; its placeholder rows pulse meanwhile.
+- A GitHub view refresh that finds nothing new no longer redraws the list.
+- In the GitHub view, rows a refresh removes, such as a merged pull request, fade out instead of vanishing.
+- Folding or unfolding a GitHub view section slides its rows closed or open.
+- The GitHub view keeps the selected row on the same issue or pull request when a refresh adds or removes rows.
+- A GitHub search that finds nothing offers **Clear Search**.
+- **Try Again** in the GitHub view shows a spinning ring as soon as you click it, until GitHub answers.
+- Labels in an issue's tab use the same chips as the GitHub view, and a failed read offers **Try Again** on a card.
+- Draft pull requests in the GitHub view have a draft icon, a dimmer title and a grey **Draft** chip.
+- GitHub view rows show Approved, Changes Requested and Re-review as filled chips that stand apart from labels.
+- Press `Escape` in the GitHub view's search field to clear it.
+- Moving the selection to another GitHub view section fades it in instead of jumping, and it glides past rows that slide.
+- When the top GitHub view section goes away, the space above the next section closes smoothly instead of jumping.
+- In the GitHub view, the warning icon shakes when **Try Again** fails again, so you know it tried.
+- In a narrow sidebar, GitHub view rows hide reviewer pictures and comment counts before squeezing the author's name.
+- The Re-review, Approved and Draft chips in GitHub view rows stay whole in a narrow sidebar.
+- Buttons on the GitHub view's cards press in when clicked, like the rest of the sidebar's buttons.
+- GitHub view section headers now use the same type size as the day headers in Sessions.
+- Mayoi sends an anonymous count once a day and on each update, with only its version and system.
+- Turn the count off with `usageStats` in **Settings → General**, or by setting `DO_NOT_TRACK=1`.
+
+## 0.21.2
+
+- The scroll bar no longer jumps while you scroll notes with wrapped lines, in Live Preview and in the editor.
+
+## 0.21.1
+
+- `[[` suggestions list notes changed most recently first, after the ones you opened recently.
+- Pushed commits in the Source Control history show a ✓, ✗ or clock for how their GitHub CI checks went.
+- Clicking a commit's CI icon, or **Show Checks…** in its menu, lists its checks with logs and re-run.
+- A commit's tab shows how many of its checks passed, failed or are running.
+- The status bar shows HEAD's CI checks when the branch has no pull request.
+- When CI on HEAD finishes, Mayoi tells you, with a system notification if it is in the background.
+- Windows directory junctions show as folders in the file tree, and copy with what they hold.
+- Commits made with an AI agent, like Claude, show the agent's mark on the author's avatar in the history.
+- `⌘C` in the sessions list copies the chosen sessions' transcript files, like dragging them.
+- Hovering a commit in the history shows a card with its author, co-authors, files changed and branch.
+- A commit's tab names its co-authors beside the author, in place of the `Co-authored-by` lines.
+- Clicking a session of another project in **All Projects** chooses it in that project's Sessions view.
+
+## 0.21.0
+
+- Typing `[[` in a note suggests the vault's notes and files as you type, as in Obsidian.
+- In `[[` suggestions, `↑`/`↓` choose, `Enter` or `Tab` links, `Shift-Enter` links as typed, `Esc` closes.
+- After `#` the suggestions are the note's headings, and after `^` its blocks, giving a block an id.
+- `[[#` and `[[^` suggest the headings and blocks of the note itself.
+- Chosen links follow the vault's `newLinkFormat`, the shortest path by default, without `.md`.
+- `Ctrl+Space` inside a `[[link]]` shows its suggestions again.
+- `[[links]]` also find notes in hidden folders like `.claude`, but not `.obsidian` or `.trash`.
+- `[[links]]` find notes anywhere in an Obsidian vault, even in a folder with its own git repository.
+- `[[links]]` in notes on a remote (SSH) folder find notes anywhere in the workspace, not only beside the note.
+- `[[links]]` match notes whatever their case, and pick up notes made or deleted outside the editor.
+- Live Preview stays smooth in notes with many `[[links]]` and in large vaults.
+- In Live Preview, clicking a link opens it, as in Obsidian; move the caret into a link to edit it.
+- Clicking a `[[link]]` to a note that doesn't exist yet creates the note beside the current one and opens it.
+- `[[note#^block]]` links open the note at the marked block.
+- `[[note#Heading#Subheading]]` links open the note at the heading under the other heading.
+- A key binding passes its `args` to commands that take one, as `file.openFolder` with `"~/Projects/notes"`.
+- **Sessions** lists Pi's sessions too, by name or first prompt, and resumes one in a terminal tab.
+- The sidebar's width and whether it's shown now stay the same as you switch projects and windows.
+- **Sessions** keeps **All Projects** chosen as you switch projects.
+- With **All Projects** chosen, **Sessions** stays open in the sidebar as you switch projects.
+- Projects on a remote (SSH) folder no longer show **Sessions**, which listed this Mac's sessions.
+- **Sessions** marks a session that's open in a terminal in any project with a terminal icon.
+- Clicking such a session switches to its project and shows that terminal.
+- Opening local files keeps the window responsive while their tabs show loading progress.
+- A file on a network share that stops answering no longer keeps other files from opening.
+- Files that fail to open keep their tabs, error details and a **Try Again** action.
+- Quick Open stays responsive while checking file paths, including unavailable network shares.
+- Filtering Quick Open, symbols or commands keeps the selected result in view.
+- A folder holding many Git repositories no longer makes the window sluggish.
+- Typing a bracket or quote that closes itself no longer scrolls or shakes the editor.
+- In Markdown, `Enter` continues a list, task list or quote, and on an empty item ends it.
+- In Markdown, `⌘Enter` switches a line between a list item, an empty task and a checked task.
+- In Markdown, `⌘⇧↑` and `⌘⇧↓` move a list item and its sub-items past the item above or below.
+- **Settings ▸ Shortcuts** lists `⌘Enter` for **Toggle Task**, not **Insert Line Below**.
+- In Markdown, `⇧⌘Enter` opens a new item of the list or quote above.
+- In Markdown, `Tab` and `⇧Tab` indent or outdent a whole list item wherever the caret is.
+- **Edit ▸ Markdown** toggles tasks, lists, quotes, headings and embeds, and clears a line's formatting.
+- `⌥⌘1` to `⌥⌘6` toggle a Markdown heading of that level on macOS.
+- **Selection ▸ Join Lines** joins the selected lines, or the caret's line with the next, into one.
+- **Sessions** shows what Qoder and Codex sessions do, as it does for Claude Code sessions.
+- **Sessions** shows what sessions running in Mayoi's own terminals do, without `terminalBackend` set to `"hc"`.
+- New Live Preview edits Markdown as it reads: headings, emphasis, links and code styled, their marks hidden.
+- In Live Preview, the marks of what the caret touches show, faint, fading in as the caret reaches their line.
+- Live Preview draws bullets, task boxes, quotes, alerts, pictures and math in place, as the Reading view does.
+- Live Preview renders tables, Mermaid diagrams and display math, and shows their source when the caret goes in.
+- In Live Preview, text below a table, diagram or formula glides as its source shows or hides.
+- Bullets, task boxes and list indents in Live Preview keep their width as the caret reaches them.
+- Nested lists and lines that continue a list item stand under the item's text in Live Preview.
+- Quotes in Live Preview have one unbroken bar, and the largest headings a hairline below, as in Reading.
+- A click on a task's box in Live Preview checks it, filling the box and striking its text through.
+- A click on a task's box in the Reading view checks it in the file.
+- A picture from the web in Live Preview shows a card in its place while it loads, then fades in.
+- Symbols such as `⌘` and wide characters keep a table's columns lined up in its Live Preview source.
+- Headings in Live Preview have room above them, and their lines stay put as the caret reaches them.
+- Footnote definitions like `[^1]: text` show as their number in Live Preview until the caret reaches them.
+- Links to web pages in Reading view end with the same external-link icon as in Live Preview.
+- Embedded notes like `![[note]]` now show in place inside list items and quotes, in both views.
+- Holding `⌘` over a link in Live Preview shows a pointing hand at once, and letting go hides it.
+- Buttons at the right of a Markdown tab's path switch it between source, Live Preview and the Reading view.
+- Switching between source, Live Preview and the Reading view fades the new view in.
+- **View → Toggle Live Preview** (`⌥⌘V`) switches a Markdown tab between Live Preview and its source.
+- **View → Open Markdown As** chooses source, Live Preview or the Reading view for files you open.
+- Live Preview stays smooth as you type and scroll in long notes full of tables, math and diagrams.
+- Live Preview shows `#tags` as colored pills, as in Obsidian.
+- Live Preview raises footnote references like `[^1]` as small superscript numbers, as Reading view does.
+- Live Preview hides the backslash of escaped characters like `\*` until the caret reaches them.
+- Links in Live Preview are underlined, and wikilinks to notes that don't exist yet look faded.
+- In Live Preview, a link's underline fills in under the pointer; `⌘`-click it to open it.
+- Callouts like `> [!tip] My title` show their own title, and Obsidian's callout types are recognized.
+- Callouts are tinted in their color in both Live Preview and Reading view.
+- Each Obsidian callout type, like `[!bug]` or `[!example]`, has its own color and icon.
+- Callouts marked `[!faq]-` start folded and `[!faq]+` start open; click the chevron to fold or open them.
+- Embedded notes like `![[note]]` or `![[note#Heading]]` show their content in place, in both views.
+- Click the name above an embedded note to open it.
+- `%%comments%%` look faint in Live Preview and are hidden in Reading view.
+- Links to web pages in Live Preview end with a small external-link icon.
+- Reading view shows `#tags` as pills, as Live Preview does.
+- Links in Reading view are faintly underlined, and wikilinks to missing notes look faded, as in Live Preview.
+- A folded callout stays folded when you edit its title.
+- Block embeds like `![[note#^id]]` show that paragraph, list item or block in place.
+- Block ids like `^id` look faint in Live Preview and are hidden in Reading view.
+
+## 0.20.1
+
+- In **Sessions**, `⌘`-click, `Shift`-click, `Shift`+arrows and `⌘A` select several sessions.
+- **Copy Session ID** on one of several selected sessions copies all their IDs, one per line.
+- Drag one of several selected sessions to open all their transcripts, or type their paths in a terminal.
+- A tab dragged onto another project's square stays under the pointer as that project shows, to drop in a column.
+- **View → Attach to Terminal in herdr-core…** shows one of its terminals in a terminal here, attached.
+- Closing such a terminal, or `Ctrl+\`, detaches it, and the shell in herdr-core runs on.
+- `mayoi run view.attachHC=<address>` shows a terminal of herdr-core by its address, for plugins too.
+- On macOS, VoiceOver no longer crashes Mayoi on text that starts with a byte order mark.
+- Clicking a Git diff's toolbar buttons while its changes refresh no longer crashes Mayoi.
+- On a Mac with Apple silicon, the Intel build of Mayoi updates to the Apple silicon build.
+- The Intel build on Apple silicon says at launch that it runs slower and can crash, with a **Download** button.
+
+- Right-click a session in **Sessions** to copy its transcript file, open it in the editor, or reveal it.
+- Drag a session from **Sessions** to the editor to open its transcript, or to a terminal to type its path.
+- A resumed session's tab keeps the session's title in a shell other than your default one.
+- On Linux and Windows, `Page Up` in the **Sessions** list goes back up to the first session.
+- Opening a file in Mayoi while it is still starting no longer crashes; the file opens once it's ready.
+- On Linux, letters no longer crowd together or leave gaps in fonts with kerning, such as Microsoft YaHei UI.
+- **Settings → Editor → Tab Size** sets how many columns a tab takes, 4 by default.
+- Tabs now take the same width on every system, where Linux showed them 8 columns wide.
+
+## 0.20.0
+
+- Plugins can add coding agents with `contributes.agents`, whose sessions show in **Sessions** with their own icon.
+- A plugin agent's sessions come from files a glob matches, or from a function registered with `agents.register`.
+- A plugin agent's session resumes in an editor tab with its `resume` command, as the built-in agents' do.
+- A slow or failing plugin agent never holds up **Sessions**, and its error shows in **Plugins → Show Plugin Log**.
+- Turning a plugin off fades its agent's sessions out of **Sessions**.
+- A resumed session's tab is titled after the session until the agent names it.
+- Terminal tabs kept in herdr-core keep their agent's icon across a restart.
+- Resuming a session in **Sessions** opens it in a tab of the editor column you were in, ready to type.
+- A session already open in a terminal shows that tab again instead of starting another.
+- Each **Sessions** row shows an icon for its agent: Claude Code, Codex, Qoder or Grok.
+- A terminal tab running a coding agent shows that agent's icon.
+- In **Sessions**, `Page Up` and `Page Down` move the chosen session by a page, from the search field or the list.
+- `Home` and `End` in the **Sessions** search field choose the first or last session (`Ctrl` on Windows and Linux).
+- The chosen session glides to its new row and keeps the next row in view as the keys move it.
+- The chosen session is ringed while the **Sessions** list has the keyboard, and dims when the keyboard is elsewhere.
+- A session that drops out of **Sessions** fades out faster, and one that comes back mid-fade picks up where it was.
+- Clicking a repository's name or row background in source control expands or collapses its changes.
+- **Settings > Shortcuts** lists **Report a Problem** under Help instead of Account.
+- A `mayoi://file` link opens its file at the line and column it names.
+- On Linux, Mayoi is offered for text, Markdown, JSON and other text files, and `xdg-mime default` takes it.
+- On Linux, opening a file in Mayoi from the file manager opens that file.
+- On Windows, **Open with** lists Mayoi for text, Markdown, JSON and other text files.
+- LocatorJS's **Custom link** reaches Mayoi with `mayoi://file/${projectPath}${filePath}:${line}:${column}`.
+- A `mayoi://` link to a missing file says Mayoi could not open it, in the window in front.
+- Math with `\tag{…}` now renders in the Markdown preview, its label beside the equation.
+- After a full-screen program is killed, scrolling or typing in the terminal no longer prints escape codes.
+- The sidebar's new **Sessions** view lists Claude Code, Qoder, Codex and Grok sessions, the latest first.
+- Sessions show for **This Project** or **All Projects**, and the search field narrows them by title, folder or agent.
+- Enter or a double click resumes a session in a new terminal in its folder.
+- **Sessions** groups sessions under Today, Yesterday, Previous 7 Days and Older, each with its count.
+- Each session row shows its title on one line, with its agent, folder and last use under it.
+- While **Sessions** reads for the first time, it shows placeholder rows, which the sessions then replace.
+- Claude Code sessions of every `~/.claude-*` folder show too; `agentSessionsClaudeDirs` adds more folders.
+- With `terminalBackend` set to `"hc"`, a running session's dot and words say whether it works or waits for you.
+- Resuming a session that runs in an hc terminal shows that terminal instead of starting another.
+- In **Sessions**, `↑` and `↓` in the search field move the chosen session without leaving the field.
+- The chosen session stays chosen when sessions are read again, and sessions that appear fade in.
+- Hovering a session shows buttons to resume it or copy its resume command.
+- In **Sessions**, the search words are marked in each session's title, agent and folder.
+- With the keyboard in the sessions list, the chosen session shows its resume and copy buttons.
+- `⌘C` in the sessions list copies the chosen session's resume command.
+- The **This Project** / **All Projects** switch in **Sessions** no longer clips in Japanese.
+- When a search matches a session's first prompt, folder or id, its row shows that text under the title.
+- With `terminalBackend` set to `"hc"`, a working session's dot breathes, and one that starts waiting pulses.
+- **Sessions** rows sit slightly apart, and a hovered row's background fades in and out with its buttons.
+- Sessions that appear as **Sessions** is read again open their place, and the rows under them slide down.
+- Sessions that disappear on a re-read close their place as they fade, and the rows under them slide up.
+- Typing in the **Sessions** search field stays quick with thousands of sessions.
+- When a session starts or stops running, its state slides in or out and the agent beside it glides over.
+
+## 0.19.3
+
 - Language server plugins can run a `resolve` command that sets the server's arguments, environment and settings.
 - Language server plugins can map paths so definitions and diagnostics keep the workspace's symlinked paths.
 - Mayoi no longer waits on a language server that has already stopped.
+- The command palette, Quick Open and pickers show at once when a key opens them, and fade in on a click.
+- Animations share a few lengths, so what moves alike now moves alike.
+- Choosing a tab no longer makes its title bolder and shifts the tabs after it.
+- The caret's line and column in the status bar, and find's match count, no longer jiggle as digits change.
+- Remote SSH and Mermaid commands show their menu in the command palette instead of a bare `:`.
+- A terminal whose shell exits as it starts stays open with what it printed, and offers **Report…**.
+- **Help → Report a Problem…** opens a new GitHub issue with Mayoi's version and your system filled in.
+- Inline blame, commit tips and settings sync show a date for anything older than a week.
+- The merge view's count of resolved files reads "1 of 1 file resolved" in English.
 - Inline blame now shows with **View → Word Wrap** on, after the caret line's last row.
 - When a wrapped line's last row is too full, its inline blame is cut short with `…`.
 - Dragging over code in a diff selects text across lines; dragging on the line numbers still selects rows.

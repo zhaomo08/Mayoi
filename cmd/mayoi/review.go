@@ -45,6 +45,9 @@ type reviewNote struct {
 	// version is the version of the open document the note was last
 	// found in, unfound for none yet.
 	version uint64
+	// thread is the GitHub review thread the note came from, which it
+	// can resolve there, "" for one written here.
+	thread string
 }
 
 // unfound is the version of a note not yet found in an open document.
@@ -62,8 +65,10 @@ type review struct {
 	// gen counts the changes to the notes, which the diffs lay out their
 	// rows again for.
 	gen int
-	// typed is the frame the draft's box last had the keyboard in.
-	typed int
+	// typed is the frame the draft's box last had the keyboard in, and
+	// replyTyped the box answering a pull request's review thread.
+	typed      int
+	replyTyped int
 	// ctx measures text as the window lays it out, and measured is the
 	// heights of the comments measured.
 	ctx      *ui.Context
@@ -515,7 +520,7 @@ func editorExcerpt(d *editor) *reviewNote {
 // from the folder, or whole for one out of it.
 func (a *app) relPath(path string) string {
 	if a.tree != nil {
-		if rel := a.tree.Rel(path); rel != ".." && !strings.HasPrefix(rel, "../") && !filepath.IsAbs(rel) {
+		if rel := a.tree.Rel(path); rel != ".." && !strings.HasPrefix(rel, "../") && !remote.IsAbs(rel) {
 			return rel
 		}
 	}
@@ -851,7 +856,7 @@ func (a *app) keptReview() []settings.ReviewNote {
 		out = append(out, settings.ReviewNote{
 			Context: n.context,
 			Path:    n.path, Commit: n.commit, Staged: n.staged, OldSide: n.oldSide, From: n.from, To: n.to,
-			Diff: n.diff, Snippet: n.snippet, Lines: n.lines, Text: n.text,
+			Diff: n.diff, Snippet: n.snippet, Lines: n.lines, Text: n.text, Thread: n.thread,
 		})
 	}
 	return out
@@ -876,7 +881,7 @@ func (a *app) restoreReview(kept []settings.ReviewNote) {
 		r.notes = append(r.notes, &reviewNote{
 			context: k.Context,
 			path:    k.Path, commit: k.Commit, staged: k.Staged, oldSide: k.OldSide, from: k.From, to: k.To,
-			diff: k.Diff, snippet: k.Snippet, lines: k.Lines, text: k.Text, version: unfound,
+			diff: k.Diff, snippet: k.Snippet, lines: k.Lines, text: k.Text, version: unfound, thread: k.Thread,
 		})
 	}
 }
@@ -1148,6 +1153,9 @@ func (a *app) noteCard(c *ui.Context, n *reviewNote, ed *editor, w float32) {
 		if editing {
 			return
 		}
+		if n.thread != "" && a.smallButton(c, iconCircleCheck, locales.GhResolveThread()) {
+			a.post(func() { a.resolveThread(n) })
+		}
 		if a.smallButton(c, iconPencil, locales.ReviewEditComment()) {
 			a.post(func() { a.editNote(n, ed) })
 		}
@@ -1250,7 +1258,8 @@ func (a *app) noteQuote(c *ui.Context, n *reviewNote, lines []string, w float32)
 // typingNote reports whether the box of the note being written has the
 // keyboard, whose keys a diff leaves to it.
 func (a *app) typingNote() bool {
-	return a.review.draft != nil && a.review.typed >= a.frame-1
+	r := &a.review
+	return r.draft != nil && r.typed >= a.frame-1 || r.replyTyped > 0 && r.replyTyped >= a.frame-1
 }
 
 // noteCardBox is the card of a note, at (x, y) w wide and h tall: raised

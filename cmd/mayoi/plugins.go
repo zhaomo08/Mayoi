@@ -80,10 +80,13 @@ type pluginHost struct {
 	// syncing has the plugins follow settings sync, as the app does but
 	// the tests don't; syncRun runs one sync at a time, and again when one
 	// was asked for meanwhile, and records are plugins.json as the last
-	// agreed it.
+	// agreed it. trusted are the plugins from elsewhere the person agreed
+	// to install, and asking those the question shown asks about.
 	syncing bool
 	syncRun bg.Refresher[struct{}]
 	records plugin.Records
+	trusted plugin.Records
+	asking  plugin.Records
 	// updates are the newer commits found of the plugins from Git.
 	updates map[string]string
 
@@ -92,6 +95,10 @@ type pluginHost struct {
 	slots       []pluginSlot
 	slotsKey    slotsKey
 	slotsListed bool
+
+	// agentsSig is what the agents of the plugins on were as they were
+	// last given to the Sessions view; main thread only.
+	agentsSig string
 
 	// edIDs number the editors plugins were told of; main thread only.
 	edIDs  map[*editor]int
@@ -175,7 +182,7 @@ func (m *mayoi) startPlugins(safe bool) {
 	h.reg.Locale = i18n.Locale
 	h.reg.SetSafe(safe)
 	plugins = h
-	highlight.LexerName = pluginLexer
+	highlight.LexerOverride = pluginLexer
 	h.syncPrefs()
 	h.reg.Load()
 	if stop, err := h.reg.Watch(); err == nil {
@@ -240,13 +247,22 @@ func (h *pluginHost) toggled(old, now map[string]json.RawMessage) {
 		started = started || is
 	}
 	if len(names) > 0 {
+		for _, a := range h.apps() {
+			for _, d := range a.docs {
+				a.refreshDocumentLexer(d)
+			}
+		}
 		forgetFailedServers(names...)
+		h.syncAgents()
 	}
-	if !started {
-		return
+	if started {
+		h.startForOpen()
 	}
-	// The plugins turned on start for the folders and files open, as
-	// those opening would start them.
+}
+
+// startForOpen starts the plugins and language servers for the folders
+// and files open, as those opening would start them, on the main thread.
+func (h *pluginHost) startForOpen() {
 	for _, a := range h.apps() {
 		a.pluginSeen.indexed = false
 		for _, d := range a.docs {
@@ -313,6 +329,16 @@ func (h *pluginHost) Settings(name string) json.RawMessage {
 	return p.Plugins[name]
 }
 
+// languageServer is the settings of the language server of id in
+// settings.json's languageServers, nil for none.
+func (h *pluginHost) languageServer(id string) json.RawMessage {
+	p := h.prefsSnap.Load()
+	if p == nil {
+		return nil
+	}
+	return p.LanguageServers[id]
+}
+
 // MayoiSetting implements plugin.Host: a preference by its key in
 // settings.json.
 func (h *pluginHost) MayoiSetting(key string) any {
@@ -344,9 +370,14 @@ func (h *pluginHost) Changed() {
 	h.mu.Unlock()
 	h.onMain(func() {
 		for _, a := range h.apps() {
+			for _, d := range a.docs {
+				d.currentLenses()
+				a.refreshDocumentLexer(d)
+			}
 			a.palette, a.hints = nil, nil
 			a.invalidate()
 		}
+		h.syncAgents()
 		h.menu()
 		h.redrawPrefs()
 	})
@@ -457,6 +488,7 @@ func (a *app) pluginCommands(t locales.Messages, own []command) []command {
 		command{"plugins.reload", t.CmdPluginsReload(), "", func() { plugins.reloadAll() }},
 		command{"plugins.log", t.CmdPluginsLog(), "", a.showPluginLog},
 		command{"plugins.running", t.CmdPluginsRunning(), "", a.showRunningPlugins},
+		command{"plugins.languageServers", t.CmdLanguageServers(), "", a.showLanguageServers},
 		command{"plugins.openFolder", t.CmdPluginsOpenFolder(), "", a.openPluginsFolder},
 		command{"plugins.openScripts", t.CmdPluginsOpenScripts(), "", a.openScriptsFolder},
 		command{"plugins.runSelection", t.CmdPluginsRunSelection(), "", a.runSelectionScript},
@@ -528,12 +560,20 @@ func (a *app) skippedKeys() []plugin.KeyContrib {
 
 // runCommand runs a command of a plugin, telling of what goes wrong.
 func (h *pluginHost) runCommand(a *app, id, arg string) {
+	var doc *document
+	if ed := a.activeEditor(); ed != nil {
+		doc = ed.document
+	}
+	h.runCommandContext(a, id, arg, a.pluginContext("command", doc))
+}
+
+func (h *pluginHost) runCommandContext(a *app, id, arg string, origin *plugin.CommandContext) {
 	go func() {
 		var argv any
 		if arg != "" {
 			argv = arg
 		}
-		if _, err := h.reg.Run(id, argv); err != nil && !errors.Is(err, plugin.ErrNoCommand) {
+		if _, err := h.reg.RunWithContext(id, argv, origin); err != nil && !errors.Is(err, plugin.ErrNoCommand) {
 			a.post(func() { a.fail("%s", locales.PluginCommandFailed(id, firstLine(err.Error()))) })
 		}
 	}()
@@ -578,7 +618,7 @@ func (a *app) pluginMenu(item func(id string) *mygo.MenuItem) *mygo.MenuItem {
 	if len(items) > 0 {
 		items = append(items, mygo.Separator())
 	}
-	items = append(items, item("plugins.manage"), item("plugins.reload"), item("plugins.log"), item("plugins.running"), item("plugins.problems"), mygo.Separator(),
+	items = append(items, item("plugins.manage"), item("plugins.reload"), item("plugins.log"), item("plugins.running"), item("plugins.languageServers"), item("plugins.problems"), mygo.Separator(),
 		item("plugins.openFolder"), item("plugins.openScripts"), item("plugins.runSelection"))
 	return &mygo.MenuItem{Label: locales.MenuPlugins(), Submenu: items}
 }
@@ -586,7 +626,7 @@ func (a *app) pluginMenu(item func(id string) *mygo.MenuItem) *mygo.MenuItem {
 // pluginMenuItems puts the commands plugins add to a context menu, as
 // "explorer/context", in m, then a separator: each runs with arg, the
 // path the menu is of.
-func (a *app) pluginMenuItems(m *ui.Menu, where, arg string) {
+func (a *app) pluginMenuItems(m *ui.Menu, where, arg string, origins ...*plugin.CommandContext) {
 	if plugins == nil {
 		return
 	}
@@ -600,7 +640,11 @@ func (a *app) pluginMenuItems(m *ui.Menu, where, arg string) {
 			if label, ok := labels[mc.Command]; ok {
 				if m.Item(label).Chosen() {
 					id := mc.Command
-					a.post(func() { plugins.runCommand(a, id, arg) })
+					origin := a.pluginContext(where, nil)
+					if len(origins) > 0 {
+						origin = origins[0]
+					}
+					a.post(func() { plugins.runCommandContext(a, id, arg, origin) })
 				}
 				added = true
 			}
@@ -721,23 +765,13 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// openGenerated opens text in an untitled tab, as a report.
-func (a *app) openGenerated(title, text string) {
-	a.untitled++
-	col := a.fileColumn()
-	a.addUntitled(col, a.untitled, text)
-	t := col.tabs[len(col.tabs)-1]
-	if t.ed != nil {
-		t.ed.title = title
-		t.ed.saved = t.ed.buf.Version()
-	}
-	a.activate(col, len(col.tabs)-1, true)
-}
-
 // languageOf is the language plugins know a document by: the lexer's
 // name in lower case, as "go" or "typescript", or a language a plugin
 // declares for its file.
 func languageOf(d *document) string {
+	if d.language != "" {
+		return d.language
+	}
 	if id := pluginLanguage(d.path); id != "" {
 		return id
 	}

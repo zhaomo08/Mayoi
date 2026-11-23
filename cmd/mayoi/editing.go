@@ -28,7 +28,7 @@ func (s indentStyle) unit() string {
 // cols is how many columns one level takes.
 func (s indentStyle) cols() int {
 	if s.tabs {
-		return tabWidth
+		return tabWidth()
 	}
 	return s.size
 }
@@ -67,7 +67,7 @@ func detectIndent(snap ui.TextSnapshot, path string) indentStyle {
 		prev = n
 	}
 	if tabs > spaces && tabs > 0 {
-		return indentStyle{tabs: true, size: tabWidth}
+		return indentStyle{tabs: true, size: tabWidth()}
 	}
 	if spaces > 0 {
 		best := 0
@@ -82,12 +82,12 @@ func detectIndent(snap ui.TextSnapshot, path string) indentStyle {
 	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".go", ".mod":
-		return indentStyle{tabs: true, size: tabWidth}
+		return indentStyle{tabs: true, size: tabWidth()}
 	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json", ".yaml", ".yml", ".html", ".css", ".scss", ".vue", ".svelte", ".rb", ".lua", ".dart", ".nix":
 		return indentStyle{size: 2}
 	}
 	if strings.EqualFold(filepath.Base(path), "makefile") {
-		return indentStyle{tabs: true, size: tabWidth}
+		return indentStyle{tabs: true, size: tabWidth()}
 	}
 	return indentStyle{size: 4}
 }
@@ -95,15 +95,15 @@ func detectIndent(snap ui.TextSnapshot, path string) indentStyle {
 // lineComments are the line comments of languages, by Chroma's name.
 var lineComments = map[string]string{
 	"Go": "//", "C": "//", "C++": "//", "C#": "//", "Java": "//", "JavaScript": "//", "TypeScript": "//",
-	"TSX": "//", "JSX": "//", "Rust": "//", "Swift": "//", "Kotlin": "//", "Scala": "//", "Dart": "//",
+	"TSX": "//", "react": "//", "Rust": "//", "Swift": "//", "Kotlin": "//", "Scala": "//", "Dart": "//",
 	"Zig": "//", "Objective-C": "//", "PHP": "//", "Groovy": "//", "Protocol Buffer": "//", "GLSL": "//",
 	"JSON5": "//", "SCSS": "//", "Sass": "//", "Less": "//", "Odin": "//", "V": "//", "Gleam": "//",
 	"Python": "#", "Python 2": "#", "Bash": "#", "Zsh": "#", "Fish": "#", "Ruby": "#", "Perl": "#",
 	"YAML": "#", "TOML": "#", "Makefile": "#", "Docker": "#", "R": "#", "Elixir": "#", "Nix": "#",
 	"PowerShell": "#", "CMake": "#", "Nim": "#", "Julia": "#", "Crystal": "#", "INI": ";", "Terraform": "#",
-	"HCL": "#", "GDScript": "#", "Starlark": "#",
+	"HCL": "#", "GDScript": "#", "GDScript3": "#", "Starlark": "#",
 	"SQL": "--", "PostgreSQL SQL dialect": "--", "MySQL": "--", "Lua": "--", "Haskell": "--", "Elm": "--",
-	"Common Lisp": ";", "Clojure": ";", "Scheme": ";", "Racket": ";", "Emacs Lisp": ";", "Fennel": ";",
+	"Common Lisp": ";", "Clojure": ";", "Scheme": ";", "Racket": ";", "EmacsLisp": ";", "Fennel": ";",
 	"VimL": `"`, "Erlang": "%", "TeX": "%", "MATLAB": "%", "Fortran": "!",
 }
 
@@ -208,22 +208,31 @@ func outdentWidth(line string, style indentStyle) int {
 }
 
 // tab indents: the lines of a selection over several, or else the caret
-// to the next stop.
+// to the next stop. In Markdown, items of a list indent whole.
 func tab(d *editor, outdent bool) {
+	if mdIndent(d, outdent) {
+		return
+	}
 	snap := d.buf.Snapshot()
 	a, b := min(d.sel[0], d.sel[1]), max(d.sel[0], d.sel[1])
 	if outdent || snap.LineAt(min(a, snap.Len())) != snap.LineAt(min(b, snap.Len())) {
 		indentLines(d, outdent)
 		return
 	}
-	text := "\t"
-	if !d.indent.tabs {
-		s, _ := snap.LineRange(snap.LineAt(a))
-		col := columns(snap.Slice(s, a))
-		text = strings.Repeat(" ", d.indent.size-col%d.indent.size)
-	}
+	text := tabAt(d, snap, a)
 	at := a + utf8.RuneCountInString(text)
 	d.edit([2]int{at, at}, textEdit{a, b, text})
+}
+
+// tabAt returns what Tab types at offset a: a tab, or the spaces to the
+// next stop.
+func tabAt(d *editor, snap ui.TextSnapshot, a int) string {
+	if d.indent.tabs {
+		return "\t"
+	}
+	s, _ := snap.LineRange(snap.LineAt(a))
+	col := columns(snap.Slice(s, a))
+	return strings.Repeat(" ", d.indent.size-col%d.indent.size)
 }
 
 // pairs are the brackets an indented block goes between.
@@ -232,10 +241,19 @@ var pairs = map[byte]byte{'{': '}', '[': ']', '(': ')'}
 // newline breaks the line at the caret, indenting the new line as the
 // one it leaves, and a level more after an opening bracket or a colon
 // that starts a block. Between brackets, the closing one goes to a line
-// of its own.
+// of its own. In Markdown, an item of a list or a quote goes on.
 func newline(d *editor) {
+	if mdNewline(d) {
+		return
+	}
 	snap := d.buf.Snapshot()
-	a, b := min(d.sel[0], d.sel[1]), max(d.sel[0], d.sel[1])
+	start, end, text, caret := newlineAt(d, snap, min(d.sel[0], d.sel[1]), max(d.sel[0], d.sel[1]))
+	d.edit([2]int{caret, caret}, textEdit{start, end, text})
+}
+
+// newlineAt returns what breaking the line at runes a up to b replaces,
+// with what, and where the caret goes.
+func newlineAt(d *editor, snap ui.TextSnapshot, a, b int) (start, end int, text string, caret int) {
 	line := snap.LineAt(a)
 	s, e := snap.LineRange(line)
 	before := snap.Slice(s, a)
@@ -246,8 +264,8 @@ func newline(d *editor) {
 		indent = before
 	}
 	trimmed := strings.TrimRight(before, " \t")
-	text := "\n" + indent
-	caret := a + utf8.RuneCountInString(text)
+	text = "\n" + indent
+	caret = a + utf8.RuneCountInString(text)
 	if trimmed != "" {
 		last := trimmed[len(trimmed)-1]
 		closer, opens := pairs[last]
@@ -265,8 +283,7 @@ func newline(d *editor) {
 	if trimmed == "" {
 		trim = 0
 	}
-	start := a - trim
-	d.edit([2]int{caret - trim, caret - trim}, textEdit{start, b, text})
+	return a - trim, b, text, caret - trim
 }
 
 // opensColonBlock reports whether a colon at the end of a line starts a
@@ -414,6 +431,10 @@ func (a *app) cut(d *editor) {
 	if d.locked() || a.prefs().Vim && d.vim.mode != vimInsert {
 		return
 	}
+	if len(d.cursors) > 0 {
+		a.cutSpans(d)
+		return
+	}
 	snap := d.buf.Snapshot()
 	if snap.Len() == 0 {
 		return
@@ -433,12 +454,17 @@ func (a *app) cut(d *editor) {
 // selectAll selects the whole text, leaving the view where it is, as in
 // VS Code.
 func selectAll(d *editor) {
+	d.collapse()
 	d.selectRange(0, d.buf.Snapshot().Len(), false)
 	d.quiet = true
 }
 
-// insertLine opens a line below the caret's, or above, with its indent.
+// insertLine opens a line below the caret's, or above, with its indent,
+// and in Markdown as an item of its list or quote.
 func insertLine(d *editor, above bool) {
+	if mdInsertLine(d, above) {
+		return
+	}
 	snap := d.buf.Snapshot()
 	caret := min(d.sel[1], snap.Len())
 	line := snap.LineAt(caret)
@@ -517,6 +543,18 @@ func (a *app) editorKey(d *editor, ev ui.InputEvent) bool {
 	if a.swipeSideways(&d.hscroll, ev) {
 		return true
 	}
+	// A press with Alt adds a caret, with Shift and Alt or the middle
+	// button selects a column; a plain one goes back to one selection.
+	if a.multiPointer(d, ev) {
+		return true
+	}
+	// Copy of the Edit menu with nothing selected at the primary copies
+	// all the selections, as ⌘C does.
+	if ev.Kind == ui.InputCommand && ev.Text == "copy" && len(d.cursors) > 0 {
+		d.cmds = append(d.cmds, a.copySpans)
+		a.invalidate()
+		return true
+	}
 	if ev.Kind == ui.InputPointerDown && ev.Button == 0 && len(d.sticky) > 0 && a.font.lineH > 0 {
 		// A click on a line stuck at the top goes to it.
 		if k := int(ev.Y / a.font.lineH); ev.Y >= 0 && k < len(d.sticky) {
@@ -525,16 +563,76 @@ func (a *app) editorKey(d *editor, ev ui.InputEvent) bool {
 			return true
 		}
 	}
+	// A click on a chevron in the gutter folds its lines or opens them, as
+	// one on the mark after a folded line opens it.
+	if ev.Kind == ui.InputPointerDown && ev.Button == 0 && ev.Mods == 0 && a.foldClick(d, ev.X, ev.Y) {
+		a.invalidate()
+		return true
+	}
 	// A click on the mark of lines changed since the last commit shows
 	// what they were.
 	if ev.Kind == ui.InputPointerDown && ev.Button == 0 && ev.Clicks == 1 && a.gutterClick(d, ev.X, ev.Y) {
 		a.invalidate()
 		return true
 	}
+	// A press goes on from the name the pointer rests on, until it moves.
+	switch {
+	case ev.Kind == ui.InputPointerDown:
+		a.hushRest()
+	case ev.Kind == ui.InputPointerMove && ev.Button < 0:
+		a.rest.hushed = false
+	}
+	// The pointer over a link or a task's box in Live Preview shows so.
+	if ev.Kind == ui.InputPointerMove && a.livePreview(d) {
+		a.livePointer(d, ev)
+	} else if ev.Kind == ui.InputKeyDown || ev.Kind == ui.InputText {
+		// Typed, until the pointer moves again.
+		d.liveBox = 0
+	}
+	// A click on a task's box in Live Preview checks it.
+	if ev.Kind == ui.InputPointerDown && ev.Button == 0 && ev.Clicks == 1 && ev.Mods == 0 && a.livePreview(d) && a.liveClick(d, ev.X, ev.Y) {
+		return true
+	}
+	// A click on a link in Live Preview whose source is hidden opens it as
+	// it is let go over the link, as in Obsidian, the caret staying where
+	// it is.
+	if ev.Kind == ui.InputPointerDown && ev.Button == 0 && ev.Clicks == 1 && (ev.Mods == 0 || ev.Mods == ui.Cmd) && a.livePreview(d) {
+		if link, ok := a.liveLinkPressed(d); ok {
+			d.liveLinkPress = link
+			return true
+		}
+	}
+	if ev.Kind == ui.InputPointerUp && ev.Button == 0 && d.liveLinkPress != [2]int{} {
+		press := d.liveLinkPress
+		d.liveLinkPress = [2]int{}
+		if d.liveHover != 0 && d.liveLink == press {
+			a.openLiveLink(d, press)
+		}
+		return true
+	}
 	// A Cmd-click on a wiki link of a note opens what it links to, once the
-	// click put the caret in it.
+	// click put the caret in it, as does one on a link in Live Preview.
 	if ev.Kind == ui.InputPointerDown && ev.Button == 0 && ev.Clicks == 1 && ev.Mods == ui.Cmd && isMarkdown(d.document) {
 		d.cmds = append(d.cmds, a.followWikiLink)
+		if a.livePreview(d) {
+			d.cmds = append(d.cmds, a.followLiveLink)
+		}
+	}
+	// A Cmd-click on a name of code goes to where it is defined, as F12
+	// does, as it is let go where the click put the caret: not a drag,
+	// which selects.
+	if ev.Kind == ui.InputPointerDown && ev.Button == 0 && ev.Clicks == 1 && defGesture(d, ev.Mods) {
+		d.defClick = true
+	} else if ev.Kind == ui.InputPointerDown {
+		d.defClick = false
+	}
+	if ev.Kind == ui.InputPointerUp && ev.Button == 0 && d.defClick {
+		d.defClick = false
+		d.cmds = append(d.cmds, func(d *editor) {
+			if d.sel[0] == d.sel[1] {
+				a.definitionAt(d, true)
+			}
+		})
 	}
 	if ev.Kind == ui.InputPointerDown && a.prefs().Vim && d.vim.mode.visual() {
 		// A click ends visual mode; a drag selects anew.
@@ -544,12 +642,51 @@ func (a *app) editorKey(d *editor, ev ui.InputEvent) bool {
 	if ev.Kind != ui.InputKeyDown {
 		return false
 	}
+	// The suggestions of a wiki link being typed take the keys that
+	// choose among them.
+	if a.wikiKey(d, ev) {
+		return true
+	}
+	// The mouse's back and forward buttons go through the history of the
+	// jumps, as a browser's do.
+	if (ev.Key == ui.KeyBack || ev.Key == ui.KeyForward) && ev.Mods == 0 {
+		n := 1
+		if ev.Key == ui.KeyBack {
+			n = -1
+		}
+		a.post(func() { a.navGo(n) })
+		return true
+	}
+	// Escape closes a hover first, and only it: in Vim's insert mode too.
+	if ev.Key == ui.KeyEscape && ev.Mods == 0 && a.hover != nil && (a.hover.ed == d || a.hover.auto) {
+		if a.hover.auto {
+			a.hushRest()
+		}
+		a.hover = nil
+		return true
+	}
+	if a.hoverKey(d, ev) {
+		return true
+	}
+	// A key goes on from the name the pointer rests on, and its card.
+	if a.rest.ed != nil {
+		a.hushRest()
+	}
 	if ev.Key == ui.KeyEscape && ev.Mods == 0 && d.peek >= 0 {
 		d.peek = -1
 		return true
 	}
+	// The keys of the commands of several selections, which the text area
+	// would take before the menus' shortcuts, then the keys that act at
+	// all of them.
+	if a.multiOK(d) && a.multiStroke(ev) {
+		return true
+	}
+	if len(d.cursors) > 0 && a.multiKey(d, ev) {
+		return true
+	}
 	if ev.Key == ui.KeySpace && ev.Mods == ui.Ctrl && !a.keyBound(ui.Ctrl, ui.KeySpace) {
-		a.post(a.complete)
+		a.post(a.completeOne)
 		return true
 	}
 	if a.prefs().Vim && a.vimKey(d, ev) {
@@ -567,6 +704,8 @@ func (a *app) editorKey(d *editor, ev ui.InputEvent) bool {
 		cmd = func(d *editor) { tab(d, outdent) }
 	case ev.Key == ui.KeyEnter && m == 0:
 		cmd = newline
+	case ev.Key == ui.KeyEnter && m == cmdKey && mdTaskKey(d):
+		cmd = toggleMdTask
 	case ev.Key == ui.KeyEnter && (m == cmdKey || m == cmdKey|ui.Shift):
 		above := m&ui.Shift != 0
 		cmd = func(d *editor) { insertLine(d, above) }
@@ -574,6 +713,9 @@ func (a *app) editorKey(d *editor, ev ui.InputEvent) bool {
 		cmd = func(d *editor) { d.undo() }
 	case ev.Key == ui.KeyZ && m == cmdKey|ui.Shift, ev.Key == ui.KeyY && m == ui.Ctrl && cmdKey == ui.Ctrl:
 		cmd = func(d *editor) { d.redo() }
+	case (ev.Key == ui.KeyUp || ev.Key == ui.KeyDown) && m == cmdKey|ui.Shift && mdMoveKey(d):
+		down := ev.Key == ui.KeyDown
+		cmd = func(d *editor) { mdMoveItem(d, down) }
 	case (ev.Key == ui.KeyUp || ev.Key == ui.KeyDown) && (m == ui.Alt || m == ui.Alt|ui.Shift):
 		down := ev.Key == ui.KeyDown
 		if m&ui.Shift != 0 {
@@ -592,13 +734,31 @@ func (a *app) editorKey(d *editor, ev ui.InputEvent) bool {
 	return true
 }
 
-// editActive queues an edit of the editor shown for its next frame.
+// editActive queues an edit of the editor shown for its next frame, at
+// its primary selection only: the others go.
 func (a *app) editActive(cmd func(d *editor)) func() {
+	return a.editAll(func(d *editor) {
+		d.collapse()
+		cmd(d)
+	})
+}
+
+// editAll queues an edit of the editor shown that takes all its
+// selections, as Undo and Cut do.
+func (a *app) editAll(cmd func(d *editor)) func() {
 	return func() {
 		if d := a.textEditor(); d != nil {
 			a.queueEdit(d, cmd)
 		}
 	}
+}
+
+// completeOne offers completions at the primary caret, the others gone.
+func (a *app) completeOne() {
+	if d := a.activeEditor(); d != nil {
+		d.collapse()
+	}
+	a.complete()
 }
 
 // queueEdit queues an edit of an editor for its next frame.
@@ -663,4 +823,10 @@ func goToBracket(d *editor) {
 		to = pair + 1
 	}
 	d.selectRange(to, to, false)
+}
+
+// defGesture reports whether a click with mods held in d goes to the
+// definition of the name clicked: Cmd, Control off macOS, in code.
+func defGesture(d *editor, mods ui.Modifiers) bool {
+	return mods == ui.Cmd && !isMarkdown(d.document)
 }

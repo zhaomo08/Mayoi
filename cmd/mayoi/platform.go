@@ -23,15 +23,52 @@ func macKeys() bool { return hostOS == "darwin" }
 // they are not macOS's with Control for Command: VS Code's, "" for none.
 // Control and Alt together are AltGr there, which types text.
 var otherAccels = map[string]string{
-	"edit.findNext":         "F3",
-	"edit.findPrev":         "Shift+F3",
-	"edit.replace":          "Ctrl+H",
-	"file.saveAll":          "",
-	"file.openFolderWindow": "",
-	"view.nextColumn":       "",
-	"view.prevColumn":       "",
-	"git.collapseAllFiles":  "",
-	"git.expandAllFiles":    "",
+	"edit.findNext":          "F3",
+	"sel.addNextOccurrence":  "Ctrl+D",
+	"view.splitDown":         "Ctrl+Shift+D",
+	"view.newColumnRight":    "",
+	"view.newColumnDown":     "",
+	"edit.findPrev":          "Shift+F3",
+	"edit.replace":           "Ctrl+H",
+	"view.toggleLivePreview": "Shift+Alt+V",
+	"file.saveAll":           "",
+	"file.openFolderWindow":  "",
+	"view.nextColumn":        "",
+	"view.prevColumn":        "",
+	"go.back":                "Alt+Left",
+	"go.forward":             "Alt+Right",
+	"git.collapseAllFiles":   "",
+	"git.expandAllFiles":     "",
+	"edit.fold":              "",
+	"edit.unfold":            "",
+	// VS Code's on Windows: AltGr with an arrow types nothing.
+	"sel.addCursorAbove": "Ctrl+Alt+Up",
+	"sel.addCursorBelow": "Ctrl+Alt+Down",
+	"sel.columnUp":       "Ctrl+Shift+Alt+Up",
+	"sel.columnDown":     "Ctrl+Shift+Alt+Down",
+	"sel.columnLeft":     "Ctrl+Shift+Alt+Left",
+	"sel.columnRight":    "Ctrl+Shift+Alt+Right",
+	// Control and Alt with a digit show a project of the rail there.
+	"markdown.heading1": "",
+	"markdown.heading2": "",
+	"markdown.heading3": "",
+	"markdown.heading4": "",
+	"markdown.heading5": "",
+	"markdown.heading6": "",
+}
+
+// linuxAccels are the shortcuts of commands on Linux where they are not
+// Windows': none for adding carets and selecting a column, whose Ctrl+Alt
+// with the arrows switches workspaces in Xfce and older GNOME, and whose
+// VS Code keys there, Shift+Alt, copy lines in Mayoi. Alt-click and the
+// middle button still add them, and the commands can be bound.
+var linuxAccels = map[string]string{
+	"sel.addCursorAbove": "",
+	"sel.addCursorBelow": "",
+	"sel.columnUp":       "",
+	"sel.columnDown":     "",
+	"sel.columnLeft":     "",
+	"sel.columnRight":    "",
 }
 
 // platformAccel is a command's accelerator on the system: on Windows and
@@ -39,6 +76,9 @@ var otherAccels = map[string]string{
 func platformAccel(id, accel string) string {
 	if macKeys() {
 		return accel
+	}
+	if o, ok := linuxAccels[id]; ok && hostOS == "linux" {
+		return o
 	}
 	if o, ok := otherAccels[id]; ok {
 		return o
@@ -119,6 +159,9 @@ func (a *app) commandCaps(cmd command) []string {
 	if accel == "" && cmd.accel == "" {
 		accel = platformAccel(cmd.id, viewKeys[cmd.id])
 	}
+	if keys := chordKeys(cmd.id); accel == "" && keys != nil && !a.keys.Removes(commandNames(cmd.id)...) {
+		return chordCaps(keys)
+	}
 	return accelCaps(accel, macKeys())
 }
 
@@ -159,7 +202,7 @@ func (a *app) shellSkip(s keymap.Stroke) (id string, ok bool) {
 	}
 	for _, cmd := range a.commands() {
 		st, ok := keymap.ParseAccel(a.menuAccel(cmd))
-		if !ok || st != s {
+		if !ok || st != s || isMultiCommand(cmd.id) {
 			continue
 		}
 		ctrlShift := s.Mods&(ui.Ctrl|ui.Shift) == ui.Ctrl|ui.Shift && s.Key != ui.KeyC && s.Key != ui.KeyV

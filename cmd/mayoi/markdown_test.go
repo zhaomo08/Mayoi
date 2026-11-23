@@ -404,10 +404,17 @@ func TestMarkdownPreview(t *testing.T) {
 	a.openFile(hs.path("README.md"), true)
 	hs.settle()
 	d := a.activeEditor()
-	if d.preview != nil || !hs.tt.HasText("Show Preview (⇧⌘V)") {
+	if d.preview != nil || d.live || !hs.tt.HasText("Reading View (⇧⌘V)") {
 		t.Fatal("Markdown did not open as source")
 	}
-	if err := hs.tt.Click("Show Preview (⇧⌘V)"); err != nil {
+	if err := hs.tt.Click("Live Preview (⌥⌘V)"); err != nil {
+		t.Fatal(err)
+	}
+	hs.settle()
+	if !a.livePreview(d) {
+		t.Fatal("the Live Preview button did not show Live Preview")
+	}
+	if err := hs.tt.Click("Reading View (⇧⌘V)"); err != nil {
 		t.Fatal(err)
 	}
 	hs.until("Markdown preview", func() bool { return d.preview != nil && d.preview.loaded })
@@ -420,8 +427,15 @@ func TestMarkdownPreview(t *testing.T) {
 	}
 	a.run("view.togglePreview")
 	hs.settle()
-	if d.preview != nil {
-		t.Fatal("source toggle failed")
+	if d.preview != nil || !a.livePreview(d) {
+		t.Fatal("the Reading view did not go back to Live Preview")
+	}
+	if err := hs.tt.Click("Source (⌥⌘V)"); err != nil {
+		t.Fatal(err)
+	}
+	hs.settle()
+	if d.preview != nil || d.live {
+		t.Fatal("the Source button did not show the source")
 	}
 	for _, name := range []string{"main.go", "web/index.html"} {
 		a.openFile(hs.path(name), true)
@@ -437,10 +451,60 @@ func TestMarkdownPreview(t *testing.T) {
 	hs.until("long extension", func() bool { return a.activeEditor().preview.loaded })
 }
 
+func TestUntitledMarkdownPreview(t *testing.T) {
+	hs := newHarness(t, true)
+	a := hs.a
+	a.run("file.new")
+	hs.settle()
+	d := a.activeEditor()
+	d.buf.Replace(0, 0, "# xxx\n")
+	hs.settle()
+	a.run("view.togglePreview")
+	hs.until("untitled preview", func() bool { return d.preview != nil && d.preview.loaded })
+	hs.settle()
+	if !hs.tt.HasText("xxx") {
+		t.Fatal("heading not shown")
+	}
+	a.run("view.toggleLivePreview")
+	hs.settle()
+	if !a.livePreview(d) {
+		t.Fatal("Live Preview not shown")
+	}
+	cols := len(a.cols)
+	a.run("view.previewToSide")
+	hs.settle()
+	if len(a.cols) != cols+1 {
+		t.Fatal("no preview to the side")
+	}
+	a.saveDocAs(d.document, hs.path("notes.txt"))
+	hs.settle()
+	if isMarkdown(d.document) {
+		t.Fatal("saved as .txt, still Markdown")
+	}
+}
+
+func TestNoPreviewSaysWhy(t *testing.T) {
+	hs := newHarness(t, true)
+	a := hs.a
+	a.openFile(hs.path("main.go"), true)
+	hs.settle()
+	notes := len(a.notes)
+	a.run("view.togglePreview")
+	a.run("view.previewToSide")
+	a.run("view.toggleLivePreview")
+	if len(a.notes) != notes+3 || a.notes[notes].message != locales.PreviewNone("main.go") ||
+		a.notes[notes+2].message != locales.PreviewLiveNone("main.go") {
+		t.Fatalf("notes %v", a.notes[notes:])
+	}
+	if d := a.activeEditor(); d.preview != nil || a.livePreview(d) || len(a.cols) != 1 {
+		t.Fatal("previewed main.go")
+	}
+}
+
 func TestMarkdownPreviewOnOpen(t *testing.T) {
 	hs := newHarness(t, true)
 	a := hs.a
-	a.settings.MarkdownPreview = true
+	a.settings.MarkdownMode = "reading"
 	a.openFile(hs.path("README.md"), true)
 	hs.until("Markdown preview", func() bool {
 		return a.activeEditor().preview != nil && a.activeEditor().preview.loaded
@@ -468,7 +532,7 @@ func TestMarkdownPreviewOnOpen(t *testing.T) {
 		t.Fatal("MDX import was rendered")
 	}
 	// The setting off opens the text.
-	a.settings.MarkdownPreview = false
+	a.settings.MarkdownMode = ""
 	path = hs.path("plain.md")
 	os.WriteFile(path, []byte("# Plain\n"), 0o644)
 	a.openFile(path, true)
@@ -483,7 +547,7 @@ func TestMarkdownPreviewOnOpen(t *testing.T) {
 func TestMarkdownPreviewKeepsSource(t *testing.T) {
 	hs := newHarness(t, false)
 	a := hs.a
-	a.settings.MarkdownPreview = true
+	a.settings.MarkdownMode = "reading"
 	a.openFile(hs.path("README.md"), true)
 	hs.until("preview", func() bool {
 		return a.activeEditor().preview != nil && a.activeEditor().preview.loaded
@@ -526,7 +590,7 @@ func TestMarkdownOpensForText(t *testing.T) {
 			t.Run(fmt.Sprintf("existing=%v/%s", existing, action), func(t *testing.T) {
 				hs := newHarness(t, true)
 				a := hs.a
-				a.settings.MarkdownPreview = true
+				a.settings.MarkdownMode = "reading"
 				path := hs.path("target.md")
 				if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
 					t.Fatal(err)
@@ -576,7 +640,7 @@ func TestMarkdownOpensForText(t *testing.T) {
 func TestMarkdownReopenKeepsExistingPreview(t *testing.T) {
 	hs := newHarness(t, true)
 	a := hs.a
-	a.settings.MarkdownPreview = true
+	a.settings.MarkdownMode = "reading"
 	path := hs.path("README.md")
 	a.openFile(path, true)
 	hs.until("preview", func() bool { return a.activeEditor().preview.loaded })
@@ -599,7 +663,7 @@ func TestMarkdownPreviewRestoresPlace(t *testing.T) {
 			t.Run(fmt.Sprintf("previewOnOpen=%v/reopen=%v", previewOnOpen, reopen), func(t *testing.T) {
 				hs := newHarness(t, false)
 				a := hs.a
-				a.settings.MarkdownPreview = previewOnOpen
+				a.settings.MarkdownMode = map[bool]string{true: "reading"}[previewOnOpen]
 				path := hs.path("sync.md")
 				if err := os.WriteFile(path, []byte(markdownSyncDoc()), 0o644); err != nil {
 					t.Fatal(err)
@@ -799,7 +863,7 @@ func TestMarkdownPreviewRestoreAndReopen(t *testing.T) {
 	b := newApp(&fakeHost{folder: hs.root}, a.settings, a.window)
 	t.Cleanup(b.shutdown)
 	bt := ui.NewTester(b.view, 1200, 760)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(settleTimeout)
 	for time.Now().Before(deadline) {
 		step(bt)
 		if b.activeEditor() != nil && b.activeEditor().preview != nil && b.activeEditor().preview.loaded {
@@ -828,7 +892,7 @@ func TestShotMarkdown(t *testing.T) {
 	}{
 		{"light", "", false}, {"dark", "", true}, {"matrix", themeMatrix, true}, {"claude", themeClaude, true}, {"qoder", themeQoder, false},
 		{"grokbot", themeGrokBot, true}, {"cursor", themeCursor, false}, {"purplegold", themePurpleGold, true},
-		{"pumpkin", themePumpkin, true}, {"witchsbrew", themeWitchsBrew, true}, {"bloodmoon", themeBloodMoon, true},
+		{"pumpkin", themePumpkin, true}, {"witchsbrew", themeWitchsBrew, true}, {"bloodmoon", themeBloodMoon, true}, {"gtavi", themeGTAVI, true},
 	} {
 		hs := newHarness(t, theme.dark)
 		hs.a.settings.Theme = theme.theme
@@ -850,7 +914,7 @@ func TestShotMarkdown(t *testing.T) {
 	blocks := parseMarkdown([]byte("中文斜体 *中文斜体* italic *italic*"), "", "", nil)
 	img := ui.Render(func(c *ui.Context) {
 		ui.Box(c).Fill().Background(hs.a.pal.editor).Padding(16).Children(func() {
-			hs.a.markdownText(c, nil, "", blocks[0].runs, 24, hs.a.pal.text, false, nil)
+			hs.a.markdownText(c, nil, "", blocks[0].runs, 24, hs.a.pal.text, false, ui.Start, nil)
 		})
 	}, 640, 72, 2)
 	f, err := os.Create(filepath.Join(os.Getenv("SHOTS"), "mayoi-md-italic.png"))
@@ -1040,7 +1104,7 @@ func TestMarkdownDebounceAndClosedResult(t *testing.T) {
 	if !v.markdown.running || v.wait != nil || v.markdown.generation.Load() != generation+1 {
 		t.Fatal("edit during first parse started another worker")
 	}
-	for deadline := time.Now().Add(5 * time.Second); v.markdown.running && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(settleTimeout); v.markdown.running && time.Now().Before(deadline); {
 		a.drain()
 		time.Sleep(time.Millisecond)
 	}
@@ -1076,7 +1140,7 @@ func TestMarkdownInlineStyles(t *testing.T) {
 	a := hs.a
 	a.settings.FontWeight = 500
 	a.settings.FontFeatures = []string{"calt=0", "ss01"}
-	for _, theme := range []string{"", themeMatrix, themeClaude, themeQoder, themeGrokBot, themeCursor, themePurpleGold, themePumpkin, themeWitchsBrew, themeBloodMoon} {
+	for _, theme := range []string{"", themeMatrix, themeClaude, themeQoder, themeGrokBot, themeCursor, themePurpleGold, themePumpkin, themeWitchsBrew, themeBloodMoon, themeGTAVI} {
 		for _, dark := range []bool{false, true} {
 			a.pal = paletteFor(theme, dark)
 			p := a.pal
@@ -1138,7 +1202,7 @@ func TestMarkdownFontAndZoom(t *testing.T) {
 	for _, size := range []float32{13, 18} {
 		a.settings.FontSize = size
 		tt := ui.NewTester(func(c *ui.Context) {
-			a.markdownText(c, nil, "", []markdownInline{{text: "link", bold: true, italic: true, strike: true, code: true, link: "https://example.com"}}, size, a.pal.text, false, nil)
+			a.markdownText(c, nil, "", []markdownInline{{text: "link", bold: true, italic: true, strike: true, code: true, link: "https://example.com"}}, size, a.pal.text, false, ui.Start, nil)
 		}, 300, 80)
 		link, ok := tt.Find("Open link https://example.com")
 		if !ok || link.H < size {
@@ -1249,7 +1313,7 @@ const markdownPartsFixture = "## Alerts\n\n" +
 	"---\n\n```js\nconst a = 1 // a comment\n```\n\n```\nplain\n```\n"
 
 func TestMarkdownAlerts(t *testing.T) {
-	src := "> [!NOTE]\n> Read this.\n\n> [!warning]\n> Careful **now**.\n> > Nested quote.\n\n> [!FOO]\n> Not an alert.\n\n> [!TIP]\n\n> Plain.\n"
+	src := "> [!NOTE]\n> Read this.\n\n> [!warning]\n> Careful **now**.\n> > Nested quote.\n\n> [!no such]\n> Not an alert.\n\n> [!TIP]\n\n> Plain.\n"
 	blocks := parseMarkdown([]byte(src), "test.md", "", nil)
 	var got []string
 	for _, b := range blocks {
@@ -1263,7 +1327,7 @@ func TestMarkdownAlerts(t *testing.T) {
 	want := []string{
 		"title:1", "1@1/1:Read this.",
 		"title:4", "4@1/1:Careful now.", "4@1/2:Nested quote.",
-		"0@0/1:[!FOO] Not an alert.",
+		"0@0/1:[!no such] Not an alert.",
 		"title:2",
 		"0@0/1:Plain.",
 	}
@@ -1492,7 +1556,7 @@ func TestMarkdownScrollSync(t *testing.T) {
 				continue
 			}
 			h := markdownRunsText(m.blocks[i].runs)
-			if r, ok := hs.tt.Find(h); ok && r.Y+r.H > pane.Y+1 {
+			if r, ok := findIn(t, hs.tt, h, pane); ok && r.Y+r.H > pane.Y+1 {
 				return h
 			}
 		}
@@ -1570,14 +1634,22 @@ func TestMarkdownToggleKeepsPlace(t *testing.T) {
 				continue
 			}
 			h := markdownRunsText(m.blocks[i].runs)
-			if r, ok := hs.tt.Find(h); ok && r.Y+r.H > pane.Y+1 {
+			if r, ok := findIn(t, hs.tt, h, pane); ok && r.Y+r.H > pane.Y+1 {
 				return h
 			}
 		}
 		return ""
 	}
-	if h := topHeading(); h != "Section 60" {
-		t.Fatalf("the preview opened at %q, not section 60", h)
+	// Its rows measure as they show, over some frames: where it settles.
+	opened := ""
+	for range 20 {
+		if opened = topHeading(); opened == "Section 60" {
+			break
+		}
+		hs.settle()
+	}
+	if opened != "Section 60" {
+		t.Fatalf("the preview opened at %q, not section 60", opened)
 	}
 	// The text opens where the preview was.
 	for range 20 {
@@ -1586,10 +1658,15 @@ func TestMarkdownToggleKeepsPlace(t *testing.T) {
 	}
 	heading := topHeading()
 	a.run("view.togglePreview")
-	hs.settle()
-	hs.settle()
-	top := a.geometry(d, d.buf.Snapshot().LineCount()).at(d.vscroll.Y - editorPadY)
-	if want := lineOf(heading); top < want-4 || top > want+4 {
+	want := lineOf(heading)
+	top := -1
+	for range 20 {
+		hs.settle()
+		if top = a.geometry(d, d.buf.Snapshot().LineCount()).at(d.vscroll.Y - editorPadY); top >= want-4 && top <= want+4 {
+			break
+		}
+	}
+	if top < want-4 || top > want+4 {
 		t.Fatalf("the text opened at line %d, the preview was at %q, line %d", top, heading, want)
 	}
 }
@@ -1729,5 +1806,148 @@ func TestMarkdownSplitKeepsPreviewPlace(t *testing.T) {
 				t.Fatalf("the split preview is at %v, the preview at %v", got, top)
 			}
 		})
+	}
+}
+
+// Obsidian's callouts are alerts: by their own names, with a title of
+// their own, folded or not.
+func TestMarkdownCallouts(t *testing.T) {
+	src := "> [!tip]- Own *title*\n> Body.\n\n> [!danger]\n> Risky.\n\n> [!NOTE]x\n> Not one.\n"
+	blocks := parseMarkdown([]byte(src), "test.md", "", nil)
+	var got []string
+	for _, b := range blocks {
+		if b.kind == markdownAlertTitle {
+			got = append(got, "title:"+strconv.Itoa(int(b.alert))+":"+b.title)
+		} else {
+			got = append(got, strconv.Itoa(int(b.alert))+":"+markdownRunsText(b.runs))
+		}
+	}
+	danger := strconv.Itoa(int(alertDanger))
+	want := []string{"title:2:Own title", "2:Body.", "title:" + danger + ":", danger + ":Risky.", "0:[!NOTE]x Not one."}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("callouts:\n got %q\nwant %q", got, want)
+	}
+}
+
+// Each of Obsidian's callouts has its own kind, by its name and its
+// aliases, a name of no kind known being a note, titled as typed.
+func TestMarkdownCalloutKinds(t *testing.T) {
+	for _, c := range []struct {
+		line  string
+		kind  markdownAlert
+		title string
+	}{
+		{"[!NOTE]", alertNote, "Note"},
+		{"[!tip]", alertTip, "Tip"},
+		{"[!summary]", alertAbstract, "Summary"},
+		{"[!info]", alertInfo, "Info"},
+		{"[!todo]", alertTodo, "Todo"},
+		{"[!done]+", alertSuccess, "Done"},
+		{"[!FAQ]-", alertQuestion, "Faq"},
+		{"[!missing]", alertFailure, "Missing"},
+		{"[!error]", alertDanger, "Error"},
+		{"[!bug]", alertBug, "Bug"},
+		{"[!example]", alertExample, "Example"},
+		{"[!cite]", alertQuote, "Cite"},
+		{"[!my-kind]", alertNote, "My-kind"},
+	} {
+		k, n := markdownAlertMarker(c.line + " Title")
+		if k != c.kind || n != len(c.line) {
+			t.Errorf("%s: kind %d, %d bytes; want %d, %d", c.line, k, n, c.kind, len(c.line))
+		}
+		word, _ := markdownAlertType(c.line)
+		if _, title := markdownAlertHead(k, word); title != c.title {
+			t.Errorf("%s: titled %q, want %q", c.line, title, c.title)
+		}
+	}
+	for _, line := range []string{"[!two words]", "[!]", "[!note]x", "[note]"} {
+		if k, _ := markdownAlertMarker(line); k != alertNone {
+			t.Errorf("%s is a callout", line)
+		}
+	}
+}
+
+// A callout of - shows its title alone until a click opens it, one of +
+// all until a click folds it, and the blocks in it hide with it.
+func TestMarkdownCalloutFolds(t *testing.T) {
+	src := "> [!faq]- Why?\n> Because.\n> > [!note]+ Inner\n> > Deep.\n\nAfter.\n"
+	blocks := parseMarkdown([]byte(src), "test.md", "", nil)
+	doc := &document{}
+	shown := func() string {
+		var got []string
+		for _, b := range blocks {
+			if !calloutHidden(doc, b.folds) {
+				got = append(got, b.title+markdownRunsText(b.runs))
+			}
+		}
+		return strings.Join(got, "|")
+	}
+	if b := blocks[0]; b.kind != markdownAlertTitle || b.fold != '-' || b.foldKey != "[!faq]- Why?" || b.word != "faq" {
+		t.Fatalf("title %+v", b)
+	}
+	if got := shown(); got != "Why?|After." {
+		t.Fatalf("folded shows %q", got)
+	}
+	a := &app{}
+	a.toggleCallout(doc, "[!faq]- Why?", '-')
+	if got := shown(); got != "Why?|Because.|Inner|Deep.|After." {
+		t.Fatalf("opened shows %q", got)
+	}
+	a.toggleCallout(doc, "[!note]+ Inner", '+')
+	if got := shown(); got != "Why?|Because.|Inner|After." {
+		t.Fatalf("inner folded shows %q", got)
+	}
+}
+
+// A note embedded alone in its paragraph shows in place, after a line
+// naming it, or the part of it under a heading; one embedded in it, a
+// note not found is a link; one in a list or a quote stands where the
+// item's text or the quote's does.
+func TestMarkdownEmbeds(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "other.md"), []byte("---\ntags: x\n---\n# Other\n\nHello **there**.\n\n## Part\n\nIn part.\n\n### Deeper\n\nStill in.\n\n## Next\n\nOut.\n\n![[third]]\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "third.md"), []byte("Third.\n"), 0o644)
+	src := "Before.\n\n![[other]]\n\n![[other#Part]]\n\n![[missing]]\n\n- ![[third]]\n\n> ![[third]]\n"
+	blocks := parseMarkdown([]byte(src), filepath.Join(dir, "note.md"), dir, nil)
+	var got []string
+	for _, b := range blocks {
+		text := markdownRunsText(b.runs)
+		if b.kind == markdownEmbedTitle {
+			text = "[" + b.title + "]"
+		}
+		got = append(got, strconv.Itoa(b.embed)+":"+text)
+	}
+	want := []string{"0:Before.",
+		"1:[other]", "1:Other", "1:Hello there.", "1:Part", "1:In part.", "1:Deeper", "1:Still in.", "1:Next", "1:Out.", "1:third",
+		"1:[other › Part]", "1:Part", "1:In part.", "1:Deeper", "1:Still in.",
+		"0:missing", "1:[third]", "1:Third.", "1:[third]", "1:Third."}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("embeds:\n got %q\nwant %q", got, want)
+	}
+	n := len(blocks)
+	if item, text := blocks[n-4], blocks[n-3]; item.marker == "" || item.indent != 1 || text.marker != "" || text.offset < item.markerWidth {
+		t.Errorf("in a list, the title's marker %q indent %d, the text's offset %v", item.marker, item.indent, text.offset)
+	}
+	if title, text := blocks[n-2], blocks[n-1]; title.quote != 1 || text.quote != 1 || text.embedAt != 1 {
+		t.Errorf("in a quote, the title's quotes %d, the text's %d, %d of them around the note", title.quote, text.quote, text.embedAt)
+	}
+	for _, b := range blocks {
+		if b.embed > 0 && b.slug != "" {
+			t.Errorf("an embedded heading %q has an anchor", b.slug)
+		}
+	}
+}
+
+// A link to the web ends in its icon in the Reading view, as in Live
+// Preview: after its last run, not after a link within the note.
+func TestMarkdownExternalEnds(t *testing.T) {
+	runs := []markdownInline{{text: "a "}, {text: "web", link: "https://x.dev"}, {text: " bold", link: "https://x.dev", bold: true},
+		{text: " and "}, {text: "note", link: "other.md"}, {text: "pic", link: "https://y.dev", image: "p.png"}}
+	got := markdownExternalEnds(runs)
+	if fmt.Sprint(got) != "[false false true false false false]" {
+		t.Errorf("icons after %v", got)
+	}
+	if markdownExternalEnds(runs[:1]) != nil {
+		t.Error("text without links has icons")
 	}
 }

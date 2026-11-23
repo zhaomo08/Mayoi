@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -23,6 +24,35 @@ func allTabNames(a *app) []string {
 	return out
 }
 
+// stepUntilRead draws frames until the active editor's file is read, as
+// it is in the background.
+func stepUntilRead(t *testing.T, a *app, tt *ui.Tester) {
+	t.Helper()
+	stepUntilEditorsRead(t, tt, a.activeEditor)
+}
+
+// stepUntilEditorsRead draws frames until the files of the editors given
+// are read, as they are in the background.
+func stepUntilEditorsRead(t *testing.T, tt *ui.Tester, eds ...func() *editor) {
+	t.Helper()
+	read := func() bool {
+		for _, ed := range eds {
+			if d := ed(); d == nil || d.sync == syncLoading || d.unread() {
+				return false
+			}
+		}
+		return true
+	}
+	for deadline := time.Now().Add(settleTimeout); !read() && time.Now().Before(deadline); {
+		step(tt)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !read() {
+		t.Fatal("the file was not read")
+	}
+	step(tt)
+}
+
 // Switching a window's folder keeps the tabs of the one it had, where
 // they were, and the folders open in its explorer, which come back as it
 // opens that folder again.
@@ -36,7 +66,7 @@ func TestSwitchFolderSwapsSessions(t *testing.T) {
 	a.openFolder(root)
 	a.openFile(filepath.Join(root, "main.go"), true)
 	a.openFile(filepath.Join(root, "README.md"), true)
-	step(tt)
+	stepUntilRead(t, a, tt)
 	a.activeEditor().pending = &[2]int{2, 6}
 	a.files.Open.Add(filepath.Join(root, "internal"))
 	step(tt)
@@ -56,7 +86,7 @@ func TestSwitchFolderSwapsSessions(t *testing.T) {
 
 	a.switchFolder(root)
 	step(tt)
-	step(tt)
+	stepUntilRead(t, a, tt)
 	if a.root != root || !slices.Equal(allTabNames(a), []string{"main.go", "README.md"}) || a.activeEditor().name() != "README.md" {
 		t.Fatalf("back: folder %q, tabs %v", a.root, allTabNames(a))
 	}
@@ -145,11 +175,11 @@ func TestRestoresWhereTabsWere(t *testing.T) {
 	t.Cleanup(a.shutdown)
 	tt := ui.NewTester(a.view, 1200, 760)
 	step(tt)
-	step(tt)
 	col := a.cols[0]
 	if len(col.tabs) != 3 {
 		t.Fatalf("tabs %v", allTabNames(a))
 	}
+	stepUntilEditorsRead(t, tt, func() *editor { return col.tabs[0].ed }, func() *editor { return col.tabs[1].ed })
 	if ed := col.tabs[0].ed; ed.sel != [2]int{10, 14} || !a.wraps(ed) {
 		t.Errorf("main.go: selection %v, wraps %v", ed.sel, a.wraps(ed))
 	}
@@ -170,9 +200,9 @@ func TestRestoresWhereTabsWere(t *testing.T) {
 	}
 }
 
-// A file with a line too long to lay out is not opened again as the
-// window starts, which it would hang.
-func TestRestoreSkipsLongLines(t *testing.T) {
+// A restored file with a line too long keeps its error tab without
+// laying out the text, which would hang the window.
+func TestRestoreRetainsLongLineFailure(t *testing.T) {
 	root := workspaceFixture(t)
 	long := filepath.Join(root, "index.js.map")
 	os.WriteFile(long, []byte(strings.Repeat("x", maxLineBytes+1)), 0o644)
@@ -186,9 +216,13 @@ func TestRestoreSkipsLongLines(t *testing.T) {
 	a := newApp(&fakeHost{folder: root}, s, w)
 	t.Cleanup(a.shutdown)
 	tt := ui.NewTester(a.view, 1200, 760)
-	step(tt)
-	if names := allTabNames(a); !slices.Equal(names, []string{"main.go"}) {
+	hs := &harness{t: t, a: a, tt: tt}
+	hs.settle()
+	if names := allTabNames(a); !slices.Equal(names, []string{"index.js.map", "main.go"}) {
 		t.Fatalf("tabs %v", names)
+	}
+	if d := a.cols[0].tabs[0].ed; d.sync != syncLoadFailed || d.loadErr != errLongLine || d.buf.Len() != 0 || tt.HasText("Try Again") {
+		t.Fatal("restored long line did not retain its failure without loading text")
 	}
 }
 
@@ -206,9 +240,10 @@ func TestRestoresTheScroll(t *testing.T) {
 	a := newApp(&fakeHost{folder: root}, s, w)
 	t.Cleanup(a.shutdown)
 	tt := ui.NewTester(a.view, 1200, 760)
-	for range 3 {
-		step(tt)
-	}
+	hs := &harness{t: t, a: a, tt: tt}
+	hs.settle()
+	stepUntilEditorsRead(t, tt, func() *editor { return a.cols[0].tabs[0].ed })
+	hs.settle()
 	if y := a.cols[0].tabs[0].ed.vscroll.Y; y != 1200 {
 		t.Errorf("scrolled to %v", y)
 	}

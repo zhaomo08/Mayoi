@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -57,6 +58,7 @@ type Contributes struct {
 	TerminalLinks   []LinkContrib             `json:"terminalLinks,omitempty"`
 	Webviews        []WebviewContrib          `json:"webviews,omitempty"`
 	LanguageServers []ServerContrib           `json:"languageServers,omitempty"`
+	Agents          []AgentContrib            `json:"agents,omitempty"`
 }
 
 // CommandContrib is a command: its id, which starts with the plugin's
@@ -170,12 +172,13 @@ type ThemeContrib struct {
 }
 
 // LanguageContrib tells Mayoi of a language: its files, how its comments
-// start, and which Chroma lexer highlights it.
+// start, and which built-in Chroma lexer or local XML grammar highlights it.
 type LanguageContrib struct {
 	ID         string   `json:"id"`
 	Extensions []string `json:"extensions,omitempty"`
 	Filenames  []string `json:"filenames,omitempty"`
 	Lexer      string   `json:"lexer,omitempty"`
+	LexerFile  string   `json:"lexerFile,omitempty"`
 	Comment    string   `json:"lineComment,omitempty"`
 	Indent     int      `json:"indent,omitempty"`
 }
@@ -215,15 +218,85 @@ type ServerContrib struct {
 	Command   string          `json:"command"`
 	Args      []string        `json:"args,omitempty"`
 	Options   json.RawMessage `json:"initializationOptions,omitempty"`
+	// SourceDefinitionCommand takes a document URI and position and returns locations.
+	SourceDefinitionCommand string `json:"sourceDefinitionCommand,omitempty"`
 	// Resolve prepares a launch description, using workspace/settings JSON on
 	// stdin and returning command, args and LSP options as JSON on stdout.
 	Resolve *ServerResolver `json:"resolve,omitempty"`
+	// Install is the shell command that installs the server's program,
+	// which Mayoi says when the program is not found.
+	Install string `json:"install,omitempty"`
+	// ProgramArgs are the arguments of a program by its name, as "tsc"
+	// serves with ["--lsp", "--stdio"], in place of Args when the command
+	// starts it and no setting of Args is set.
+	ProgramArgs map[string][]string `json:"programArgs,omitempty"`
+	// LocalResolve prepares a launch using a script shipped with the plugin.
+	// Remote workspaces keep using Command or Resolve.
+	LocalResolve *LocalServerResolver `json:"localResolve,omitempty"`
 }
 
 type ServerResolver struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args,omitempty"`
 }
+
+type LocalServerResolver struct {
+	Command string `json:"command"`
+	Script  string `json:"script"`
+}
+
+// AgentContrib is a coding agent whose sessions the Sessions view lists:
+// of the files Sessions matches, or else of what the plugin's function
+// registered with agents.register(id, fn) returns. Resume is the shell
+// command that resumes one, {id}, {folder} and {title} the session's.
+type AgentContrib struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// App is the name it gives itself in what it says it does (OSC 7501),
+	// the id by default.
+	App string `json:"app,omitempty"`
+	// Icon is the shapes of an SVG of a 24 by 24 view, drawn in strokes, a
+	// whole SVG, or the name of one of Mayoi's icons.
+	Icon string `json:"icon,omitempty"`
+	// Tint is the color of its icon: one hex color, or one for a dark
+	// window and one for a light one.
+	Tint     Tint           `json:"tint,omitempty"`
+	Resume   string         `json:"resume"`
+	Sessions *AgentSessions `json:"sessions,omitempty"`
+}
+
+// AgentSessions are the files of an agent's sessions, a session each:
+// those Glob matches, of JSON or of a JSON object a line, and where in
+// them each field is, a path of keys by dots.
+type AgentSessions struct {
+	Glob    string `json:"glob"`
+	Format  string `json:"format,omitempty"` // "json", the default, or "jsonl"
+	ID      string `json:"id,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Folder  string `json:"folder,omitempty"`
+	Updated string `json:"updated,omitempty"`
+	Prompt  string `json:"prompt,omitempty"`
+}
+
+// Tint is a color in a dark window and in a light one, which JSON gives
+// as one hex color for both or two.
+type Tint [2]string
+
+func (t *Tint) UnmarshalJSON(data []byte) error {
+	var one string
+	if json.Unmarshal(data, &one) == nil {
+		*t = Tint{one, one}
+		return nil
+	}
+	var two []string
+	if err := json.Unmarshal(data, &two); err != nil || len(two) != 2 {
+		return errors.New(`tint must be a hex color or two, as "#d97757" or ["#d97757", "#c15f3c"]`)
+	}
+	*t = Tint{two[0], two[1]}
+	return nil
+}
+
+var hexRe = regexp.MustCompile(`^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
 var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
@@ -350,6 +423,41 @@ func (m *Manifest) check() error {
 		}
 		if s.Resolve != nil && s.Command != "" {
 			return fmt.Errorf("language server %q must use command or resolve, not both", s.ID)
+		}
+		if r := s.LocalResolve; r != nil {
+			script := r.Script
+			if strings.TrimSpace(r.Command) == "" || script == "." || !fs.ValidPath(script) ||
+				strings.ContainsAny(script, "\\:") || !filepath.IsLocal(filepath.FromSlash(script)) {
+				return fmt.Errorf("language server %q needs a local resolver command and a script inside the plugin", s.ID)
+			}
+		}
+	}
+	for _, ag := range c.Agents {
+		if err := own("agent", ag.ID); err != nil {
+			return err
+		}
+		if ag.Name == "" || ag.Resume == "" {
+			return fmt.Errorf("agent %q needs a name and a resume command", ag.ID)
+		}
+		for _, c := range ag.Tint {
+			if c != "" && !hexRe.MatchString(c) {
+				return fmt.Errorf("agent %q: tint %q is not a hex color", ag.ID, c)
+			}
+		}
+		if f := ag.Sessions; f != nil {
+			if f.Glob == "" {
+				return fmt.Errorf("agent %q: sessions has no glob", ag.ID)
+			}
+			if f.Format != "" && f.Format != "json" && f.Format != "jsonl" {
+				return fmt.Errorf("agent %q: sessions format must be json or jsonl", ag.ID)
+			}
+		} else if !m.HasCode() {
+			return fmt.Errorf("agent %q has neither sessions nor a main to list them", ag.ID)
+		}
+	}
+	for _, l := range c.Languages {
+		if l.LexerFile != "" && (l.ID == "" || l.LexerFile == "." || !fs.ValidPath(l.LexerFile) || strings.ContainsAny(l.LexerFile, "\\:")) {
+			return fmt.Errorf("language %q needs a lexerFile inside the plugin", l.ID)
 		}
 	}
 	for _, l := range c.TerminalLinks {

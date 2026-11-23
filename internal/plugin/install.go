@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"mayoi/internal/vfs"
 )
 
 // RecordsFile is the file in the plugins folder where Mayoi notes where
@@ -62,6 +64,13 @@ type IndexEntry struct {
 	Author      string   `json:"author,omitempty"`
 	Repository  string   `json:"repository"`
 	Tags        []string `json:"tags,omitempty"`
+	// Languages are the languages of the language server the plugin
+	// brings, which Mayoi offers it for as a file of one opens; Detect is
+	// the program of the server, looked for on the folder's machine, and
+	// Install the command that installs it there.
+	Languages []string `json:"languages,omitempty"`
+	Detect    string   `json:"detect,omitempty"`
+	Install   string   `json:"install,omitempty"`
 }
 
 // FetchIndex reads the index of plugins.
@@ -118,11 +127,19 @@ func SplitSpec(spec string) (url, ref string, byName bool) {
 	return spec, ref, true
 }
 
-// git runs git in dir, returning what it printed or why it failed.
-func git(ctx context.Context, dir string, args ...string) (string, error) {
+// gitCommand returns the command that runs git in dir, with no prompt and
+// no console window of its own.
+func gitCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+	vfs.HideWindow(cmd)
+	return cmd
+}
+
+// git runs git in dir, returning what it printed or why it failed.
+func git(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := gitCommand(ctx, dir, args...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -138,6 +155,13 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 // Install clones a plugin into the plugins folder, checks its manifest,
 // and records where it came from. A plugin of the same name is replaced.
 func Install(ctx context.Context, dir, url, ref string) (*Manifest, error) {
+	// Neither may be taken for an option of git.
+	if strings.HasPrefix(url, "-") {
+		return nil, fmt.Errorf("%s is not a Git URL", url)
+	}
+	if strings.HasPrefix(ref, "-") {
+		return nil, fmt.Errorf("%s is not a Git ref", ref)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -150,12 +174,12 @@ func Install(ctx context.Context, dir, url, ref string) (*Manifest, error) {
 	if ref != "" {
 		args = append(args, "--branch", ref)
 	}
-	if _, err := git(ctx, dir, append(args, url, tmp)...); err != nil {
+	if _, err := git(ctx, dir, append(args, "--", url, tmp)...); err != nil {
 		if ref == "" {
 			return nil, err
 		}
 		// A commit, which --branch does not take.
-		if _, err2 := git(ctx, dir, "clone", "--quiet", url, tmp); err2 != nil {
+		if _, err2 := git(ctx, dir, "clone", "--quiet", "--", url, tmp); err2 != nil {
 			return nil, err
 		}
 		if _, err := git(ctx, tmp, "checkout", "--quiet", ref); err != nil {
@@ -171,18 +195,29 @@ func Install(ctx context.Context, dir, url, ref string) (*Manifest, error) {
 	if fi, err := os.Lstat(dest); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%s is linked for development by mayoi plugin dev: mayoi plugin remove %s first", m.Name, m.Name)
 	}
-	old := dest + ".old"
-	os.RemoveAll(old)
-	if _, err := os.Stat(dest); err == nil {
-		if err := os.Rename(dest, old); err != nil {
+	// A clone already there takes the new commit in place: Windows will
+	// not move a folder that the running app watches.
+	if _, err := os.Stat(filepath.Join(dest, ".git")); err == nil {
+		if _, err := git(ctx, dest, "fetch", "--quiet", "--depth", "1", "--", tmp, "HEAD"); err != nil {
 			return nil, err
 		}
+		if _, err := git(ctx, dest, "checkout", "--quiet", "--force", "--detach", "FETCH_HEAD"); err != nil {
+			return nil, err
+		}
+	} else {
+		old := dest + ".old"
+		os.RemoveAll(old)
+		if _, err := os.Stat(dest); err == nil {
+			if err := os.Rename(dest, old); err != nil {
+				return nil, err
+			}
+		}
+		if err := os.Rename(tmp, dest); err != nil {
+			os.Rename(old, dest)
+			return nil, err
+		}
+		os.RemoveAll(old)
 	}
-	if err := os.Rename(tmp, dest); err != nil {
-		os.Rename(old, dest)
-		return nil, err
-	}
-	os.RemoveAll(old)
 	recs := ReadRecords(dir)
 	recs[m.Name] = Source{URL: url, Ref: ref, Commit: commit}
 	return m, WriteRecords(dir, recs)
@@ -211,7 +246,7 @@ func Latest(ctx context.Context, src Source) (string, error) {
 	if ref == "" {
 		ref = "HEAD"
 	}
-	out, err := git(ctx, "", "ls-remote", src.URL, ref)
+	out, err := git(ctx, "", "ls-remote", "--", src.URL, ref)
 	if err != nil {
 		return "", err
 	}

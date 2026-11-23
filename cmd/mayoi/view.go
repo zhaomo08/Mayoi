@@ -81,8 +81,22 @@ func (a *app) view(c *ui.Context) {
 	// Which pane has the keyboard focus, as the frame before left it, and
 	// which column: its editor is the one typing is of.
 	for i, col := range a.cols {
+		if len(col.tabs) > 0 {
+			col.holds = holdNone // a tab came: the column holds the keys no more
+		}
 		switch t := col.tab(); {
 		case t == nil:
+			// A button of its welcome page focused makes it the column too.
+			if col.body.FocusWithin(c) {
+				a.focus, a.col = paneEditor, i
+			}
+			switch held := col.body.Focused(c); {
+			case held && col.holds == holdAsked:
+				col.holds = holdHeld
+			case !held && col.holds == holdHeld:
+				// Let go: no longer a stop of Tab.
+				col.holds = holdNone
+			}
 		case t.ed != nil && t.ed.vscroll.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
 			t.ed.typist = t.ed
@@ -93,6 +107,8 @@ func (a *app) view(c *ui.Context) {
 		case t.diff != nil && t.diff.pane.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
 		case t.tool != nil && t.tool.pane.FocusWithin(c):
+			a.focus, a.col = paneEditor, i
+		case t.issue != nil && t.issue.pane.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
 		case t.ed != nil && t.ed.preview != nil && t.ed.preview.pane.FocusWithin(c):
 			a.focus, a.col = paneEditor, i
@@ -190,8 +206,11 @@ func (a *app) view(c *ui.Context) {
 	a.confirmView(c)
 	a.signinView(c)
 	a.windowKeys(c)
-	if inEditor := a.keyFocus == placeEditor; inEditor != a.cutInEditor {
-		a.cutInEditor = inEditor
+	inEditor := a.keyFocus == placeEditor
+	d := a.activeEditor()
+	copyAll := inEditor && d != nil && len(d.cursors) > 0
+	if inEditor != a.cutInEditor || copyAll != a.copyAll {
+		a.cutInEditor, a.copyAll = inEditor, copyAll
 		a.host.menuChanged()
 	}
 	for _, msg := range a.errors {
@@ -325,7 +344,7 @@ func (a *app) splitter(c *ui.Context, at edge, drag func(d float32)) ui.Element 
 	if h.Pressed() || h.Dragging() {
 		lit = h.Jump("lit", 1)
 	} else {
-		show := ui.Animation{Duration: 150 * time.Millisecond}
+		show := ui.Animation{Duration: motionShow}
 		if h.Hovered() {
 			show.Delay = 250 * time.Millisecond
 		}
@@ -463,8 +482,8 @@ func (a *app) commandCenter(c *ui.Context) {
 		}
 		if a.root != "" {
 			folder = filepath.Base(a.root)
-			if host := remote.HostOf(a.root); host != "" {
-				folder = filepath.Base(hostPath(a.root)) + " [SSH: " + host + "]"
+			if label, ok := folderTargetLabel(a.root); ok {
+				folder = filepath.Base(hostPath(a.root)) + " [" + label + "]"
 			}
 		}
 		var nameW float32
@@ -502,6 +521,12 @@ func (a *app) commandCenter(c *ui.Context) {
 // iconButton is a small square button showing an icon, its tooltip the
 // label.
 func (a *app) iconButton(c *ui.Context, icon *ui.SVG, label string, on bool) ui.Element {
+	return a.iconButtonOf(c, label, on, func(col ui.Color) { ui.Icon(c, icon).FontSize(15).TextColor(col) })
+}
+
+// iconButtonOf is iconButton with what face draws in col in place of its
+// icon, as a ring that turns while what it started runs.
+func (a *app) iconButtonOf(c *ui.Context, label string, on bool, face func(col ui.Color)) ui.Element {
 	p := a.pal
 	b := ui.ButtonBase(c).Size(26, 24).Radius(5).Justify(ui.Center).AlignItems(ui.Center).Label(label).Tooltip(label)
 	col := p.muted
@@ -518,7 +543,7 @@ func (a *app) iconButton(c *ui.Context, icon *ui.SVG, label string, on bool) ui.
 	}
 	b.Transition(revealFade)
 	pressPose(b)
-	b.Children(func() { ui.Icon(c, icon).FontSize(15).TextColor(col) })
+	b.Children(func() { face(col) })
 	return b
 }
 
@@ -528,41 +553,78 @@ const minColumnW = 160
 // minPanelW is the least width the panel is dragged to at a side.
 const minPanelW = 160
 
-// columns is the editor area: its columns side by side, which share its
-// width by their weights, with a handle between two that moves the width
-// from one to the other.
+// minColumnH is the least height of a column split below another: its tab
+// strip and a few lines.
+const minColumnH = 120
+
+// columns is the editor area: its columns side by side, and some split
+// one above another.
 func (a *app) columns(c *ui.Context) {
-	p := a.pal
-	width := a.colsView.Bounds(c).W
-	var total float32
-	for _, col := range a.cols {
-		total += col.weight
-	}
-	// The columns as the frame began: one an action of the frame takes
-	// away, from its tab strip as it draws, is let be till the next.
-	cols := slices.Clone(a.cols)
 	a.findCol = a.column()
-	ui.Row(c.Key("columns")).Bind(&a.colsView).Grow(1).MinHeight(0).AlignItems(ui.Stretch).Children(func() {
-		for i, col := range cols {
-			if !slices.Contains(a.cols, col) {
+	a.tileView(c, a.layout, c.Key("columns"))
+}
+
+// tileView is a group of the layout, its panes side by side or one above
+// the other, which share its room by their weights, with a handle between
+// two that moves the room from one to the other.
+func (a *app) tileView(c *ui.Context, g *tile, key *ui.Context) {
+	p := a.pal
+	bounds := g.view.Bounds(c)
+	size, least := bounds.W, float32(minColumnW)
+	box := ui.Row(key)
+	if g.down {
+		size, least = bounds.H, minColumnH
+		box = ui.Column(key)
+	}
+	box.Grow(1).MinHeight(0).MinWidth(0)
+	// The panes as the frame began: a column an action of the frame takes
+	// away, from its tab strip as it draws, is let be till the next.
+	kids := slices.Clone(g.kids)
+	box.Bind(&g.view).AlignItems(ui.Stretch).Children(func() {
+		var total float32
+		for _, k := range kids {
+			total += k.share()
+		}
+		shown := 0
+		for i, k := range kids {
+			if k.col != nil && !slices.Contains(a.cols, k.col) {
 				continue
 			}
-			box := ui.Column(c.Key(col.id)).Basis(0).Grow(col.weight).MinWidth(0)
-			if i > 0 {
-				box.BorderWidth(0, 0, 0, 1).BorderColor(p.border)
+			key := c.Key(k.id)
+			if k.col != nil {
+				// A column keeps its key wherever it moves in the layout.
+				key = c.Key(k.col.id)
 			}
-			box.Children(func() {
-				a.columnView(c, col)
-				if i == 0 || width <= 0 {
+			kb := ui.Column(key).Basis(0).Grow(k.share()).MinWidth(0).MinHeight(0)
+			if shown > 0 {
+				if g.down {
+					kb.BorderWidth(1, 0, 0, 0).BorderColor(p.border)
+				} else {
+					kb.BorderWidth(0, 0, 0, 1).BorderColor(p.border)
+				}
+			}
+			shown++
+			kb.Children(func() {
+				if k.col != nil {
+					a.columnView(c, k.col)
+				} else {
+					a.tileView(c, k, c.Key("tile"))
+				}
+				if i == 0 || size <= 0 {
 					return
 				}
-				prev := cols[i-1]
-				a.splitter(c, edgeLeft, func(d float32) {
-					least := minColumnW / width * total
-					by := d / width * total
-					if lo, hi := least-prev.weight, col.weight-least; lo <= hi {
+				prev := kids[i-1]
+				at := edgeLeft
+				if g.down {
+					at = edgeTop
+				}
+				a.splitter(c, at, func(d float32) {
+					least := least / size * total
+					by := d / size * total
+					if lo, hi := least-prev.share(), k.share()-least; lo <= hi {
 						by = clamp(by, lo, hi)
-						prev.weight, col.weight = prev.weight+by, col.weight-by
+						prev.setShare(prev.share() + by)
+						k.setShare(k.share() - by)
 						a.rememberTabs()
 					}
 				})
@@ -578,7 +640,12 @@ func (a *app) columnView(c *ui.Context, col *column) {
 		if col.locked {
 			a.tabStrip(c, col)
 		}
-		body := ui.Column(c).Bind(&col.body).Grow(1).MinHeight(0)
+		// It takes the keyboard, as a new empty column does, for what
+		// opens next to go there.
+		body := ui.Column(c).Bind(&col.body).Grow(1).MinHeight(0).Label(locales.EmptyColumn())
+		if col.holds != holdNone {
+			body.Focusable().FocusRing(false)
+		}
 		over := a.takeFiles(body, col)
 		body.Children(func() {
 			if col.locked {
@@ -591,7 +658,7 @@ func (a *app) columnView(c *ui.Context, col *column) {
 					})
 				})
 			} else {
-				a.welcome(c)
+				a.welcome(c, &col.welcome)
 			}
 			a.dropZones(c, col, over)
 		})
@@ -599,7 +666,8 @@ func (a *app) columnView(c *ui.Context, col *column) {
 	}
 	a.tabStrip(c, col)
 	shown := col.tab()
-	if shown != nil && shown.term == nil && shown.tool == nil {
+	// A pull request's tab names it in its header.
+	if shown != nil && shown.term == nil && shown.tool == nil && shown.issue == nil && !shown.isPR() {
 		a.breadcrumbs(c, col, shown)
 	}
 	for _, t := range col.tabs {
@@ -611,7 +679,11 @@ func (a *app) columnView(c *ui.Context, col *column) {
 	over := a.takeFiles(body, col)
 	body.Children(func() {
 		if shown != nil {
-			ui.Column(c.Key(shown.id)).Absolute().Top(0).Left(0).Right(0).Bottom(0).Children(func() {
+			page := ui.Column(c.Key(shown.id)).Absolute().Top(0).Left(0).Right(0).Bottom(0)
+			if ed := shown.ed; ed != nil {
+				a.modeFade(c, page, ed)
+			}
+			page.Children(func() {
 				switch {
 				case shown.term != nil:
 					a.terminalView(c, shown.term)
@@ -619,7 +691,8 @@ func (a *app) columnView(c *ui.Context, col *column) {
 					a.viewerView(c, shown.view, shown.name())
 				case shown.diff != nil:
 					a.diffViewUI(c, shown.diff)
-					if col == a.findCol {
+					// A pull request's other pages have no diff to find in.
+					if col == a.findCol && (!shown.isPR() || shown.diff.commit.pr.page == prChanges) {
 						a.diffFindView(c, shown.diff)
 					} else {
 						shown.diff.find.on = false
@@ -628,6 +701,8 @@ func (a *app) columnView(c *ui.Context, col *column) {
 					a.mergeViewUI(c, shown.merge)
 				case shown.tool != nil:
 					a.toolViewUI(c, shown.tool)
+				case shown.issue != nil:
+					a.issueViewUI(c, shown.issue)
 				case shown.ed.unread():
 					a.hideEditor(shown.ed)
 					a.loadingView(c, shown.ed)
@@ -642,6 +717,9 @@ func (a *app) columnView(c *ui.Context, col *column) {
 					if col == a.findCol && v.markdown != nil {
 						a.previewFindView(c, v)
 					}
+				case shown.ed.longLine > 0:
+					a.hideEditor(shown.ed)
+					a.longLineView(c, shown.ed)
 				default:
 					if a.editorReviewView(c, shown.ed) {
 						break
@@ -661,6 +739,7 @@ func (a *app) columnView(c *ui.Context, col *column) {
 						a.findView(c, shown.ed)
 					}
 					a.vimLineView(c, shown.ed)
+					a.wikiSuggestView(c, shown.ed)
 				}
 			})
 		}
@@ -717,20 +796,27 @@ func (a *app) hideEditor(d *editor) {
 }
 
 // dragItem is what is dragged to a column: one of its tabs, or of
-// another's, a terminal of the panel, or a file of the sidebar.
+// another's, a terminal of the panel, a file of the sidebar, or issues and
+// pull requests of the GitHub view. tree is set for a file of the
+// explorer, which moves to the folder of a row it is dropped on.
 type dragItem struct {
 	tab  *colTab
 	term *session
 	file *fileDrag
+	link *linkDrag
+	tree *treeDrag
 }
 
 // owns reports whether what was dragged is this window's to take: a tab or
 // a terminal dragged from another window stays there, as its view binds
-// controls of that window, or a file, which opens in any.
+// controls of that window, as do issues and pull requests, of its
+// repository, or a file, which opens in any.
 func (a *app) owns(it dragItem) bool {
 	switch {
 	case it.file != nil:
 		return true
+	case it.link != nil:
+		return it.link.from == a
 	case it.term != nil:
 		return slices.Contains(a.terms, it.term)
 	case it.tab != nil:
@@ -756,6 +842,8 @@ func (a *app) dropInColumn(it dragItem, col *column, at int) {
 	switch {
 	case it.file != nil:
 		a.dropFile(it.file, col, at)
+	case it.link != nil:
+		a.dropLinks(it.link, col, at)
 	case it.term != nil:
 		a.terminalToColumn(it.term, col, at)
 	case it.tab != nil:
@@ -783,6 +871,10 @@ func (a *app) dropBeside(it dragItem, col *column, after bool) {
 	}
 	if it.file != nil {
 		a.dropFileBeside(it.file, col, after)
+		return
+	}
+	if it.link != nil {
+		a.dropLinksBeside(it.link, col, after)
 		return
 	}
 	if from, _ := a.locate(it.tab); from == col && len(col.tabs) == 1 {
@@ -842,6 +934,11 @@ func (a *app) dropZones(c *ui.Context, col *column, over bool) {
 			a.dropFileOnColumn(it.file, col)
 			return
 		}
+		if it.link != nil && a.owns(it) {
+			// Into the terminal shown, or after the tab shown.
+			a.dropLinksOnColumn(it.link, col)
+			return
+		}
 		a.dropInColumn(it, col, len(col.tabs))
 	},
 		func(paths []string) { a.dropOnColumn(paths, col) })
@@ -892,6 +989,15 @@ func (a *app) breadcrumbs(c *ui.Context, col *column, t *colTab) {
 		scope = d.scopesOf(snap, snap.LineAt(min(d.sel[1], snap.Len())))
 		scope = scope[max(0, len(scope)-2):]
 	}
+	// In Markdown, the headings the reader is in.
+	var heads *headingOutline
+	var chain []int
+	if t.diff == nil {
+		heads, chain = a.headingCrumbs(d)
+	}
+	if k := &a.crumbs; k.open && k.heads && k.tab == t && k.at >= len(chain) {
+		a.closeCrumbs()
+	}
 	ui.Row(c).Height(crumbsH).Padding(0, 14).Gap(4).AlignItems(ui.Center).Background(p.editor).Clip().Children(func() {
 		for i, part := range parts {
 			last := i == len(parts)-1
@@ -941,6 +1047,7 @@ func (a *app) breadcrumbs(c *ui.Context, col *column, t *colTab) {
 				ui.Icon(c, iconChevronRight).FontSize(11).TextColor(p.faint)
 			}
 		}
+		a.headingCrumbsView(c, col, t, heads, chain)
 		for i, line := range scope {
 			label := scopeLabel(snap, line)
 			b := ui.ButtonBase(c.Key(fmt.Sprintf("scope:%d", i))).Height(crumbsH-6).Padding(0, 5).Radius(4).
@@ -970,7 +1077,12 @@ func (a *app) breadcrumbs(c *ui.Context, col *column, t *colTab) {
 					b.Menu(a.reviewMenu)
 				}
 			}
-			if canPreview(d.document) {
+			switch {
+			case isMarkdown(d.document):
+				a.markdownModeButtons(c, t, d)
+			case isJSONL(d.document):
+				a.jsonlModeButtons(c, t, d)
+			case canPreview(d.document):
 				a.previewButton(c, t, d)
 			}
 		}
@@ -1007,6 +1119,52 @@ func (a *app) previewButton(c *ui.Context, t *colTab, d *editor) {
 	}
 }
 
+// markdownModeButtons choose how a Markdown document shows: its source,
+// Live Preview or the Reading view, the one it shows marked.
+func (a *app) markdownModeButtons(c *ui.Context, t *colTab, d *editor) {
+	p := a.pal
+	mode := markdownMode(d)
+	modes := []struct {
+		mode, label, cmd string
+		icon             *ui.SVG
+	}{
+		{"", locales.MarkdownModeSource(), "view.toggleLivePreview", iconFileCode},
+		{"live", locales.MarkdownModeLive(), "view.toggleLivePreview", iconPencil},
+		{"reading", locales.MarkdownModeReading(), "view.togglePreview", iconFileText},
+	}
+	ui.Row(c.Key("markdown-modes")).Height(crumbsH - 4).Padding(1).Gap(1).Radius(5).Background(p.hover.Alpha(0.5)).
+		AlignItems(ui.Center).Shrink(0).Label(locales.MarkdownModes()).Children(func() {
+		for _, m := range modes {
+			label := a.withKey(m.label, m.cmd)
+			on := m.mode == mode
+			b := ui.ButtonBase(c.Key("mode:"+m.mode)).Height(crumbsH-6).Padding(0, 6).Radius(4).
+				AlignItems(ui.Center).Label(label).Tooltip(label).Selected(on)
+			col := p.muted
+			switch {
+			case on:
+				// The mode shown is marked by color, not by weight, so the
+				// buttons hold still.
+				b.Background(p.editor)
+				col = p.text
+			case b.Hovered():
+				b.Background(p.hover)
+			}
+			b.Transition(hoverFade)
+			pressPose(b)
+			b.Children(func() { ui.Icon(c, m.icon).FontSize(13).TextColor(col) })
+			if b.Clicked() && !on {
+				mode := m.mode
+				a.post(func() {
+					if col, i := a.locate(t); col != nil {
+						a.activate(col, i, true)
+					}
+					a.setMarkdownMode(mode)
+				})
+			}
+		}
+	})
+}
+
 // statusVisibility is which of the parts of the status bar that can go
 // show.
 type statusVisibility struct {
@@ -1028,7 +1186,7 @@ type statusVisibility struct {
 // parts stay as the caret moves.
 func (a *app) statusFit(c *ui.Context, width float32) statusVisibility {
 	measure := func(s string, icon bool) float32 {
-		w, _ := c.MeasureText(0, ui.Span{Text: s, Size: 11.5})
+		w, _ := c.MeasureText(0, ui.Span{Text: s, Size: 11.5, Features: "tnum"})
 		w += 2*6 + 2 // the item's padding, and the gap after it
 		if icon {
 			w += 12 + 5
@@ -1052,7 +1210,7 @@ func (a *app) statusFit(c *ui.Context, width float32) statusVisibility {
 		used += measure(busy, true)
 	}
 	if a.conn != nil {
-		used += measure("SSH: "+a.conn.Host, true) + 2
+		used += measure(remoteTargetLabel(a.conn), true) + 2
 		if l := portsLabel(a.conn.Forwards()); l != "" {
 			used += measure(l, true)
 		}
@@ -1112,7 +1270,7 @@ func (a *app) statusFit(c *ui.Context, width float32) statusVisibility {
 		if d.crlf {
 			eol = "CRLF"
 		}
-		add(&v.encoding, measure("UTF-8", false))
+		add(&v.encoding, measure(d.encoding.label(), false))
 		folder()
 		add(&v.lines, measure(locales.LinesCount(n), false))
 		add(&v.eol, measure(eol, false))
@@ -1130,6 +1288,8 @@ func (a *app) statusFit(c *ui.Context, width float32) statusVisibility {
 		number := measure("#"+strconv.Itoa(pr.Number), false)
 		used += number
 		add(&v.prDetail, measure(prBadgeLabel(pr), false)-number+4*4)
+	} else if _, ok := a.repository().headChecks(); ok {
+		used += 2*6 + 11 // the icon of HEAD's checks
 	}
 	if repo := a.repository(); repo.gitSyncVisible() {
 		used += 2*6 + 12 + 2 // the sync icon stays beside the branch
@@ -1205,7 +1365,7 @@ func (a *app) vimBadge(c *ui.Context, v *vimState, text func(string) ui.Element)
 		if a.vimRec != 0 {
 			// A register recording, as vim says: a red dot, and its name.
 			ui.Row(c.Key("status:vim-rec")).Gap(5).AlignItems(ui.Center).
-				Transition(ui.ElementTransition{Duration: 160 * time.Millisecond, Enter: &ui.Motion{Scale: 0.8}, Exit: &ui.Motion{Scale: 0.8}}).
+				Transition(ui.ElementTransition{Duration: motionShow, Enter: &ui.Motion{Scale: 0.8}, Exit: &ui.Motion{Scale: 0.8}}).
 				Children(func() {
 					ui.Box(c).Width(6).Height(6).Radius(3).Background(p.dangerFg)
 					ui.Text(c, locales.VimRecording(string(a.vimRec))).FontSize(11.5).TextColor(p.dangerFg).SingleLine()
@@ -1222,7 +1382,7 @@ func (a *app) vimBadge(c *ui.Context, v *vimState, text func(string) ui.Element)
 				col = p.dangerFg
 			}
 			ui.Text(c.Key("status:vim-msg"), m.text).FontSize(11.5).TextColor(col).SingleLine().MaxWidth(420).
-				Transition(ui.ElementTransition{Duration: 180 * time.Millisecond, Colors: true, Enter: &ui.Motion{}, Exit: &ui.Motion{}}).
+				Transition(ui.ElementTransition{Duration: motionMove, Colors: true, Enter: &ui.Motion{}, Exit: &ui.Motion{}}).
 				ContentTransition(ui.ContentTransition{})
 		}
 	})
@@ -1237,8 +1397,10 @@ func (a *app) statusBar(c *ui.Context) {
 		BorderWidth(1, 0, 0, 0).BorderColor(p.hairline())
 	a.grained(bar)
 	bar.Children(func() {
+		// Its digits are of one width, so that the caret's line and column,
+		// changing with each key, do not shift the items after them.
 		text := func(s string) ui.Element {
-			return ui.Text(c, s).FontSize(11.5).TextColor(p.statusFg).SingleLine()
+			return ui.Text(c, s).FontSize(11.5).FontFeatures("tnum").TextColor(p.statusFg).SingleLine()
 		}
 		// item is a part of the bar, a button when it does something.
 		item := func(key, label, tip string, icon *ui.SVG, fn func()) {
@@ -1314,6 +1476,7 @@ func (a *app) statusBar(c *ui.Context) {
 				repo.openBranchPicker()
 			}
 			repo.prBadge(c, true, !visible.prDetail)
+			repo.headChecksBadge(c)
 		}
 		repo.gitSyncStatus(c, visible.gitSyncCounts)
 		a.transferStatus(c, text)
@@ -1395,7 +1558,9 @@ func (a *app) statusBar(c *ui.Context) {
 		line := snap.LineAt(caret)
 		s, _ := snap.LineRange(line)
 		pos := locales.StatusPos(line+1, columns(snap.Slice(s, caret))+1)
-		if n := abs(d.sel[1] - d.sel[0]); n > 0 {
+		if len(d.cursors) > 0 {
+			pos += locales.StatusSelections(len(d.cursors) + 1)
+		} else if n := abs(d.sel[1] - d.sel[0]); n > 0 {
 			pos += locales.StatusSelected(n)
 		}
 		if a.prefs().Vim {
@@ -1416,18 +1581,18 @@ func (a *app) statusBar(c *ui.Context) {
 			}
 			m.Separator()
 			if m.Item(locales.ConvertToTabs()).Chosen() {
-				a.editActive(func(d *editor) { reindent(d, indentStyle{tabs: true, size: tabWidth}) })()
+				a.editActive(func(d *editor) { reindent(d, indentStyle{tabs: true, size: tabWidth()}) })()
 			}
 			if m.Item(locales.ConvertToSpaces()).Chosen() {
 				size := d.indent.size
 				if d.indent.tabs {
-					size = tabWidth
+					size = tabWidth()
 				}
 				a.editActive(func(d *editor) { reindent(d, indentStyle{size: size}) })()
 			}
 		})
 		if visible.encoding {
-			item("enc", "UTF-8", "", nil, nil)
+			item("enc", d.encoding.label(), "", nil, nil)
 		}
 		eol := "LF"
 		if d.crlf {
@@ -1481,11 +1646,12 @@ var logo = sync.OnceValue(func() *ui.Bitmap {
 
 // welcome shows while no file is open: what to start with, and the
 // folders opened last.
-func (a *app) welcome(c *ui.Context) {
+// scroll is where it scrolls, the empty column's own.
+func (a *app) welcome(c *ui.Context, scroll *ui.Handle) {
 	p := a.pal
 	// Centered in the view, and scrolled when the window is too short.
-	view := a.welcomeView.Bounds(c)
-	page := ui.Scroll(c.Key("welcome")).Bind(&a.welcomeView).Fill().Background(p.editor)
+	view := scroll.Bounds(c)
+	page := ui.Scroll(c.Key("welcome")).Bind(scroll).Fill().Background(p.editor)
 	if a.settings.Theme == themeMatrix {
 		still := a.blurred || c.Preferences().ReduceMotion
 		page.Draw(func(pt *ui.Painter, r ui.Rect) { a.drawRain(pt, r, still) })
@@ -1523,6 +1689,9 @@ func (a *app) welcome(c *ui.Context) {
 						a.welcomeAction(c, iconFolderOpen, locales.CmdFileOpenFolder(), a.keyHint("file.openFolder"), a.chooseFolder)
 						if remoteSupported {
 							a.welcomeAction(c, iconServer, locales.CmdRemoteConnect(), a.keyHint("remote.connect"), a.openRemotePicker)
+						}
+						if wslAvailable() {
+							a.welcomeAction(c, iconTerminal, locales.CmdWSLOpenFolder(), "", a.openWSLPicker)
 						}
 					} else {
 						a.welcomeAction(c, iconFileSearch, locales.CmdGoQuickOpen(), a.keyHint("go.quickOpen"), func() { a.openQuick("") })

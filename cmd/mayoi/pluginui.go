@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alecthomas/chroma/v2"
 	"github.com/egoist/mygo/ui"
 
+	"mayoi/internal/bg"
 	"mayoi/internal/plugin"
 	"mayoi/locales"
 )
@@ -30,13 +32,13 @@ func (h *pluginHost) callHandler(p *plugin.Plugin, ref *handlerRef, value any) {
 	if ref == nil || ref.H == "" || p == nil {
 		return
 	}
-	go func() {
+	bg.Go(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), plugin.BusyLimit)
 		defer cancel()
 		if _, err := p.Request(ctx, "handler", map[string]any{"id": ref.H, "value": value}); err != nil {
 			p.Request(context.Background(), "event", map[string]any{"name": "", "data": nil})
 		}
-	}()
+	})
 }
 
 // pluginStatus is an item of the status bar a plugin filled.
@@ -117,7 +119,7 @@ func (h *pluginHost) sortedStatus() []pluginStatus {
 // statusMotion is how a plugin's item of the status bar follows its
 // text: it widens and narrows to it, rather than pushing its neighbours
 // along at once, and fades in and out as it comes and goes.
-var statusMotion = ui.ElementTransition{Duration: 160 * time.Millisecond, Size: true, Colors: true,
+var statusMotion = ui.ElementTransition{Duration: motionShow, Size: true, Colors: true,
 	Enter: &ui.Motion{}, Exit: &ui.Motion{}}
 
 // pluginStatusItems puts the plugins' items of one side in the status bar,
@@ -527,12 +529,12 @@ func (a *app) format(d *editor, limit time.Duration, quiet bool, then func()) {
 	}
 	snap := d.buf.Snapshot()
 	version := snap.Version()
-	doc := docJSON(d.document)
+	doc := a.docJSON(d.document)
 	opts := map[string]any{"tabSize": max(d.indent.size, 1), "insertSpaces": !d.indent.tabs}
 	if d.indent.tabs {
-		opts["tabSize"] = tabWidth
+		opts["tabSize"] = tabWidth()
 	}
-	go func() {
+	bg.Go(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), limit)
 		defer cancel()
 		res, err := p.Request(ctx, "format", map[string]any{"id": id, "document": doc, "options": opts})
@@ -553,7 +555,7 @@ func (a *app) format(d *editor, limit time.Duration, quiet bool, then func()) {
 			}
 			a.applyFormat(d, snap, res)
 		})
-	}()
+	})
 }
 
 // applyFormat makes what a formatter returned: the whole new text, or
@@ -640,39 +642,38 @@ func (a *app) formatsOnSave(d *document) bool {
 
 // pluginLanguageOf is the language a plugin declares for a file, by its
 // name or extension, nil for none.
-func pluginLanguageOf(path string) *plugin.LanguageContrib {
+func pluginLanguageOf(path string) (*plugin.Plugin, *plugin.LanguageContrib) {
 	if plugins == nil || path == "" {
-		return nil
+		return nil, nil
 	}
 	base := filepath.Base(path)
 	ext := strings.ToLower(filepath.Ext(base))
 	for _, p := range plugins.enabled() {
 		for i, l := range p.Contributes.Languages {
 			if slices.Contains(l.Filenames, base) {
-				return &p.Contributes.Languages[i]
+				return p, &p.Contributes.Languages[i]
 			}
 			for _, e := range l.Extensions {
 				if strings.ToLower(e) == ext {
-					return &p.Contributes.Languages[i]
+					return p, &p.Contributes.Languages[i]
 				}
 			}
 		}
 	}
-	return nil
+	return nil, nil
 }
 
-// pluginLexer is the lexer a plugin's language names for a file, "" for
-// none: highlight.LexerName.
-func pluginLexer(path string) string {
-	if l := pluginLanguageOf(path); l != nil {
-		return l.Lexer
+// pluginLexer resolves the language contribution of a source file.
+func pluginLexer(path string) chroma.Lexer {
+	if owner, l := pluginLanguageOf(path); l != nil {
+		return owner.Lexer(l.ID)
 	}
-	return ""
+	return nil
 }
 
 // pluginComment is the line comment a plugin's language has, "" for none.
 func pluginComment(path string) string {
-	if l := pluginLanguageOf(path); l != nil {
+	if _, l := pluginLanguageOf(path); l != nil {
 		return l.Comment
 	}
 	return ""
@@ -681,7 +682,7 @@ func pluginComment(path string) string {
 // pluginLanguage is the language a plugin declares for a file, by its
 // name or extension, "" for none.
 func pluginLanguage(path string) string {
-	if l := pluginLanguageOf(path); l != nil {
+	if _, l := pluginLanguageOf(path); l != nil {
 		return l.ID
 	}
 	return ""

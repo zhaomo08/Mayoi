@@ -22,8 +22,8 @@ import (
 // derives from it.
 type palette struct {
 	dark bool
-	// mono draws the whole window in the code's font, and the icons of
-	// files in the palette's own colors rather than their languages'.
+	// mono draws the icons of files in the palette's own colors rather
+	// than their languages', and every alert in the accent.
 	mono bool
 
 	editor    ui.Color // the editor and the terminal
@@ -330,8 +330,7 @@ func matrixPalette() *palette {
 }
 
 // claudeDarkPalette is Claude in a dark window, as Claude Code draws
-// itself in a terminal: the whole window in the code's font, warm
-// near-black, Claude's orange for the accent and periwinkle, the CLI's
+// itself in a terminal: warm near-black, Claude's orange for the accent and periwinkle, the CLI's
 // color for a suggestion, for what is chosen. Errors and what is removed
 // take Claude Code's rose, apart from the orange, so that neither reads
 // as a mark.
@@ -1292,6 +1291,84 @@ func bloodMoonPalette() *palette {
 	return p
 }
 
+// gtaVIPalette is GTA VI, always dark: the game's heads-up display.
+// Graphite chrome around a slate editor, with white type, mission gold
+// for the accent and the buttons, with navy labels on them, the health
+// bar's green for what is added and the armor's blue for what changed and
+// for the selection. Danger is the police lights' red.
+func gtaVIPalette() *palette {
+	p := &palette{
+		dark:      true,
+		editor:    ui.Hex("#111419"),
+		chrome:    ui.Hex("#0a0c10"),
+		panel:     ui.Hex("#0d1014"),
+		border:    ui.Hex("#232832"),
+		hover:     ui.RGBA(220, 230, 245, 0.05),
+		active:    ui.RGBA(255, 173, 54, 0.14),
+		text:      ui.Hex("#eaeef3"),
+		muted:     ui.Hex("#98a2af"),
+		faint:     ui.Hex("#626c7a"),
+		accent:    ui.Hex("#ffad36"),
+		accentDim: ui.RGBA(255, 173, 54, 0.5),
+		line:      ui.RGBA(220, 230, 245, 0.04),
+		selection: ui.RGBA(74, 144, 226, 0.32),
+		gutter:    ui.Hex("#545e6c"),
+		gutterNow: ui.Hex("#ffffff"),
+		status:    ui.Hex("#0a0c10"),
+		statusFg:  ui.Hex("#eaeef3"),
+		modified:  ui.Hex("#f2e28a"),
+		danger:    ui.Hex("#ff4b4b"),
+		match:     ui.RGBA(255, 173, 54, 0.20),
+		matchNow:  ui.RGBA(255, 173, 54, 0.40),
+		matchRing: ui.RGBA(255, 173, 54, 0.9),
+		guide:     ui.RGBA(220, 230, 245, 0.07),
+		guideNow:  ui.RGBA(255, 255, 255, 0.26),
+		bracket:   ui.RGBA(255, 255, 255, 0.34),
+		word:      ui.RGBA(220, 230, 245, 0.09),
+		shadow:    ui.RGBA(0, 0, 0, 0.5),
+		added:     ui.Hex("#6fd46f"),
+		changed:   ui.Hex("#4a90e2"),
+		removed:   ui.Hex("#ff4b4b"),
+		// Navy on the gold, and white on a deeper red than danger's.
+		fill:           ui.Hex("#ffad36"),
+		fillText:       ui.Hex("#0c0d1b"),
+		dangerFill:     ui.Hex("#d42c36"),
+		dangerText:     ui.Hex("#ffffff"),
+		surface:        ui.Hex("#1a1e25"),
+		surfaceHover:   ui.Hex("#20252d"),
+		surfacePressed: ui.Hex("#272c35"),
+		scrollbar:      ui.RGBA(220, 230, 245, 0.16),
+		inverse:        ui.Hex("#000000"),
+		inverseText:    ui.Hex("#ffffff"),
+		ansi: [16]ui.Color{
+			ui.Hex("#232832"), ui.Hex("#ff4b4b"), ui.Hex("#6fd46f"), ui.Hex("#ffad36"),
+			ui.Hex("#4a90e2"), ui.Hex("#c08cff"), ui.Hex("#5fd0d8"), ui.Hex("#eaeef3"),
+			ui.Hex("#545e6c"), ui.Hex("#ff7474"), ui.Hex("#94e894"), ui.Hex("#ffc970"),
+			ui.Hex("#7ab0f0"), ui.Hex("#d4adff"), ui.Hex("#8ae4ea"), ui.Hex("#ffffff"),
+		},
+	}
+	p.fillHover, p.fillPressed = p.fill.Mix(white, 0.15), p.fill.Mix(black, 0.15)
+	s := &p.syntax
+	s[highlight.Plain] = p.text
+	s[highlight.Keyword] = ui.Hex("#ffad36")
+	s[highlight.Type] = ui.Hex("#6fb8ff")
+	s[highlight.Function] = ui.Hex("#f2e28a")
+	s[highlight.String] = ui.Hex("#8fd88f")
+	s[highlight.Number] = ui.Hex("#ff8a6a")
+	s[highlight.Comment] = ui.Hex("#5c6676")
+	s[highlight.Operator] = ui.Hex("#bcc4cf")
+	s[highlight.Punctuation] = ui.Hex("#808b99")
+	s[highlight.Constant] = ui.Hex("#ff8a6a")
+	s[highlight.Builtin] = ui.Hex("#c08cff")
+	s[highlight.Tag] = ui.Hex("#ffad36")
+	s[highlight.Attribute] = ui.Hex("#6fb8ff")
+	s[highlight.Variable] = ui.Hex("#eaeef3")
+	s[highlight.Heading] = ui.Hex("#ffad36")
+	s[highlight.Deleted] = p.removed
+	s[highlight.Inserted] = p.added
+	return p
+}
+
 var (
 	black, white = ui.Hex("#000000"), ui.Hex("#ffffff")
 
@@ -1316,11 +1393,13 @@ var (
 	pumpkinPal    = pumpkinPalette().derive()
 	witchsBrewPal = witchsBrewPalette().derive()
 	bloodMoonPal  = bloodMoonPalette().derive()
+
+	gtaVIPal = gtaVIPalette().derive()
 )
 
 // The Themes of the settings beside Mayoi's own, "": The Matrix, Purple
-// Gold, and the Halloween themes Jack-o'-Lantern, Witch's Brew and Blood
-// Moon, which are always dark, and Claude, Qoder, Grok Bot and Cursor,
+// Gold, the Halloween themes Jack-o'-Lantern, Witch's Brew and Blood
+// Moon, and GTA VI, which are always dark, and Claude, Qoder, Grok Bot and Cursor,
 // light or dark as the Appearance is.
 const (
 	themeMatrix     = "matrix"
@@ -1332,6 +1411,7 @@ const (
 	themePumpkin    = "pumpkin"
 	themeWitchsBrew = "witchsbrew"
 	themeBloodMoon  = "bloodmoon"
+	themeGTAVI      = "gtavi"
 )
 
 // alwaysDark is whether a theme is dark whatever the Appearance is.
@@ -1340,7 +1420,7 @@ func alwaysDark(theme string) bool {
 		return true
 	}
 	switch theme {
-	case themeMatrix, themePurpleGold, themePumpkin, themeWitchsBrew, themeBloodMoon:
+	case themeMatrix, themePurpleGold, themePumpkin, themeWitchsBrew, themeBloodMoon, themeGTAVI:
 		return true
 	}
 	return false
@@ -1379,6 +1459,8 @@ func paletteFor(theme string, dark bool) *palette {
 		return witchsBrewPal
 	case theme == themeBloodMoon:
 		return bloodMoonPal
+	case theme == themeGTAVI:
+		return gtaVIPal
 	case dark:
 		return darkPal
 	}
@@ -1544,16 +1626,13 @@ func applyTheme(c *ui.Context, prefs *settings.Prefs, fade *paletteFade) *palett
 	t.Surface, t.SurfaceHover, t.SurfacePressed = p.surface, p.surfaceHover, p.surfacePressed
 	t.Scrollbar = p.scrollbar
 	t.Inverse, t.InverseText = p.inverse, p.inverseText
-	if p.mono {
-		t.Font = prefs.FontFamily
-	}
 	c.SetTheme(&t)
 	return p
 }
 
 // paletteFadeFor is how long the window takes from one palette to the
 // next.
-const paletteFadeFor = 220 * time.Millisecond
+const paletteFadeFor = motionMove
 
 // paletteFade takes the window from one palette to another: each of its
 // colors fades to the new one's, rather than the whole window flashing.
@@ -1626,170 +1705,6 @@ func mixPalettes(x, y *palette, k float32) *palette {
 
 var colorType = reflect.TypeFor[ui.Color]()
 
-// popIn is how a box over an editor comes in, as find's: it fades in,
-// from a little above where it settles, and goes back up as it fades out.
-// Only its colors follow it after.
-var popIn = ui.ElementTransition{Duration: 130 * time.Millisecond, Colors: true, Enter: &ui.Motion{Y: -6}, Exit: &ui.Motion{Y: -4}}
-
-// hoverFade is how a button's background follows the pointer: it fades
-// in and out rather than blinks.
-var hoverFade = ui.ElementTransition{Colors: true, Duration: 110 * time.Millisecond}
-
-// revealFade is hoverFade for a small button that shows only while the
-// pointer is over its row, as the actions of a group of changes: it fades
-// in and out too, rather than pops.
-var revealFade = ui.ElementTransition{Colors: true, Duration: 110 * time.Millisecond, Enter: &ui.Motion{}, Exit: &ui.Motion{}}
-
-// tabMotion is how a tab moves along its strip: it grows in as it opens,
-// folds away as it closes, and the others slide to their places.
-var tabMotion = ui.ElementTransition{
-	Duration: 140 * time.Millisecond,
-	Enter:    &ui.Motion{Collapse: true},
-	Exit:     &ui.Motion{Collapse: true},
-}
-
-// dotPop is how a small mark comes and goes, as the dot of a tab's
-// unsaved changes: it grows from half its size and shrinks back.
-var dotPop = ui.ElementTransition{
-	Animation: &ui.Snappy,
-	Enter:     &ui.Motion{Scale: 0.5},
-	Exit:      &ui.Motion{Scale: 0.5},
-}
-
-// pickMark marks the row chosen in a list, first in the row's children.
-// It moves at once with the keys that move the choice.
-func (a *app) pickMark(c *ui.Context, on bool) {
-	if !on {
-		return
-	}
-	ui.Box(c.Key("pick-mark")).Absolute().Left(0).Right(0).Top(0).Bottom(0).Radius(6).Background(a.pal.active)
-}
-
-// riseIn brings a block of a page in as the page shows: it fades in from
-// a little below, after delay, so that blocks delayed more follow.
-func riseIn(e ui.Element, delay time.Duration) ui.Element {
-	k := e.Keyframes("rise", []ui.Keyframe{{Value: 0}, {At: 240 * time.Millisecond, Value: 1, Ease: ui.EaseOut}},
-		ui.KeyframeOptions{Delay: delay})
-	return e.Opacity(k).Translate(0, 8*(1-k))
-}
-
-// fadePage brings a page in as it is chosen, as a section of the
-// settings: it fades in, without moving.
-func fadePage(e ui.Element) ui.Element {
-	return e.Opacity(e.Keyframes("show", []ui.Keyframe{{Value: 0}, {At: 150 * time.Millisecond, Value: 1, Ease: ui.EaseOut}}))
-}
-
-// showFor is how long a pane or a box that floats takes to come in as it
-// shows: long enough to see where it came from, short enough never to
-// wait for.
-const showFor = 140 * time.Millisecond
-
-// fadeIn brings a pane in as it shows, as the sidebar or the panel does
-// once toggled on: it fades in. Its motion starts the first time it is
-// built, so it plays again each time the pane comes back.
-func fadeIn(e ui.Element) ui.Element {
-	return e.Opacity(e.Keyframes("show", []ui.Keyframe{{Value: 0}, {At: showFor, Value: 1, Ease: ui.EaseOut}}))
-}
-
-// dropIn brings a box that floats from what opened it in, as a popover
-// or a tip: it fades in, from dy above where it settles (below, for a
-// negative dy), as popIn does for a box in a parent that was there.
-func dropIn(e ui.Element, dy float32) ui.Element {
-	k := e.Keyframes("show", []ui.Keyframe{{Value: 0}, {At: showFor, Value: 1, Ease: ui.EaseOut}})
-	return e.Opacity(k).Translate(0, -dy*(1-k))
-}
-
-// appearing follows the rows of a list by their keys, so that a row new
-// to it comes in rather than pops, as those of a group just opened: the
-// rows the list had when last noted, and when each that came since did.
-type appearing struct {
-	had map[string]bool
-	at  map[string]time.Time
-}
-
-// note takes the rows of the list at now, keys giving each one's: one it
-// did not have comes. A first note, one after none, or a fresh one, as
-// for the list showing other rows, takes them as they are.
-func (ap *appearing) note(n int, key func(int) string, now time.Time, fresh bool) {
-	first := len(ap.had) == 0 || fresh
-	if ap.had == nil {
-		ap.had, ap.at = map[string]bool{}, map[string]time.Time{}
-	}
-	for k, at := range ap.at {
-		if first || now.Sub(at) >= showFor {
-			delete(ap.at, k)
-		}
-	}
-	if !first {
-		for i := range n {
-			if k := key(i); !ap.had[k] {
-				ap.at[k] = now
-			}
-		}
-	}
-	clear(ap.had)
-	for i := range n {
-		ap.had[key(i)] = true
-	}
-}
-
-// shown returns how far in the row of key is at now, from 0, as it
-// comes, to 1.
-func (ap *appearing) shown(key string, now time.Time) float32 {
-	at, ok := ap.at[key]
-	if !ok {
-		return 1
-	}
-	return ui.EaseOut(min(float32(now.Sub(at))/float32(showFor), 1))
-}
-
-// chevron is the arrow of what folds: it points to the side while
-// closed, and turns down as it opens.
-func chevron(c *ui.Context, open bool) ui.Element {
-	turn := float32(0)
-	if open {
-		turn = 90
-	}
-	return ui.Icon(c.Key("chevron"), iconChevronRight).AnimatePose(ui.Pose{Rotate: turn}, ui.Snappy)
-}
-
-// pressPose sinks a button a little as it is held down, as a key does.
-func pressPose(b ui.Element) {
-	pose := ui.Pose{}
-	if b.Pressed() {
-		pose.Scale = 0.96
-	}
-	b.AnimatePose(pose, ui.Snappy)
-}
-
-// shakeFor is how long a box shakes its head, as a password field of the
-// Mac does at a wrong password.
-const shakeFor = 360 * time.Millisecond
-
-// shake moves a box side to side for a moment from at, as it finds
-// nothing for the Return pressed in it, and settles where it was. A box
-// shaken long ago, or never, stays put; with less motion, it does too.
-func shake(c *ui.Context, e ui.Element, at time.Time) ui.Element {
-	since := c.Now().Sub(at)
-	if at.IsZero() || since < 0 || since >= shakeFor || c.Preferences().ReduceMotion {
-		return e
-	}
-	c.AnimationFrame()
-	t := float64(since) / float64(shakeFor)
-	return e.Translate(float32(7*(1-t)*math.Sin(t*6*math.Pi)), 0)
-}
-
-// popUp brings the badge of an empty view in as the view shows: it grows
-// from a little smaller to its size, and fades in.
-func popUp(e ui.Element) ui.Element {
-	k := e.Keyframes("pop", []ui.Keyframe{{Value: 0}, {At: 240 * time.Millisecond, Value: 1, Ease: ui.EaseOut}})
-	return e.Opacity(k).Scale(0.92+0.08*k, 0.92+0.08*k)
-}
-
-// fieldFocus is how a field's border follows the keyboard: the accent
-// fades in as the field takes it, and out as it leaves.
-var fieldFocus = ui.ElementTransition{Colors: true, Duration: 120 * time.Millisecond}
-
 // floating styles a box that floats over the window: a dialog, as quick
 // open's, a picker's or a prompt's, or a smaller box over an editor, as
 // find's. The shadow is lighter on a light window, where a dark one looks
@@ -1799,7 +1714,7 @@ var fieldFocus = ui.ElementTransition{Colors: true, Duration: 120 * time.Millise
 func (a *app) floating(c *ui.Context, box ui.Element, dialog bool) ui.Element {
 	p := a.pal
 	if dialog {
-		k := box.Keyframes("dialog-in", []ui.Keyframe{{Value: 0}, {At: showFor, Value: 1, Ease: ui.EaseOut}})
+		k := box.Keyframes("dialog-in", showIn(a.keyedOpen(c)))
 		s := 0.98 + 0.02*k
 		box.Opacity(k).TransformOrigin(0.5, 0).Scale(s, s)
 	}

@@ -72,13 +72,14 @@ var keyGroups = []struct {
 	prefixes []string
 }{
 	{locales.MenuFile, []string{"file.", "remote."}},
-	{locales.MenuEdit, []string{"edit."}},
+	{locales.MenuEdit, []string{"edit.", "markdown."}},
 	{locales.MenuSelection, []string{"sel."}},
 	{locales.MenuView, []string{"view.", "editor.", "image.", "mermaid."}},
 	{locales.MenuGo, []string{"go."}},
 	{locales.MenuGit, []string{"git.", "review."}},
 	{locales.MenuPlugins, []string{"plugins.", "script."}},
 	{locales.MenuAccount, []string{"account."}},
+	{locales.MenuHelp, []string{"help."}},
 }
 
 // pluginsKeyGroup is the group of the commands of plugins, in keyGroups.
@@ -179,6 +180,11 @@ func (k *keysPane) rows(a *app) []keyRow {
 			r.keys, r.source = keys, keyUser
 		} else if st, ok := parseAccel(defaultAccel(cmd)); ok {
 			r.keys, r.source = []keymap.Stroke{st}, keyDefault
+			if km.Removes(names...) {
+				r.keys, r.source = nil, keyRemoved
+			}
+		} else if keys := chordKeys(cmd.id); keys != nil {
+			r.keys, r.source = keys, keyDefault
 			if km.Removes(names...) {
 				r.keys, r.source = nil, keyRemoved
 			}
@@ -343,7 +349,7 @@ func (k *keysPane) filterChips(c *ui.Context, counts [keyFilters]int) {
 						if chip.FocusVisible() {
 							face.Shadow(0, 0, 0, 3, p.accent.Alpha(0.25))
 						}
-						face.Transition(ui.ElementTransition{Duration: 200 * time.Millisecond, Ease: ui.EaseInOut, Match: filterChip{}})
+						face.Transition(ui.ElementTransition{Duration: motionMove, Ease: ui.EaseInOut, Match: filterChip{}})
 					}
 					if f == keysConflicting {
 						ui.Icon(c, iconTriangleAlert).FontSize(11.5).TextColor(col).Shrink(0)
@@ -538,7 +544,7 @@ func (k *keysPane) row(c *ui.Context, r keyRow, chosen, focused bool) {
 			} else {
 				mark.Background(p.active).Border(1, ui.Color{})
 			}
-			mark.Transition(ui.ElementTransition{Duration: 120 * time.Millisecond, Colors: true, Match: keyMark{}})
+			mark.Transition(ui.ElementTransition{Duration: motionHover, Colors: true, Match: keyMark{}})
 		}
 		ui.Column(c).Gap(2).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 			ui.Text(c, r.cmd.label).FontSize(12.5).TextColor(p.text).SingleLine()
@@ -727,7 +733,7 @@ func (k *keysPane) recordView(c *ui.Context) {
 				}
 				ui.Row(c.Key("keys-record-keys")).Height(68).Radius(10).AlignItems(ui.Center).Justify(ui.Center).
 					Background(p.text.Alpha(0.04)).Border(1, edge.Alpha(0.7)).
-					Transition(ui.ElementTransition{Colors: true, Duration: 160 * time.Millisecond}).Children(func() {
+					Transition(ui.ElementTransition{Colors: true, Duration: motionShow}).Children(func() {
 					if len(k.strokes) == 0 {
 						ui.Text(c.Key("press"), locales.KeysPress()).FontSize(13).TextColor(p.faint).Transition(revealFade)
 						return

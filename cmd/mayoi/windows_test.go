@@ -3,6 +3,7 @@ package main
 import (
 	"mayoi/internal/settings"
 	"mayoi/locales"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -13,13 +14,30 @@ import (
 
 func TestSplitPaths(t *testing.T) {
 	root := workspaceFixture(t)
-	got := argPaths([]string{"-psn_0_1", ".", "main.go", "internal/", root, "gone.go", ""}, root)
+	fileURL := (&url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(root, "main.go"))}).String()
+	got := argPaths([]string{"-psn_0_1", ".", "main.go", "internal/", root, "gone.go", "", fileURL}, root)
 	folders, files := splitPaths(got)
 	if !slices.Equal(folders, []string{root, filepath.Join(root, "internal")}) {
 		t.Errorf("folders %v", folders)
 	}
 	if !slices.Equal(files, []string{filepath.Join(root, "main.go")}) {
 		t.Errorf("files %v", files)
+	}
+}
+
+// A second Mayoi started before the first is ready, with no settings
+// or windows yet, leaves its folders and files for launch.
+func TestSecondInstanceBeforeReady(t *testing.T) {
+	root := workspaceFixture(t)
+	m := &mayoi{}
+	m.secondInstance([]string{"main.go", "internal"}, root)
+	m.secondInstance(nil, root)
+	want := []string{filepath.Join(root, "main.go"), filepath.Join(root, "internal")}
+	if !slices.Equal(m.pending, want) {
+		t.Errorf("pending %v, want %v", m.pending, want)
+	}
+	if len(m.wins) > 0 {
+		t.Errorf("opened %d windows", len(m.wins))
 	}
 }
 
@@ -129,7 +147,13 @@ func TestWelcomeMoreRecent(t *testing.T) {
 // ⌃R shows the recent folders but the window's: ⏎ opens the one typed in
 // the window, ⌘⏎ in a window of its own.
 func TestOpenRecentPicker(t *testing.T) {
-	root, other, third := workspaceFixture(t), workspaceFixture(t), workspaceFixture(t)
+	root, third := workspaceFixture(t), workspaceFixture(t)
+	// A name of its own to type: a temporary folder's, as 002, can be in
+	// the random part of the others' paths too.
+	other := filepath.Join(t.TempDir(), "elsewhere")
+	if err := writeFixture(other); err != nil {
+		t.Fatal(err)
+	}
 	s := settings.Default()
 	s.Recent = []string{third, other}
 	h := &fakeHost{}

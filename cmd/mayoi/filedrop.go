@@ -15,32 +15,45 @@ import (
 // at a place of its tab strip, or in a column of their own beside one.
 // Folders open as `mayoi <dir>` opens them. On a terminal, the paths are
 // typed instead. Files dragged from the explorer, source control and the
-// search results go where those from the Finder go.
+// search results go where those from the Finder go. A file or a folder
+// of the explorer dropped on a row of it moves there (treeDrag).
 
 // fileDrag is a file dragged from the sidebar, and the match of it a
-// search result shows, which opens selected.
+// search result shows, which opens selected; more, when set, gives the
+// files dragged with it, of the rows chosen with its row, as the drag
+// starts and as it drops rather than each frame.
 type fileDrag struct {
 	path  string
 	match *searchMatch
+	more  func() []string
+}
+
+// paths are the files dragged, the first first.
+func (f *fileDrag) paths() []string {
+	paths := []string{f.path}
+	if f.more != nil {
+		paths = append(paths, f.more()...)
+	}
+	return paths
 }
 
 // dropFile opens a file dragged from the sidebar at place at of a column.
 func (a *app) dropFile(f *fileDrag, col *column, at int) {
-	a.dropFiles([]string{f.path}, col, at)
+	a.dropFiles(f.paths(), col, at)
 	a.showDropped(f)
 }
 
 // dropFileBeside opens a file dragged from the sidebar in a column of its
 // own beside col.
 func (a *app) dropFileBeside(f *fileDrag, col *column, after bool) {
-	a.dropFilesBeside([]string{f.path}, col, after)
+	a.dropFilesBeside(f.paths(), col, after)
 	a.showDropped(f)
 }
 
 // dropFileOnColumn opens a file dragged from the sidebar after the tab a
 // column shows, or types its path into the terminal it shows.
 func (a *app) dropFileOnColumn(f *fileDrag, col *column) {
-	a.dropOnColumn([]string{f.path}, col)
+	a.dropOnColumn(f.paths(), col)
 	a.showDropped(f)
 }
 
@@ -54,28 +67,68 @@ func (a *app) showDropped(f *fileDrag) {
 // dragFile makes a row of the sidebar drag its file to the columns. The
 // drag also carries the file out to other apps, as a copy.
 func (a *app) dragFile(row ui.Element, f *fileDrag) {
-	row.Drag(dragItem{file: f})
+	a.dragValue(row, dragItem{file: f}, f.paths)
+}
+
+// dragValue makes row drag value within Mayoi, and the files of paths out
+// to other apps, as a copy.
+func (a *app) dragValue(row ui.Element, value any, paths func() []string) {
+	row.Drag(value)
 	if a.host.nativeDrags() {
-		row.DragDataFrom(func() mtransfer.Data { return fileDragData(f.path) })
+		row.DragDataFrom(func() mtransfer.Data { return fileDragData(paths()...) })
 	}
 	if row.Dragging() {
 		a.dragNow = true
 	}
 }
 
-// fileDragData is what a drag out to another app offers: the file as a
-// file list when it is of this machine and still there, so the drop gets
-// a real file, and its path as text otherwise, as a drop on the app's own
-// terminal types it.
-func fileDragData(path string) mtransfer.Data {
-	if remote.HostOf(path) == "" {
-		if _, err := os.Lstat(path); err == nil {
-			if data, ferr := mtransfer.FileData(path); ferr == nil {
-				return data
-			}
+// treeDrag is a file or a folder dragged from the explorer of from, which
+// moves to a folder of that explorer it is dropped on. A file drags as a
+// dragItem, which opens in the columns as well; a folder as itself, which
+// nothing else takes.
+type treeDrag struct {
+	path string
+	from *app
+}
+
+// treeTake is what a row of the explorer takes: a dragItem, of which
+// only one with tree set moves, or the treeDrag of a folder.
+type treeTake interface{ treeTake() }
+
+func (dragItem) treeTake()  {}
+func (*treeDrag) treeTake() {}
+
+// treeSource is the file or folder of the explorer that v drags, nil for
+// what was dragged from elsewhere, as from search or source control.
+func treeSource(v treeTake) *treeDrag {
+	switch v := v.(type) {
+	case dragItem:
+		return v.tree
+	case *treeDrag:
+		return v
+	}
+	return nil
+}
+
+// fileDragData is what a drag out to another app offers: the files as a
+// file list when they are of this machine and still there, so the drop
+// gets real files, and their paths as text otherwise, a line each, as a
+// drop on the app's own terminal types them.
+func fileDragData(paths ...string) mtransfer.Data {
+	local := true
+	shown := make([]string, len(paths))
+	for i, path := range paths {
+		if _, err := os.Lstat(path); remote.HostOf(path) != "" || err != nil {
+			local = false
+		}
+		shown[i] = remote.Display(path)
+	}
+	if local {
+		if data, ferr := mtransfer.FileData(paths...); ferr == nil {
+			return data
 		}
 	}
-	return mtransfer.TextData(remote.Display(path))
+	return mtransfer.TextData(strings.Join(shown, "\n"))
 }
 
 // dropFiles opens the files dropped on a column at place at, the first

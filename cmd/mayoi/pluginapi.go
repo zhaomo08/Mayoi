@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,7 +22,6 @@ import (
 	"mayoi/internal/remote"
 	"mayoi/internal/vfs"
 	"mayoi/internal/workspace"
-	"mayoi/locales"
 )
 
 // The calls plugins make to the app: plugin.Host's Call. Each runs on a
@@ -89,16 +87,17 @@ func positionOf(snap ui.TextSnapshot, at int) position {
 }
 
 // docJSON describes a document to a plugin.
-func docJSON(d *document) map[string]any {
+func (a *app) docJSON(d *document) map[string]any {
 	snap := d.buf.Snapshot()
 	return map[string]any{
-		"id": d.id, "path": d.path, "name": d.name(), "language": languageOf(d),
+		"ref": a.documentRef(d),
+		"id":  d.id, "path": d.path, "name": d.name(), "language": languageOf(d),
 		"version": snap.Version(), "dirty": d.dirty(), "untitled": d.path == "", "lineCount": snap.LineCount(),
 	}
 }
 
 // editorJSON describes an editor, numbering it for the calls that name it.
-func (h *pluginHost) editorJSON(d *editor) map[string]any {
+func (h *pluginHost) editorJSON(a *app, d *editor) map[string]any {
 	if d == nil {
 		return nil
 	}
@@ -115,7 +114,7 @@ func (h *pluginHost) editorJSON(d *editor) map[string]any {
 	}
 	return map[string]any{
 		"id":         id,
-		"document":   docJSON(d.document),
+		"document":   a.docJSON(d.document),
 		"selections": []selectionJSON{{Anchor: positionOf(snap, sel[0]), Active: positionOf(snap, sel[1])}},
 	}
 }
@@ -131,9 +130,7 @@ func (h *pluginHost) editorByID(a *app, id int) (*editor, error) {
 	}
 	// Forget the editors that closed.
 	for d := range h.edIDs {
-		if !slices.ContainsFunc(a.cols, func(col *column) bool {
-			return slices.ContainsFunc(col.tabs, func(t *colTab) bool { return t.ed == d })
-		}) {
+		if !slices.ContainsFunc(h.apps(), func(owner *app) bool { return owner.editorColumn(d) != nil }) {
 			delete(h.edIDs, d)
 		}
 	}
@@ -161,23 +158,22 @@ func pluginPath(a *app, p string) (string, error) {
 	if a.root == "" {
 		return "", errors.New("no folder is open for a relative path")
 	}
-	if host, root, ok := remote.Split(a.root); ok {
-		return remote.Path(host, path.Join(root, filepath.ToSlash(p))), nil
-	}
-	return filepath.Join(a.root, p), nil
+	return remote.Join(a.root, p), nil
 }
 
 // Call implements plugin.Host.
-func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) (any, error) {
+func (h *pluginHost) Call(p *plugin.Plugin, generation uint64, method string, raw json.RawMessage) (any, error) {
 	var args struct {
-		ID     string     `json:"id"`
-		Arg    string     `json:"arg"`
-		Doc    int        `json:"doc"`
-		Editor int        `json:"editor"`
-		Line   int        `json:"line"`
-		Column int        `json:"column"`
-		Range  *textRange `json:"range"`
-		Edits  []struct {
+		ID       string              `json:"id"`
+		Arg      string              `json:"arg"`
+		Doc      int                 `json:"doc"`
+		WindowID uint64              `json:"windowId"`
+		Ref      *plugin.DocumentRef `json:"ref"`
+		Editor   int                 `json:"editor"`
+		Line     int                 `json:"line"`
+		Column   int                 `json:"column"`
+		Range    *textRange          `json:"range"`
+		Edits    []struct {
 			Range textRange `json:"range"`
 			Text  string    `json:"text"`
 		} `json:"edits"`
@@ -214,20 +210,34 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			return nil, fmt.Errorf("%s: %v", method, err)
 		}
 	}
+	if args.Ref != nil {
+		if args.Ref.WindowID == 0 || args.Ref.DocumentID <= 0 {
+			return nil, errors.New("invalid document reference")
+		}
+		args.WindowID, args.Doc = args.Ref.WindowID, args.Ref.DocumentID
+	}
+	main := func(fn func(*app) (any, error)) (any, error) { return h.inWindow(args.WindowID, fn) }
+	wait := func(fn func(*app, func(any, error))) (any, error) { return h.waitInWindow(args.WindowID, fn) }
 	switch method {
+	case "window.showDiff":
+		return h.showBufferDiff(raw)
 	case "commands.run":
 		if h.reg.CommandPlugin(args.ID) != nil {
 			var arg any
 			if args.Arg != "" {
 				arg = args.Arg
 			}
-			res, err := h.reg.Run(args.ID, arg)
+			v, err := main(func(a *app) (any, error) { return a.pluginContext("api", nil), nil })
+			if err != nil {
+				return nil, err
+			}
+			res, err := h.reg.RunWithContext(args.ID, arg, v.(*plugin.CommandContext))
 			if err != nil {
 				return nil, err
 			}
 			return res, nil
 		}
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			runs, err := a.cliCommands([]cli.Command{{ID: args.ID, Arg: args.Arg}}, a.root)
 			if err != nil {
 				return nil, err
@@ -238,7 +248,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			return nil, nil
 		})
 	case "commands.list":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			var out []map[string]string
 			for _, c := range a.commands() {
 				out = append(out, map[string]string{"id": c.id, "title": c.label})
@@ -246,19 +256,19 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			return out, nil
 		})
 	case "editor.active":
-		return h.main(func(a *app) (any, error) { return h.editorJSON(a.activeEditor()), nil })
+		return main(func(a *app) (any, error) { return h.editorJSON(a, a.activeEditor()), nil })
 	case "editor.visible":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			out := []any{}
 			for _, col := range a.cols {
 				if t := col.tab(); t != nil && t.ed != nil {
-					out = append(out, h.editorJSON(t.ed))
+					out = append(out, h.editorJSON(a, t.ed))
 				}
 			}
 			return out, nil
 		})
 	case "document.text":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			d, err := docByID(a, args.Doc)
 			if err != nil {
 				return nil, err
@@ -270,8 +280,34 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			s, e := posRune(snap, args.Range.Start), posRune(snap, args.Range.End)
 			return snap.Slice(min(s, e), max(s, e)), nil
 		})
+	case "document.setLanguage":
+		return h.setDocumentLanguage(p, generation, raw)
+	case "document.snapshot":
+		return main(func(a *app) (any, error) {
+			d, err := docByID(a, args.Doc)
+			if err != nil {
+				return nil, err
+			}
+			snap := d.buf.Snapshot()
+			out := a.docJSON(d)
+			out["text"], out["version"] = snap.String(), snap.Version()
+			return out, nil
+		})
+	case "workspace.document":
+		// A reference outlives its document and window: either closed, null.
+		return h.main(func(_ *app) (any, error) {
+			a, err := h.window(args.WindowID)
+			if err != nil {
+				return nil, nil
+			}
+			d, err := docByID(a, args.Doc)
+			if err != nil {
+				return nil, nil
+			}
+			return a.docJSON(d), nil
+		})
 	case "document.line":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			d, err := docByID(a, args.Doc)
 			if err != nil {
 				return nil, err
@@ -283,7 +319,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			return snap.Line(args.Line), nil
 		})
 	case "document.save":
-		return h.wait(func(a *app, done func(any, error)) {
+		return wait(func(a *app, done func(any, error)) {
 			d, err := docByID(a, args.Doc)
 			if err != nil {
 				done(nil, err)
@@ -292,7 +328,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			a.saveDoc(d, func() { done(nil, nil) })
 		})
 	case "editor.edit", "editor.insert":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			d, err := h.editorByID(a, args.Editor)
 			if err != nil {
 				return nil, err
@@ -339,7 +375,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			return true, nil
 		})
 	case "editor.select":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			d, err := h.editorByID(a, args.Editor)
 			if err != nil || len(args.Selections) == 0 {
 				return nil, err
@@ -349,7 +385,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			return nil, nil
 		})
 	case "editor.reveal":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			d, err := h.editorByID(a, args.Editor)
 			if err != nil {
 				return nil, err
@@ -360,14 +396,15 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			return nil, nil
 		})
 	case "workspace.root":
-		return h.main(func(a *app) (any, error) { return a.root, nil })
+		return main(func(a *app) (any, error) { return a.root, nil })
 	case "workspace.isRemote":
-		return h.main(func(a *app) (any, error) { return remote.Is(a.root), nil })
+		return main(func(a *app) (any, error) { return remote.Is(a.root), nil })
 	case "workspace.open":
-		return h.main(func(a *app) (any, error) {
+		return wait(func(a *app, done func(any, error)) {
 			p, err := pluginPath(a, args.Path)
 			if err != nil {
-				return nil, err
+				done(nil, err)
+				return
 			}
 			if args.Line > 0 {
 				a.openFileAt(p, args.Line-1, true)
@@ -377,10 +414,16 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			} else {
 				a.openPath(p, true)
 			}
-			return nil, nil
+			// It answers once the file is read, so that the plugin finds
+			// its text.
+			if d := a.activeEditor(); d != nil && d.path == p && d.sync == syncLoading {
+				d.readWaits = append(d.readWaits, func() { done(nil, nil) })
+				return
+			}
+			done(nil, nil)
 		})
 	case "workspace.readFile", "workspace.writeFile", "workspace.stat":
-		v, err := h.main(func(a *app) (any, error) { return pluginPath(a, args.Path) })
+		v, err := main(func(a *app) (any, error) { return pluginPath(a, args.Path) })
 		if err != nil {
 			return nil, err
 		}
@@ -409,7 +452,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 	case "workspace.findFiles":
 		// The files of quick open's index, listed first when they are not.
 		for deadline := time.Now().Add(30 * time.Second); ; {
-			ready, err := h.main(func(a *app) (any, error) {
+			ready, err := main(func(a *app) (any, error) {
 				if a.root == "" {
 					return true, nil
 				}
@@ -424,7 +467,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			limit := args.Limit
 			if limit <= 0 {
 				limit = 1000
@@ -442,15 +485,15 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			return out, nil
 		})
 	case "workspace.documents":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			out := []any{}
 			for _, d := range a.docs {
-				out = append(out, docJSON(d))
+				out = append(out, a.docJSON(d))
 			}
 			return out, nil
 		})
 	case "window.notify":
-		return h.wait(func(a *app, done func(any, error)) {
+		return wait(func(a *app, done func(any, error)) {
 			msg := args.Message
 			if args.Kind == "error" {
 				a.fail("%s: %s", p.Title(), msg)
@@ -469,7 +512,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 	case "window.pick":
 		var items []pickItem
 		json.Unmarshal(args.Items, &items)
-		return h.wait(func(a *app, done func(any, error)) {
+		return wait(func(a *app, done func(any, error)) {
 			a.openPluginPicker(items, args.Placeholder, func(i int) {
 				if i < 0 {
 					done(nil, nil)
@@ -479,7 +522,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 			})
 		})
 	case "window.prompt":
-		return h.wait(func(a *app, done func(any, error)) {
+		return wait(func(a *app, done func(any, error)) {
 			title := args.Title
 			if title == "" {
 				title = p.Title()
@@ -505,17 +548,11 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 		h.redraw()
 		return nil, nil
 	case "window.openText":
-		return h.main(func(a *app) (any, error) {
-			a.openGenerated(args.Title, args.Text)
-			if args.Title == "" {
-				if t := a.activeTab(); t != nil && t.ed != nil {
-					t.ed.title = locales.UntitledName(t.ed.number)
-				}
-			}
-			return nil, nil
-		})
+		return h.openPluginText(p, generation, raw)
+	case "languages.setCodeLenses", "languages.clearCodeLenses":
+		return h.setCodeLenses(p, generation, method, raw)
 	case "process.run":
-		v, err := h.main(func(a *app) (any, error) {
+		v, err := main(func(a *app) (any, error) {
 			if args.Cwd == "" {
 				return a.root, nil
 			}
@@ -534,7 +571,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 	case "views.render":
 		return nil, h.renderView(p, args.ID, args.Tree)
 	case "views.reveal":
-		return h.main(func(a *app) (any, error) {
+		return main(func(a *app) (any, error) {
 			a.showPluginView(args.ID)
 			return nil, nil
 		})
@@ -544,7 +581,7 @@ func (h *pluginHost) Call(p *plugin.Plugin, method string, raw json.RawMessage) 
 	case "webview.open", "webview.post", "webview.close":
 		return h.webviewCall(p, method, args.ID, args.Title, raw)
 	case "ai.complete":
-		v, err := h.main(func(a *app) (any, error) {
+		v, err := main(func(a *app) (any, error) {
 			client := a.host.ai()
 			if client == nil {
 				return nil, errors.New("sign in to Mayoi to use AI")

@@ -5,6 +5,7 @@ package git
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -40,9 +41,9 @@ func Open(dir string) (*Repo, error) {
 		return nil, errors.New("not a work tree")
 	}
 	// The folders of a remote work tree are as its host spells them.
-	r := &Repo{Root: filepath.Clean(filepath.Join(dir, lines[0])), Dir: remote.On(dir, lines[1]), Common: lines[2]}
-	if !strings.HasPrefix(r.Common, "/") && !filepath.IsAbs(r.Common) {
-		r.Common = filepath.Join(dir, r.Common)
+	r := &Repo{Root: remote.Clean(remote.Join(dir, lines[0])), Dir: remote.On(dir, lines[1]), Common: lines[2]}
+	if !strings.HasPrefix(r.Common, "/") && !remote.IsAbs(r.Common) {
+		r.Common = remote.Join(dir, r.Common)
 	} else {
 		r.Common = remote.On(dir, r.Common)
 	}
@@ -97,19 +98,19 @@ func (r *Repo) run(stdin []byte, args ...string) ([]byte, error) { return run(r.
 
 // Rel returns path relative to the root, with slashes, as Git names it.
 func (r *Repo) Rel(path string) string {
-	rel, err := filepath.Rel(r.Root, path)
+	rel, err := remote.Rel(r.Root, path)
 	if err != nil {
 		return filepath.ToSlash(path)
 	}
-	return filepath.ToSlash(rel)
+	return rel
 }
 
 // Abs returns the path of a file Git names relative to the root.
-func (r *Repo) Abs(rel string) string { return filepath.Join(r.Root, filepath.FromSlash(rel)) }
+func (r *Repo) Abs(rel string) string { return remote.Join(r.Root, filepath.ToSlash(rel)) }
 
 // Contains reports whether path is in the work tree.
 func (r *Repo) Contains(path string) bool {
-	return path == r.Root || strings.HasPrefix(path, r.Root+string(filepath.Separator))
+	return remote.Contains(r.Root, path)
 }
 
 // Entry is a file whose state differs from HEAD, or that Git does not
@@ -625,16 +626,18 @@ func (r *Repo) Branches() ([]string, error) {
 
 // Branch is a branch, local or of a remote, and its last commit.
 type Branch struct {
-	Name          string // as "main", or "origin/main" for a remote's
-	Remote        bool
-	Time          time.Time // when its last commit was made
-	Author        string    // the author of its last commit
-	Subject       string    // the subject of its last commit
-	Hash          string
-	Upstream      string // display name
-	UpstreamRef   string // full ref used for revision operations
-	Ahead, Behind int
-	Gone, Current bool
+	Name           string // as "main", or "origin/main" for a remote's
+	Remote         bool
+	Time           time.Time // when its last commit was made
+	Author         string    // the author of its last commit
+	Subject        string    // the subject of its last commit
+	Hash           string
+	Upstream       string // display name
+	UpstreamRef    string // full ref used for revision operations
+	UpstreamRemote string // configured remote, or "." for a local upstream
+	WorktreePath   string // the linked or other worktree where this branch is checked out
+	Ahead, Behind  int
+	Gone, Current  bool
 }
 
 // BranchList returns the local branches and those of the remotes, the
@@ -792,6 +795,46 @@ type Commit struct {
 	Subject string
 	Body    string // the message after the subject, trimmed
 	Refs    []Ref  // the branches and tags at the commit
+	// CoAuthors are those the message's Co-authored-by trailers name,
+	// each once, in their order, the author left out.
+	CoAuthors []Person
+}
+
+// Person is someone a commit names: their name and email.
+type Person struct{ Name, Email string }
+
+// parseCoAuthors reads the "Co-authored-by: Name <email>" lines of a
+// commit's message, of any case, leaving out the author's and those
+// named twice.
+func parseCoAuthors(body, author, email string) []Person {
+	var out []Person
+	seen := map[string]bool{strings.ToLower(email): email != "", strings.ToLower(author): author != ""}
+	for _, line := range strings.Split(body, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "Co-authored-by") {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		var p Person
+		if i := strings.LastIndex(v, "<"); i >= 0 && strings.HasSuffix(v, ">") {
+			p = Person{Name: strings.TrimSpace(v[:i]), Email: strings.TrimSpace(v[i+1 : len(v)-1])}
+		} else {
+			p = Person{Name: v}
+		}
+		if p.Name == "" {
+			p.Name = p.Email
+		}
+		if p.Name == "" {
+			continue
+		}
+		key := strings.ToLower(cmp.Or(p.Email, p.Name))
+		if seen[key] || seen[strings.ToLower(p.Name)] && p.Email == "" {
+			continue
+		}
+		seen[key] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // RefKind is what a ref names.
@@ -859,6 +902,7 @@ func parseCommit(rec string) (Commit, bool) {
 	}
 	c := Commit{Hash: f[0], Parents: strings.Fields(f[1]), Author: f[2], Email: f[3], Subject: f[5],
 		Refs: parseRefs(f[6]), Body: strings.TrimSpace(f[7])}
+	c.CoAuthors = parseCoAuthors(c.Body, c.Author, c.Email)
 	if s, err := strconv.ParseInt(f[4], 10, 64); err == nil {
 		c.Time = time.Unix(s, 0)
 	}
@@ -973,6 +1017,44 @@ func (r *Repo) CommitFiles(c Commit) ([]CommitFile, error) {
 	}
 	slices.SortFunc(fs, func(x, y CommitFile) int { return strings.Compare(x.Path, y.Path) })
 	return fs, nil
+}
+
+// CommitStat is how much a commit changed: its files, and the lines it
+// added and deleted, those of binary files not counted.
+type CommitStat struct{ Files, Added, Deleted int }
+
+// CommitStat returns how much a commit changed from its first parent, or
+// the first commit added.
+func (r *Repo) CommitStat(c Commit) (CommitStat, error) {
+	args := []string{"diff-tree", "-r", "-M", "--numstat", "--no-commit-id"}
+	if len(c.Parents) == 0 {
+		args = append(args, "--root", c.Hash)
+	} else {
+		args = append(args, c.Parents[0], c.Hash)
+	}
+	out, err := r.run(nil, args...)
+	if err != nil {
+		return CommitStat{}, err
+	}
+	return parseNumstat(string(out)), nil
+}
+
+// parseNumstat adds up the lines git's --numstat prints, "added\tdeleted
+// \tpath", "-" for the counts of a binary file.
+func parseNumstat(out string) CommitStat {
+	var st CommitStat
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.SplitN(line, "\t", 3)
+		if len(f) < 3 {
+			continue
+		}
+		st.Files++
+		add, _ := strconv.Atoi(f[0])
+		del, _ := strconv.Atoi(f[1])
+		st.Added += add
+		st.Deleted += del
+	}
+	return st
 }
 
 // Fetch fetches from the remotes.

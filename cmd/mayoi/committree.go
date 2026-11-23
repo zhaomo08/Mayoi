@@ -63,6 +63,16 @@ func (a *app) toggleCommitFiles() {
 // diffViewUI shows a diff, with the panel of its files beside it when it
 // is a commit's.
 func (a *app) diffViewUI(c *ui.Context, v *diffView) {
+	if cm := v.commit; cm != nil && cm.pr != nil {
+		a.prViewUI(c, v)
+		return
+	}
+	a.diffBodyUI(c, v)
+}
+
+// diffBodyUI is a diff with the panel of its files beside it when it is a
+// commit's.
+func (a *app) diffBodyUI(c *ui.Context, v *diffView) {
 	if !a.showsCommitFiles(v) {
 		a.diffPaneUI(c, v)
 		return

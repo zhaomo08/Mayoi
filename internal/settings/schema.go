@@ -60,7 +60,7 @@ type Field struct {
 // Schema is every preference, in the order the settings window shows
 // them.
 var Schema = []Field{
-	{Key: "theme", Category: CatAppearance, Kind: KindEnum, Options: []string{"", "matrix", "claude", "qoder", "grokbot", "cursor", "purplegold", "pumpkin", "witchsbrew", "bloodmoon"}},
+	{Key: "theme", Category: CatAppearance, Kind: KindEnum, Options: []string{"", "matrix", "claude", "qoder", "grokbot", "cursor", "purplegold", "pumpkin", "witchsbrew", "bloodmoon", "gtavi"}},
 	{Key: "appearance", Category: CatAppearance, Kind: KindEnum, Options: []string{"", "light", "dark"}},
 	{Key: "zoomLevel", Category: CatAppearance, Kind: KindNumber, Min: MinZoomLevel, Max: MaxZoomLevel, Step: 0.5},
 	{Key: "sidebarRight", Category: CatAppearance, Kind: KindBool},
@@ -77,9 +77,13 @@ var Schema = []Field{
 
 	{Key: "autoSave", Category: CatEditor, Kind: KindBool, Folder: true},
 	{Key: "wordWrap", Category: CatEditor, Kind: KindBool, Folder: true},
+	{Key: "trimTrailingWhitespace", Category: CatEditor, Kind: KindBool, Folder: true},
+	{Key: "tabSize", Category: CatEditor, Kind: KindNumber, Min: 1, Max: 8, Step: 1},
+	{Key: "jsonlMode", Category: CatEditor, Kind: KindEnum, Options: []string{"", "source"}, Folder: true},
 	{Key: "editorAgentContext", Category: CatEditor, Kind: KindBool},
+	{Key: "editorHover", Category: CatEditor, Kind: KindBool},
 
-	{Key: "markdownPreview", Category: CatMarkdown, Kind: KindBool, Folder: true},
+	{Key: "markdownMode", Category: CatMarkdown, Kind: KindEnum, Options: []string{"", "live", "reading"}, Folder: true},
 	{Key: "previewMermaid", Category: CatMarkdown, Kind: KindBool, Folder: true},
 	{Key: "previewMath", Category: CatMarkdown, Kind: KindBool, Folder: true},
 
@@ -87,15 +91,19 @@ var Schema = []Field{
 	{Key: "terminalFontSize", Category: CatTerminal, Kind: KindNumber, Min: 0, Max: 28, Step: 1},
 	{Key: "terminalCopyOnSelect", Category: CatTerminal, Kind: KindBool, Folder: true},
 	{Key: "terminalLocation", Category: CatTerminal, Kind: KindEnum, Options: []string{"", "editor"}},
+	{Key: "terminalShell", Category: CatTerminal, Kind: KindText},
+	{Key: "terminalShellArgs", Category: CatTerminal, Kind: KindList},
 	{Key: "terminalBackend", Category: CatTerminal, Kind: KindEnum, Options: []string{"", "hc"}},
 	{Key: "terminalBackendHcPath", Category: CatTerminal, Kind: KindText},
 	{Key: "terminalBackendHcEnv", Category: CatTerminal, Kind: KindList},
 	{Key: "terminalBackendHcShowInHerdr", Category: CatTerminal, Kind: KindBool},
+	{Key: "agentSessionsClaudeDirs", Category: CatTerminal, Kind: KindList},
 
 	{Key: "diffLayout", Category: CatDiff, Kind: KindEnum, Options: []string{"", "split", "inline"}},
 	{Key: "diffHighlight", Category: CatDiff, Kind: KindEnum, Options: []string{"", "line", "char"}, Folder: true},
 	{Key: "diffWhitespace", Category: CatDiff, Kind: KindEnum, Options: []string{"", "eol", "all", "blank"}, Folder: true},
 	{Key: "diffContext", Category: CatDiff, Kind: KindNumber, Min: 0, Max: MaxDiffContext, Step: 1, Folder: true},
+	{Key: "diffFiles", Category: CatDiff, Kind: KindEnum, Options: []string{"", "one"}},
 	{Key: "diffCrossFiles", Category: CatDiff, Kind: KindEnum, Options: []string{"", "always", "never"}, Folder: true},
 	{Key: "diffSyncScroll", Category: CatDiff, Kind: KindBool},
 	{Key: "diffAlignedRows", Category: CatDiff, Kind: KindBool},
@@ -104,6 +112,7 @@ var Schema = []Field{
 	{Key: "blame", Category: CatGit, Kind: KindBool, Folder: true},
 	{Key: "scmTree", Category: CatGit, Kind: KindBool},
 	{Key: "scmAllBranches", Category: CatGit, Kind: KindBool},
+	{Key: "prDeleteBranch", Category: CatGit, Kind: KindBool},
 	{Key: "aiModel", Category: CatGit, Kind: KindText, Folder: true},
 	{Key: "aiSecretFiles", Category: CatGit, Kind: KindList},
 	{Key: "scmRepositoryOpen", Category: CatGit, Kind: KindBool, Memory: true},
@@ -113,12 +122,15 @@ var Schema = []Field{
 	{Key: "vimCtrlKeys", Category: CatVim, Kind: KindBool, Folder: true},
 
 	{Key: "plugins", Category: CatPlugins, Kind: KindJSON},
+	{Key: "languageServers", Category: CatPlugins, Kind: KindJSON},
 	{Key: "formatOnSave", Category: CatPlugins, Kind: KindJSON, Folder: true},
 	{Key: "formatters", Category: CatPlugins, Kind: KindJSON, Folder: true},
 	{Key: "pluginSources", Category: CatPlugins, Kind: KindJSON, Memory: true},
 
 	{Key: "locale", Category: CatGeneral, Kind: KindEnum, Options: []string{"", "en", "zh-Hans", "ja"}},
 	{Key: "crashReports", Category: CatGeneral, Kind: KindEnum, Options: []string{"", "always", "never"}},
+	{Key: "usageStats", Category: CatGeneral, Kind: KindBool},
+	{Key: "confirmBeforeQuit", Category: CatGeneral, Kind: KindBool},
 	{Key: "syncIgnored", Category: CatGeneral, Kind: KindList},
 }
 

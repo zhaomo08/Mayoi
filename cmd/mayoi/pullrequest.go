@@ -87,6 +87,10 @@ func (a *gitContext) refreshPRHeads() {
 	if !a.live() || len(g.history) == 0 || !a.app.online() || !a.app.host.shown() {
 		return
 	}
+	if a.githubOverview() != nil {
+		// The GitHub view's reads mark them, as the refs change too.
+		return
+	}
 	r := g.repo
 	key := prHeadsAsked{r, g.refsGen}
 	if !g.prHeadsPoll.Start(key, a.prHeadsEvery()) {
@@ -207,7 +211,7 @@ func (a *gitContext) prBadge(c *ui.Context, inStatus, short bool) *ui.Element {
 	})
 	b.ContextMenu(func(m *ui.Menu) {
 		if m.Item(locales.PrOpenChanges()).Chosen() {
-			a.app.post(func() { a.openPullRequest(pr.Number) })
+			a.app.post(func() { a.openPullRequest(pr.Number, prChanges) })
 		}
 		if m.Item(locales.PrShowChecks()).Disabled(pr.Checks == git.ChecksNone).Chosen() {
 			a.app.post(a.openChecks)
@@ -217,7 +221,7 @@ func (a *gitContext) prBadge(c *ui.Context, inStatus, short bool) *ui.Element {
 		}
 	})
 	if b.Clicked() {
-		a.app.post(func() { a.openPullRequest(pr.Number) })
+		a.app.post(func() { a.openPullRequest(pr.Number, prChanges) })
 	}
 	return &b
 }
@@ -305,14 +309,14 @@ func (a *gitContext) prHeadChip(c *ui.Context, hash string, pr git.PRHead, lane 
 	})
 	b.ContextMenu(func(m *ui.Menu) {
 		if m.Item(locales.PrOpenChanges()).Chosen() {
-			*action = func() { a.openPullRequest(pr.Number) }
+			*action = func() { a.openPullRequest(pr.Number, prChanges) }
 		}
 		if m.Item(locales.PrOpenOnGitHub()).Disabled(pr.URL == "").Chosen() {
 			*action = func() { a.app.services.OpenURL(pr.URL) }
 		}
 	})
 	if b.Clicked() {
-		*action = func() { a.openPullRequest(pr.Number) }
+		*action = func() { a.openPullRequest(pr.Number, prChanges) }
 	}
 }
 

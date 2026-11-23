@@ -11,6 +11,18 @@ A click on the space below the files, or Escape, unselects the file or folder ch
 folder. A right click there opens the workspace's menu: New File…, New Folder…, Reveal in Finder, Open in Terminal and
 Paste.
 
+Shift-click a row to select every row from the last one chosen to it, in the order the tree shows them, and Cmd-click
+(Ctrl-click on Windows and Linux) to add a row or take it out; Shift with the arrow keys, Home and End extends the
+selection too. Neither opens a file or a folder. A plain click, the arrow keys or Escape select one row again, and rows
+that close or go stop being selected. ⌘C, **Copy**, **Copy Path** and **Copy Relative Path** act on every row
+selected; **Rename…** and **Move to Trash** are off while several are, and a drag moves the row dragged alone.
+
+Drag a file or a folder onto a folder's row to move it there, onto a file's row to move it beside that file, or onto
+the folder's row at the top or below the rows to move it into the workspace's folder. The row it would go to is
+highlighted. Open tabs follow the file, unsaved changes included. A move never replaces a file or folder of the same
+name, never puts a folder inside itself, and stays within the folder's own project and host. On a remote folder it runs
+on the host.
+
 **View → Compact Folders** shows a chain of folders that each hold only one folder on one row, as
 `src/main/java/com/example`. The row's actions use its last folder.
 
@@ -57,6 +69,29 @@ Closing a changed file saves it without asking. Untitled files wait for ⌘S. Tu
 - Home goes to the first non-blank character of the line.
 - The status bar shows the file's indentation and line endings, and you can change either from there.
 
+### Multiple cursors
+
+Type, delete, paste and undo at several places at once, as in VS Code.
+
+- **Selection → Add Cursor Above** and **Add Cursor Below** (⌥⌘↑, ⌥⌘↓; Ctrl+Alt+Up and Down on Windows)
+  add a caret on the next line at the same column; going back the other way takes the last one away.
+- ⌥-click (Alt-click) adds a caret, or takes one away; ⌥-drag selects from it. ⌘-click still goes to a definition.
+  Linux desktops that move windows with Alt-drag take the click first: use the middle button, or the commands, which
+  have no keys on Linux, as its desktops switch workspaces with Ctrl+Alt and the arrows; bind your own.
+- **Add Next Occurrence** (⌃⌘G on macOS, Ctrl+D on Windows and Linux) selects the word at the caret, then the next match each time: whole words when it
+  started from a caret. **Select All Occurrences** (⇧⌘L) selects every match at once.
+- Column selection selects the same columns on each line: drag with ⇧⌥ (Shift+Alt) or the middle button, or use
+  **Column Select Up**, **Down**, **Left** and **Right** (⇧⌥⌘ with the arrows on macOS, Ctrl+Shift+Alt on Windows). Tabs and wide characters count
+  by their width, and lines too short are left out.
+- Typing, input methods, Backspace and Delete (also by word), Enter, Tab, the arrows, Home and End act at every caret.
+  Brackets close at each. Up and Down move each caret a line of the file, not a wrapped row, and skip folded lines. Copy joins the selections with newlines, and pasting as many lines as there are cursors puts
+  one at each. One undo takes back an edit at all of them.
+- The newest caret blinks; the others hold still. The status bar counts the selections. Escape, or a plain click,
+  goes back to one caret.
+- Other commands, such as moving or commenting lines and completion, act at the newest caret only. Vim mode, Live
+  Preview and diffs keep one caret. While an input method composes, its text shows at the newest caret, and goes to
+  all of them once committed.
+
 ### Vim mode
 
 **View → Vim Mode** edits with vim's keys. Each tab has its own mode, shown in the status bar, and starts in normal
@@ -81,6 +116,8 @@ mode, where the caret is a block.
 - **Marks and jumps:** `ma` sets a mark, `'a` goes to its line and `` `a `` to it, and the marks move with the text as
   it changes. `''` goes back to where the cursor jumped from. Jumps, as `G`, `%`, a search or a mark, are kept: ⌃O goes
   back through them and ⌃I (Tab) forward again. `:marks` lists the marks.
+- **Language servers:** `gd` goes to the definition, a jump ⌃O comes back from, and `K` shows the hover; `K` again
+  lets ↑ ↓ and Page Up and Page Down scroll it.
 - **Visual mode:** `v` selects characters and `V` lines, and `gv` the last selection again. A selection made with the
   mouse is one too. Motions extend it, `o` swaps its ends, and operators, `r`, `J`, `~ u U` and `p` act on it.
 - **Search:** `/` and `?` open a line over the bottom of the editor. The cursor goes to the first match as you type,
@@ -290,8 +327,13 @@ sets them all, and ⌥Z or the wrap button just the tab.
 Double-click a line to open the file there. The arrows go from change to change, and the status bar says which change
 of how many you are on, with the lines added and removed. At the last, or first, change of a file the navigation says
 so, and one more press that way goes to the next file with changes, or the last of the previous; **diffCrossFiles** in
-the settings has it cross at once, or never leave the file. At the first or last file it says so, and stops. With the
-diff focused, keys work as in a pager:
+the settings has it cross at once, or never leave the file. At the first or last file it says so, and stops.
+
+**Layout → One File at a Time** (`diffFiles`) has a diff show one file alone, as VS Code does, and read only that
+file. A single commit's changes always list every file. Clicking a file in Source Control shows it; the next and previous file show the next or
+previous one, and the change navigation goes on into it as **diffCrossFiles** says, never scrolling into another
+file. The file shows whole, every unchanged line too; **Show Full Files** folds it. The tab is named after the file
+shown. When the file shown is staged, discarded or committed, the next file of its group shows. With the diff focused, keys work as in a pager:
 
 | Key | Does |
 | --- | --- |
@@ -381,25 +423,83 @@ sign-in. It is asked for again every minute while the window shows, every 30 sec
 A commit of the history that is the head of a pull request open shows `#123` first among its branches and tags, muted
 for a draft; click it to open the pull request's changes in a tab, or right-click it for **Open on GitHub**. The pull
 requests come from `gh` the same way, read in the background after the history, again as the refs change and every two
-minutes, so the history never waits for them; without `gh` or its sign-in, no commit shows one.
+minutes, so the history never waits for them; without `gh` or its sign-in, no commit shows one. While the GitHub view
+has read the repository, the marks come from its reads instead, with no call of their own.
 
 **Git → Open Pull Request…**, also in source control's **⋯** menu, lists the pull requests open, the branch's first;
-type to find one by its number, title, author or branch, or type any number to open that one, whatever its state. Its
-tab shows what GitHub shows, the changes from where its head left its base to its head, inline or side by side like
-any diff, under a card of its state, its branches and **Open on GitHub**. Commits Mayoi does not have yet are fetched
-from the remote of the pull request's repository to `refs/mayoi/pull/<number>/head` and `…/base`, which keeps them for
-the tab when Mayoi opens again; a pull request from a fork needs no remote of its own. Each file's header has a
-**Viewed** box, which marks it viewed on GitHub, as the box on GitHub does, and folds it; the files viewed show
-folded as the tab opens, and the card counts them. When the pull request has commits newer than the tab's, the card
-offers **Reload**.
+type to find one by its number, title, author or branch, or type any number to open that one, whatever its state.
 
-**Git → Show Pull Request Checks…**, also **Show Checks…** in the badge's context menu and source control's **⋯**
-menu, or a click on the badge's checks icon, lists the checks of the branch's pull request, failed first, and reads
-them again every 30 seconds while one runs; type to find one. A failed GitHub Actions job offers **Send to Terminal**
-(⏎), which reads the last 3000 lines of its log, without colors or time stamps, and pastes them into the terminal used
-last without pressing Enter, as **Send Review Items to Terminal** does, copying them with no terminal open; **Copy
-Log**; **Re-run** (⌘⏎), which runs that job again; and **Open on GitHub**, the only one a check outside GitHub Actions
-offers.
+A pull request opens in one tab. Its header has its state, number, branches (a click copies the head's), title, who
+opened it, how much it changes and when it was updated, with **Check Out**, **Review** (**Approve**, **Request
+Changes…**, **Comment…**), **Merge** (each way the repository allows, and **Delete Branch After Merging**, which
+deletes it on GitHub only) and **⋯**: **Ready for Review** or **Convert to Draft**, **Close** or **Reopen**,
+**Address Review Comments**, **Reload**, **Copy Link**, **Copy Branch Name** and **Open on GitHub**. Under it are four
+pages, `⌥⌘1`–`⌥⌘4` (`Ctrl+Shift+1`–`4` elsewhere), the one shown kept with the tab:
+
+- **Conversation:** while it is open, whether it can merge and what it waits for (conflicts, failed or running checks,
+  a review, the base moving on, the repository's rules), with **Rerun Failed Jobs**; its reviewers by their reviews,
+  assignees, labels, milestone and the issues it closes; its description, comments and reviews as GitHub renders them;
+  and the box that comments (`⌘⏎`), or writes the review **Request Changes…** or **Comment…** started.
+- **Changes:** what GitHub shows, from where its head left its base to its head, inline or side by side like any diff,
+  under a line of its commits, how much changed, its review threads and the files viewed. Commits Mayoi does not have
+  yet are fetched from the remote of the pull request's repository to `refs/mayoi/pull/<number>/head` and `…/base`,
+  which keeps them for the tab when Mayoi opens again; a pull request from a fork needs no remote of its own. Each
+  file's header has a **Viewed** box, which marks it viewed on GitHub and folds it. Each review thread not resolved
+  shows under its lines, with **Reply** (`⌘⏎` sends), **Resolve** and **Add to Review Items**; the threads' menu shows
+  those resolved too, with **Unresolve**. When the pull request has commits newer than the tab's, the line offers
+  **Reload**.
+- **Commits:** its commits, the oldest first; a click opens one's changes.
+- **Checks:** its checks, failed first, read again every 30 seconds while one runs. A failed GitHub Actions job offers
+  **Send to Terminal**, which reads the last 3000 lines of its log, without colors or time stamps, and pastes them into
+  the terminal used last without pressing Enter, as **Send Review Items to Terminal** does, copying them with no
+  terminal open; **Copy Log**; **Re-run**, which runs that job again; and **Open on GitHub**.
+
+The tab reads the pull request, its checks and its review threads with three `gh` calls as it shows, again every minute,
+every 30 seconds while a check runs, and after each action. The badge and a commit's `#123` open it at **Changes**;
+**Git → Show Pull Request Checks…**, **Show Checks…** in the badge's context menu and source control's **⋯** menu, or a
+click on the badge's checks icon, at **Checks**. Without a pull request, they list the checks of the commit at `HEAD` in
+a box, as before.
+
+### GitHub
+
+In a repository with a remote on github.com, or on a GitHub Enterprise host `gh` is signed in to, a GitHub button
+joins the switches at the top of the sidebar (**View → GitHub**). Its count is the pull requests waiting for your
+review. The view lists what is open in sections that fold: **This Branch**, the branch's pull request; **Needs Your
+Review**; **Your Pull Requests**; **Assigned to You**; then the other **Open Issues** and **Open Pull Requests**, the
+latest updated first, a hundred of each, and a link to the rest on GitHub. Each row shows its title, number, author,
+age, labels and comment count, and a pull request its checks, review or draft. Type to find one by number, title,
+author, label, assignee or branch; ↑ and ↓ move the choice, ⏎ opens it and `⌘C` copies its link.
+
+It is read with one `gh api graphql` call, run where the repository is, a host's for Remote SSH: every minute while
+the view shows, every 30 seconds while checks of yours run, every 5 minutes while it is hidden, for the count, and as
+the refs change. Its title has **New Issue**, **Open Repository on GitHub** and **Refresh**. Without `gh` the view
+links to it; not signed in, **Sign In…** runs `gh auth login` in a terminal; with remotes of several repositories, it
+asks which one is the repository, as `gh repo set-default` does. When a read fails, what was read stays under a note
+that says why, with **Try Again**.
+
+A click on a pull request opens its tab at **Conversation**, as **Open Pull Request…** does. Its menu has **Open Pull
+Request**, **Open Pull Request Changes**, **Show Checks…**, **Check Out** (`gh pr checkout`), **Address Review
+Comments**, **Open on GitHub** and **Copy Link**.
+
+A click on an issue opens it in a tab: its state, title, author, labels, assignees and milestone, the pull requests
+that close it, and its description and comments as GitHub renders them, with their pictures when GitHub holds them.
+Pictures of other hosts show as their alt text. The box at the end comments (`⌘⏎`); **Close Issue**, **Close as Not
+Planned** and **Reopen Issue** show to those who may, and the toast that says so undoes it. **New Issue** opens an
+empty one to write, with a title and a Markdown description, which **Create Issue** sends. The tabs of issues come back
+with the session; one an older version kept of a pull request's conversation opens as the pull request's tab.
+
+**Work on Issue**, in an issue's menu or tab, makes a worktree for it on a branch of its own, named for its number and
+title, as `161-zoom`, from the tip of the default branch on GitHub, beside the main one in `<folder>.worktrees`. It
+opens as a project tab, or a window of its own without project tabs, with a terminal there that holds the issue as a
+prompt: its title, link, description, comments, and to open a pull request that closes it. Start an agent in that
+terminal, as Claude Code, Codex or Qoder, and the prompt goes to it without pressing Enter; **Paste Now** and **Copy
+Prompt** do it by hand. Asked again, it opens the worktree it made. **Send to Terminal** pastes the issue's prompt into
+the terminal used last instead, or copies it with none open.
+
+**Address Review Comments**, in a pull request's menu, its conversation or the card of its changes, opens its changes
+with each review thread not resolved as a review note on its lines: what each person said, the lines as the commit
+has them, marked outdated when GitHub says so. **Send Review Items to Terminal** hands them to an agent as any review,
+and each note's **Resolve on GitHub** resolves its thread there and drops it.
 
 The sync button in the status bar shows how far the branch is ahead of its upstream (↑) and behind it (↓), and pulls
 then pushes in one click; a branch without an upstream has a publish button instead. Switching waits until open
@@ -438,6 +538,15 @@ two columns. A file can show in several columns at once. Those columns share its
 its own caret and scroll position. Drag a tab along its strip, into another column, or to the edge of a column to give it
 a new column.
 
+As in iTerm2, **View → New Column Right** (⌘D) puts an empty column beside the one with the keyboard, and **View → New
+Column Below** (⇧⌘D) puts one below it. The new column has the keyboard and no tab, and the next file, new file or
+terminal opened goes there; ⌘W closes it while it's empty. **View → Split Right** (⌘\, Ctrl+\ on Windows and Linux)
+and **Split Down** (Ctrl+Shift+D on Windows and Linux, no key on macOS) show the tab again in the new column instead:
+another view of the file, or a new terminal in the terminal's folder, which goes on as it was. Only the column with the
+keyboard splits, in a layout of both. The handle between two columns stacked moves the height. When the panel's terminal
+has the keyboard, the column that had it last splits. Vim's `:split` splits down, and `:vsplit` right. The layout comes
+back with the session.
+
 Choose **Lock Column** in a tab's menu to keep a column for terminals, or **Move to Locked Right Column** in a
 terminal tab's or panel terminal's menu to move the running terminal there in one step. The lock in the tab strip unlocks
 the column. Files, images and diffs opened from the Explorer, Search, Quick Open or Source Control, and terminals from
@@ -468,8 +577,12 @@ and maximize the panel. **View → New Terminals in Editor Area**, `terminalLoca
 and the Explorer's **Open in Terminal** open a tab of the editor area rather than the panel; Toggle Terminal and the
 panel's **+** still use the panel. Terminal colors follow the theme. With `terminalBackend` set to `"hc"`, shells run in
 herdr-core and keep running after Mayoi quits, and the next start attaches to them again. A dot on such a terminal's
-tab and chip says so, and pulses while its shell starts or its machine is away. **View → Install hc…**
-installs or updates `hc` in `~/.local/bin` with herdr's installer, on macOS and Linux.
+tab and chip says so, and pulses while its shell starts or its machine is away. **View → Attach to Terminal in
+herdr-core…** lists the terminals of herdr-core of the window's machine, those of the Herdr app and of an agent too, and
+shows the one chosen in a terminal of this window: it runs `hc attach` here, so closing it, or Ctrl+\, ends the attach
+alone and the shell runs on, in the Herdr app as well. Its size is the terminal's while it is attached. A plugin, or
+`mayoi run view.attachHC=<address>`, shows one by its address, an address of another machine with its machine's name.
+**View → Install hc…** installs or updates `hc` in `~/.local/bin` with herdr's installer, on macOS and Linux.
 Files dropped on a terminal type their paths, quoted for the shell. ⌘V with only an image on the clipboard sends an empty
 bracketed paste, as VS Code's terminal does, so that Claude Code pastes the screenshot. Selecting text copies it, as
 in Ghostty and iTerm2: a drag, a double click for a word, a triple click for a line, Shift with a drag in a program
@@ -490,6 +603,43 @@ closes it and gives the terminal back the keyboard.
 On Windows and Linux the shell has the keys with Ctrl, which edit its line, except the workbench's: Quick Open, the
 Command Palette, Find, the terminal and the sidebar toggles, Next and Previous Tab, Alt+1 to Alt+9 and zoom, and every
 Ctrl+Shift shortcut but Ctrl+Shift+C and Ctrl+Shift+V, the terminal's copy and paste, and those of the function keys.
+
+## Sessions
+
+The sidebar's clock switch, or **View → Sessions**, lists the sessions of the coding agents on this machine, the one used
+last first: Claude Code's of `~/.claude`, of each `~/.claude-*` folder, of `CLAUDE_CONFIG_DIR` and of the folders
+`agentSessionsClaudeDirs` lists, and Qoder's, Codex's, Grok's and Pi's, under the heads Today, Yesterday, Previous 7 Days and
+Older, each with how many it has, which stay at the top as their rows scroll under them. Each row has its title, or what
+was first asked, and under it its agent, the Claude Code folder other than `~/.claude` it is of, its project when
+listing every project's, and at the end when it was used last. While the view reads the sessions the first time, it
+shows the shapes of the rows to come. **This Project** shows those of the window's folder and the folders in it, **All Projects** every
+folder's, and the search field narrows them by title, first prompt, folder, agent or id, its words marked in the rows. ↑ and ↓ in the field move the choice,
+which stays on its session as the sessions are read again; Tab goes to the list and Esc back to the field. Sessions
+that come with a later reading fade in.
+
+Enter, or a double click, resumes a session: a terminal opens in its folder, where `terminalLocation` says, and runs the
+agent's own command, as `claude --resume <id>` with `CLAUDE_CONFIG_DIR` for a folder other than `~/.claude`, `qodercli
+-r`, `codex resume` or `grok --resume`. A row's menu copies that command or the session's id; with the pointer over a row, buttons in place of its time
+resume it and copy the command, as they do on the chosen row while the list has the keyboard, where ⌘C copies the
+command. Sessions of a folder that
+is gone say so instead. The view reads only the start and end of each transcript, again as files change, while it shows.
+
+A row's menu, its archive button or ⌫ in the list archives a session, or every session chosen: it leaves the list, as
+it stays after the sessions are read again and after a restart, and a toast offers **Undo**. The archive button in
+the view's title, or **View → Archived Sessions**, lists the archived ones instead, with the same search and **This
+Project** and **All Projects**; there the menu, the button or ⌫ restores them, and resuming one brings it back to the
+list too. Archiving only hides a session: Mayoi keeps which are archived in its own `state.json`, by agent, Claude
+Code folder and id, and leaves the agent's files and any terminal the session runs in alone.
+
+With `terminalBackend` set to `"hc"`, a session that runs in a terminal of herdr-core, in this window, another or the
+Herdr app, has a dot in the color of what it says it does (OSC 7501), and says it: working, waiting for you, done or
+failed. Resuming it shows that terminal, attaching it here when no terminal of the window does. hc names the session that
+an agent reports to it; for Claude Code, its process names it too. An agent whose session neither names, as Qoder or
+Codex, runs the newest session of its agent in its folder written since it started; until its first prompt writes one,
+none shows it.
+
+A terminal of this window that runs an agent saying what it does (OSC 7501) shows on its session the same way, with
+either backend: the session it resumed, or else the newest of its agent in its folder written since it started.
 
 ## Quick open
 
@@ -566,12 +716,15 @@ Each folder gets its own window.
   lower corner, gray while its host is connected, amber while connecting and red while not.
 - **Rename Tab…** in a square's context menu shows up to two characters of your own, an emoji too, in place of
   its initials or logo; empty brings them back. **Tab Color** tints the square in one of the terminal's colors.
-- Drop a picture on a square, from the Finder or the Explorer, or pick one with **Choose Icon…** in its context
-  menu, and the square shows it in place of the project's logo: a PNG, JPEG, WebP, SVG, ICO or ICNS, a remote
+- Pick a picture with **Choose Icon…** in a square's context menu, or drag one from the Explorer onto the square,
+  and the square shows it in place of the project's logo: a PNG, JPEG, WebP, SVG, ICO or ICNS, a remote
   project's too, even while its host is not connected. Mayoi keeps a copy in `project-icons` beside
   `settings.json`, so the picture may move or go. **Reset Icon** brings the logo back. An icon and a label of your
   own take each other's place.
 - Drag a square along the rail to reorder the projects, and drop a folder from the Finder on the rail to add it.
+- Files dropped from the Finder on a square show that project and open as tabs in its file column, pictures and
+  files from outside its folder too; dropped on the rail around the squares, they open in the project shown. The
+  square they would open in is marked as they are dragged over.
 - Clicking a square shows that project, with its tabs, columns, terminals, Explorer and source control as it left
   them, each editor with its caret and scroll position. Each project keeps its own layout: what its sidebar shows,
   whether it is open and how wide, and the panel's height. A new project starts with the layout of the one shown. ⇧⌘] and ⇧⌘[ (**Go → Next Project** and **Previous
@@ -590,9 +743,10 @@ Each folder gets its own window.
 
 ## Remote SSH
 
-**File → Remote SSH → Connect to Host…**, the welcome page or the command palette opens a folder on another machine
-over SSH, with the system's `ssh` and nothing to install on the other side. It works on macOS and Linux; Windows does
-not have it yet.
+**File → Remote SSH → Connect to Host…**, the welcome page, the command palette, or `mayoi --remote host:/path` opens a
+folder on another machine over SSH, with the system's `ssh` and nothing to install on the other side. On Windows this
+is the system `ssh`, `%USERPROFILE%\.ssh` and the Windows ssh-agent, not WSL's `ssh`. macOS and Linux use the system
+`ssh` as before.
 
 - The box lists the hosts connected to before under **Recent**, each with the folder opened there last, then the hosts
   of `~/.ssh/config`, with those it includes. Each shows the user and the machine `ssh -G` resolves it to. Type to
@@ -607,9 +761,13 @@ not have it yet.
   the folder typed. The folder opens as **Open Folder** opens one: in the window if it shows nothing, else in a window,
   or a project tab, of its own.
 - Mayoi signs in with keys and the SSH agent, never a password, and honors `~/.ssh/config`: users, ports, keys,
-  `ProxyJump` and the rest. A host whose key is not trusted yet needs one `ssh` from a terminal first. One connection
-  goes to each host (an ssh ControlMaster), shared by every window and command, and ends with the last window of the
-  host.
+  `ProxyJump` and the rest. A host whose key is not trusted yet needs one `ssh` from a terminal first. If `ssh` cannot
+  be run, Mayoi says so, and a local folder still opens. One connection goes to each host, shared by every window and
+  command, and ends with the last window of the host. On macOS and Linux, ssh keeps it with a control socket. File and
+  Git commands reuse that connection instead of signing in again.
+- The folder's path stays `/ssh:host/path` on Windows as well, as a complete path. A file under that folder stays in it
+  for search, Source Control and the breadcrumbs. A language server for a document in the folder runs on the host. A
+  host that does not answer as a POSIX shell is refused, and the files stay read-only.
 - The Explorer, quick open, search and replace in files, Source Control, blame, the gutter marks and diffs work as in a
   local folder, running `git`, `rg` (or `grep`) and `find` on the host. Terminals are shells of the host.
 - The folders in a folder of the Explorer are read along with it, at one round trip, but those the index skips, as
@@ -650,13 +808,41 @@ not have it yet.
   a browser here. Clicking a link to `localhost`, `127.0.0.1` or `0.0.0.0` in a terminal of the host forwards its port
   and opens it; **Forward a Port…**, in **File → Remote SSH**, the command palette and the status bar's `SSH` menu,
   forwards one by its number. A port goes to the same port here when it is free, else to another, and the status bar
-  shows the ports forwarded, with a menu to open each in the browser, copy its address or stop forwarding it. Each
-  connection goes through the host's ssh connection, so a forward works again once a host lost connects again, and
-  ends as the last window of the host closes.
+  shows the ports forwarded, with a menu to open each in the browser, copy its address or stop forwarding it. On macOS
+  and Linux, each browser connection goes through the host's ssh connection, so a forward works again once a host that
+  was lost connects again. On Windows, one `ssh` session holds each forwarded port. If that session ends, forward the
+  port again. Forwarding ends as the last window of the host closes.
 - Reveal in Finder is left out of a remote folder, and deleting a file deletes it for good, after asking, as a remote
   folder has no trash.
 - Recent folders, the windows and the tabs of a remote folder are kept as those of a local one, and a remote folder of
   the last session connects again as the app starts.
+
+## WSL
+
+On Windows, when `wsl` can be run, **File → Open WSL Folder…**, the welcome page and the command palette open a folder
+in an installed WSL distribution. macOS and Linux do not list that action. When `wsl` cannot be found, the action is
+absent, and a local folder and Remote SSH still open. When no distribution is installed, the action stays, Mayoi says
+`No WSL distribution is installed.`, and it does not open an empty folder.
+
+- The box lists the installed distributions. Choose one, then a folder inside it. The window records that folder as
+  `/wsl:<distribution>/path`, a complete path, distinct from an SSH folder and from `\\wsl$\`. A file at
+  `/home/me/app/a.go` in Ubuntu is `/wsl:Ubuntu/home/me/app/a.go`. The same path in another distribution is a different
+  folder.
+- Search, the Explorer, Source Control and the breadcrumbs keep a file under that folder inside it. `git`, search and
+  a language server for a document there run inside the distribution. The terminal is that distribution's shell, in
+  the folder. A WSL folder does not forward ports, and it opens with `wsl` whether or not SSH is configured. The
+  status bar shows `WSL: <distribution>`.
+- Opening a distribution that is stopped starts it. If it does not start, Mayoi says why and leaves the window
+  unchanged. If the distribution stops after the folder is open, the window stays, the files are read-only, and the
+  banner says the WSL distribution is not available. Reconnect starts it again.
+- Recent folders remember a WSL folder and open it in that distribution again.
+
+## Explorer's right-click menu
+
+On Windows, the installer adds **Open with Mayoi** to Explorer's right-click menu of files, folders and a folder's
+background, which opens the file, the folder, or the folder you are in. Windows 11 shows it under **Show more
+options**. **File → Add 'Open with Mayoi' to Explorer** adds it to a Mayoi installed before, and **File → Remove 'Open
+with Mayoi' from Explorer** takes it away; uninstalling Mayoi removes it too.
 
 ## The `mayoi` command
 
@@ -712,6 +898,22 @@ A command acts on the window whose folder contains the directory it runs in, els
 with `-w`, and starts Mayoi if it isn't running. When something goes wrong, it says so and exits with status 1, or 2
 for options it doesn't know. A `mayoi` command an older Mayoi installed is brought up to date as Mayoi starts.
 
+## Deep links
+
+`mayoi://file/<path>:<line>:<column>` opens the file at a line and column, in the window whose folder holds it, else
+the one in front. `mayoi://open?file=<path>&line=<line>&column=<column>` opens the same file with the path in the query.
+A path with spaces is percent-encoded by the browser, as `%20`; a `#`, `?` or `%` in a file's name may be left as it
+is. A file that isn't there says so in the window in front.
+
+LocatorJS's **Custom link** opens the first form:
+
+```
+mayoi://file/${projectPath}${filePath}:${line}:${column}
+```
+
+The scheme is registered when Mayoi is installed. On Windows and Linux a link starts Mayoi, or reaches the one
+already running.
+
 ## Appearance and persistence
 
 **View → Theme** picks a theme, Mayoi, The Matrix, Claude, Qoder, Grok Bot, Cursor, Purple Gold, or one of the Halloween
@@ -719,12 +921,12 @@ themes, Jack-o'-Lantern, Witch's Brew and Blood Moon, and apart from it whether 
 dark mode or is always Light or Dark. Light and Dark are greyed out under The Matrix, Purple Gold and the Halloween
 themes, which are always dark.
 The Matrix is its two worlds: the sidebar, tabs, panels and status bar in the real world's gunmetal steel, and the code
-and the terminal in the Matrix's greens, each kind of code in a hue of its own and comments in the steel. The whole
-window is in the code's font, with file icons in greens. Primary buttons take the red pill and chosen rows the blue;
+and the terminal in the Matrix's greens, each kind of code in a hue of its own and comments in the steel. File icons
+are in greens. Primary buttons take the red pill and chosen rows the blue;
 buttons that lose something take the Sentinels' orange. Mirrored digital rain falls in two depths behind the welcome
 page while the window has the keyboard, and holds still without it or when the system asks for reduced motion. The
 White Rabbit, with red-pill eyes, takes the logo's place and the status bar's start, and hops while Git works. Claude is Claude Code as it draws itself in a
-terminal, in a light and a dark kind: the whole window in the code's font, as The Matrix is, warm near-black or
+terminal, in a light and a dark kind: warm near-black or
 off-white, Claude's orange for the accent and the buttons, with dark labels on them, and periwinkle for what is chosen,
 with errors and what is removed in Claude Code's rose, apart from the orange. The boxes over the window, as Quick
 Open's, are outlined in the orange. While a Git command runs, the status bar has Claude Code's spinner: a ✻ that turns
@@ -758,7 +960,12 @@ status bar and slime green for the accent and the buttons, with its code in viol
 Blood Moon is near-black with a red undertone, crimson for the accent and the buttons, a dark-blood status bar, and a
 scarlet apart from the crimson for what loses something, with its code in reds, old gold and moonlight blue. Each has a
 character drawn from cells in its accent, which takes the logo's place and the status bar's start as Clawd does: a
-carved pumpkin whose face glows, a cauldron whose brew bubbles, and a bat that flaps its wings as it hops.
+carved pumpkin whose face glows, a cauldron whose brew bubbles, and a bat that flaps its wings as it hops. GTA VI is
+the game's heads-up display, always dark: graphite chrome with white type, mission gold for the accent and the buttons,
+the health bar's green for what is added and the armor's blue for what changed and for the selection. Its character is
+the wanted level, five stars in the logo's place and at the status bar's start: as many light as the files that differ
+from HEAD call for, one for 1, two for 2 to 3, three for 4 to 7, four for 8 to 15 and five for 16 or more; they flash
+while Git works, in place of the hop, and go out as a commit clears the changes.
 **View → Theme → Color Theme…** (`workbench.action.selectTheme` in `keybindings.json`, as `cmd+k cmd+t`), or **Color
 Theme…** on the welcome page, opens a box of the themes, each with a little window in its colors and its character: the
 window takes each theme as ↑ and ↓ move to it, and ← and → switch the appearance; Return keeps them, and Escape goes
@@ -783,14 +990,27 @@ language servers, and they work on SSH folders with nothing installed on the hos
 - **Plugins → Show Plugin Log** and **Show Running Plugins** tell what plugins logged and what they use.
 - **Selection → Format Document** (⇧⌥F) formats with a plugin, and `formatOnSave` formats as you save.
 - A language server a plugin declares underlines problems, and answers **Go → Go to Definition** (F12),
-  **Go → Show Hover** and **Selection → Complete Word** (⌃Space).
+  **Go → Show Hover** (⌘K ⌘I, Ctrl+K Ctrl+I on Windows and Linux) and **Selection → Complete Word** (⌃Space).
+- **Go → Go to Type Definition**, **Go to Source Definition**, **Go to Implementation** (⌘F12, Ctrl+F12 on Windows and
+  Linux) and **Find References** (⇧F12) ask the server, when it supports them. References always open in a list.
+- Several definitions are offered in a list: ↑ ↓ choose, Return goes, Esc stays. **Go → Go Back** (⌃-, Alt+Left on
+  Windows and Linux) and **Go Forward** (⌃⇧-, Alt+Right) return.
+- **Show Hover** again while its card shows gives the card the keys: ↑ ↓, Page Up, Page Down, Home and End scroll it,
+  Esc closes it, and any other key goes back to the text.
+- Rest the pointer on a name for half a second to see its hover card, without moving the caret. Move into the card
+  to read or scroll it; it closes as the pointer leaves, and on Esc, a click or a key. Nothing shows where the server
+  has nothing to say, while you drag or hold a modifier key, or with `editorHover` off.
+- An answer that comes after you opened Quick Open or another list leaves it be.
 - **Show Problems** lists every problem plugins found; the status bar counts them.
 - **Selection → Insert Snippet…** inserts a snippet of a plugin's.
 - A `.ts` file in `~/.mayoi/scripts` makes each function it exports a command; **Plugins → Run Selection as Script**
   runs the selection once.
 - Signed in, the plugins you install from Git follow you to your other machines.
-- Mayoi comes with **Word Count**, the words of a Markdown file in the status bar, and **TODOs**, the folder's TODO
-  comments in the sidebar.
+- Mayoi comes with **Word Count**, the words of a Markdown file in the status bar, **TODOs**, the folder's TODO
+  comments in the sidebar, and the language servers of Go, TypeScript and JavaScript, Python, Rust and C/C++.
+- They start off. A file of a language whose server is off offers **Turn On** when its program is installed, and
+  says how to install it when it is not; a server's `path` setting names a program not on the path.
+- A plugin you install under the name of one Mayoi comes with takes its place.
 
 ## Settings
 

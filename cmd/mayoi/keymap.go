@@ -40,19 +40,25 @@ func (a *app) takeKeys(el ui.Element, where keyPlace, fn func(ev ui.InputEvent) 
 		a.keyFocus = where
 	}
 	return el.HandleInput(func(ev ui.InputEvent) bool {
-		if ev.Kind == ui.InputKeyUp && a.held != nil && *a.held == ev.Key {
-			a.held = nil
-			a.invalidate()
-		}
-		if a.keyInput(ev, where) {
-			if where != placeTerminal {
-				k := ev.Key
-				a.held = &k
-			}
-			return true
-		}
-		return fn != nil && fn(ev)
+		return a.keyEvent(ev, where) || fn != nil && fn(ev)
 	})
+}
+
+// keyEvent takes an input event where, when the shortcuts have its key,
+// noting the key held until it is let go.
+func (a *app) keyEvent(ev ui.InputEvent, where keyPlace) bool {
+	if ev.Kind == ui.InputKeyUp && a.held != nil && *a.held == ev.Key {
+		a.held = nil
+		a.invalidate()
+	}
+	if a.keyInput(ev, where) {
+		if where != placeTerminal {
+			k := ev.Key
+			a.held = &k
+		}
+		return true
+	}
+	return false
 }
 
 // textKeys has a text field take the keys of the shortcuts first.
@@ -82,16 +88,26 @@ func (a *app) keyInput(ev ui.InputEvent, where keyPlace) bool {
 // keyStroke runs the binding of a stroke, after the strokes of the chord
 // typed so far, with the next frame.
 func (a *app) keyStroke(s keymap.Stroke, where keyPlace) bool {
-	if a.keys == nil || len(a.keys.Bindings) == 0 {
-		return false
-	}
 	seq := append(slices.Clone(a.chord), s)
-	b, more := a.keys.Lookup(seq, a.whenContext(where))
+	var b *keymap.Binding
+	more := false
+	if a.keys != nil && len(a.keys.Bindings) > 0 {
+		b, more = a.keys.Lookup(seq, a.whenContext(where))
+	}
+	if b == nil && !more && where == placeEditor {
+		// Mayoi's own keys of more than one stroke, after the file's.
+		if id, pre := a.builtinChord(seq); id != "" {
+			b = &keymap.Binding{Command: id}
+		} else {
+			more = pre
+		}
+	}
 	switch {
 	case more:
 		a.chord = seq
 	case b != nil:
 		a.chord = nil
+		a.keyedAt = a.frameAt
 		bd := *b
 		a.post(func() { a.runBinding(bd.Command, bd.Args, where) })
 	case len(a.chord) > 0:
@@ -165,6 +181,9 @@ func (a *app) whenContext(where keyPlace) func(string) bool {
 		case "editorHasSelection":
 			d := a.activeEditor()
 			return where == placeEditor && d != nil && d.sel[0] != d.sel[1]
+		case "editorHasMultipleSelections":
+			d := a.activeEditor()
+			return where == placeEditor && d != nil && len(d.cursors) > 0
 		case "editorReadonly":
 			return false
 		case "isMac":
@@ -228,13 +247,32 @@ var vscodeCommands = map[string]string{
 	"expandLineSelection":                        "sel.line",
 	"editor.action.indentUsingTabs":              "sel.indentTabs",
 	"editor.action.transformToCamelcase":         "sel.camelCase",
+	"editor.action.joinLines":                    "sel.joinLines",
+	"editor.action.insertCursorAbove":            "sel.addCursorAbove",
+	"editor.action.insertCursorBelow":            "sel.addCursorBelow",
+	"editor.action.addSelectionToNextFindMatch":  "sel.addNextOccurrence",
+	"editor.action.selectHighlights":             "sel.selectAllOccurrences",
+	"cursorColumnSelectUp":                       "sel.columnUp",
+	"cursorColumnSelectDown":                     "sel.columnDown",
+	"cursorColumnSelectLeft":                     "sel.columnLeft",
+	"cursorColumnSelectRight":                    "sel.columnRight",
+	"removeSecondaryCursors":                     "sel.removeCursors",
 	"editor.action.sortLinesAscending":           "sel.sortAsc",
 	"editor.action.sortLinesDescending":          "sel.sortDesc",
+	"editor.action.trimTrailingWhitespace":       "sel.trimWhitespace",
 	"editor.action.jumpToBracket":                "go.bracket",
+	"editor.fold":                                "edit.fold",
+	"editor.unfold":                              "edit.unfold",
+	"editor.toggleFold":                          "edit.toggleFold",
+	"editor.foldAll":                             "edit.foldAll",
+	"editor.unfoldAll":                           "edit.unfoldAll",
 	"workbench.action.quickOpen":                 "go.quickOpen",
 	"workbench.action.showCommands":              "go.commands",
 	"workbench.action.gotoLine":                  "go.line",
 	"workbench.action.gotoSymbol":                "go.symbol",
+	"editor.action.revealDefinition":             "go.definition",
+	"workbench.action.navigateBack":              "go.back",
+	"workbench.action.navigateForward":           "go.forward",
 	"workbench.action.nextEditor":                "go.nextTab",
 	"workbench.action.previousEditor":            "go.prevTab",
 	"workbench.action.toggleSidebarVisibility":   "view.sidebar",
@@ -248,7 +286,12 @@ var vscodeCommands = map[string]string{
 	"workbench.action.positionPanelLeft":         "view.panelPosition.left",
 	"workbench.action.positionPanelRight":        "view.panelPosition.right",
 	"workbench.action.splitEditor":               "view.splitRight",
+	"workbench.action.pinEditor":                 "view.togglePinTab",
+	"workbench.action.unpinEditor":               "view.togglePinTab",
 	"workbench.action.splitEditorRight":          "view.splitRight",
+	"workbench.action.splitEditorDown":           "view.splitDown",
+	"workbench.action.newGroupRight":             "view.newColumnRight",
+	"workbench.action.newGroupBelow":             "view.newColumnDown",
 	"markdown.showPreview":                       "view.togglePreview",
 	"markdown.showPreviewToSide":                 "view.previewToSide",
 	"workbench.action.focusNextGroup":            "view.nextColumn",
@@ -365,18 +408,19 @@ func (a *app) runBinding(name string, args json.RawMessage, where keyPlace) {
 		if rest, ok := strings.CutPrefix(path, "~/"); ok {
 			home, _ := os.UserHomeDir()
 			path = filepath.Join(home, rest)
-		} else if !filepath.IsAbs(path) && a.root != "" {
-			path = filepath.Join(a.root, path)
+		} else if !remote.IsAbs(path) && a.root != "" {
+			path = remote.Join(a.root, path)
 		}
 		a.openFile(path, true)
 	case "editor.action.indentUsingSpaces":
 		a.openQuick(">Indent Using ")
 	case "deleteFile", "moveFileToTrash":
-		if path := a.explorerChoice(); path != "" {
+		// One file or folder at a time: none while several are chosen.
+		if path := a.explorerChoice(); path != "" && !a.explorerMulti(path) {
 			a.trash(path)
 		}
 	case "renameFile":
-		if path := a.explorerChoice(); path != "" {
+		if path := a.explorerChoice(); path != "" && !a.explorerMulti(path) {
 			a.askRename(path)
 		}
 	case "explorer.newFile", "explorer.newFolder":
@@ -385,6 +429,18 @@ func (a *app) runBinding(name string, args json.RawMessage, where keyPlace) {
 		id := a.commandID(name)
 		if id == "" {
 			a.tell(note{message: locales.KeymapNoCommand(name)})
+			return
+		}
+		// A command the mayoi command gives an argument takes its args
+		// the same way, as file.openFolder a folder.
+		var arg string
+		if c, ok := commandArgs[id]; ok && json.Unmarshal(args, &arg) == nil && arg != "" {
+			run, err := c.take(a, arg, a.root)
+			if err != nil {
+				a.fail("%s", err)
+				return
+			}
+			run()
 			return
 		}
 		a.run(id)

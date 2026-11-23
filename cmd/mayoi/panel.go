@@ -2,8 +2,10 @@ package main
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"io"
+	"mayoi/internal/agents"
 	"mayoi/internal/keymap"
 	"mayoi/internal/remote"
 	"mayoi/internal/settings"
@@ -27,14 +29,24 @@ type session struct {
 	term  *terminal.Terminal
 	title string
 	dir   string
-	view  ui.Handle // its view, which takes the keyboard
-	tab   *colTab   // the tab that shows it, nil for one of the panel
+	// prompt is what goes to the agent once one starts in the terminal,
+	// as Work on Issue hands it, and promptOf what it is of, as "#12".
+	prompt, promptOf string
+	view             ui.Handle // its view, which takes the keyboard
+	tab              *colTab   // the tab that shows it, nil for one of the panel
 	// lost is set while a terminal of a host waits for the connection
 	// that ended it, to start again.
 	lost bool
 	// hc is the address of the terminal of herdr-core the shell runs in,
 	// "" for one that runs here.
 	hc string
+	// attach is the address of the terminal of herdr-core this terminal
+	// shows by running hc attach here, which closing it, or Ctrl+\, ends
+	// without ending the shell there. "" for one that runs a shell.
+	// attachEnded is set once its hc attach ended as it started, which
+	// asking for the address again replaces.
+	attach      string
+	attachEnded bool
 	// attached is when the view last attached to it, and hcNew is set
 	// until the first attach of a shell just started, which has no
 	// history to show.
@@ -68,12 +80,68 @@ type session struct {
 	// name is what the user renamed it to, "" for none, shown over the
 	// title its programs give it.
 	name string
+	// shell is the program of terminalShell its program is, "" for the
+	// user's shell, a host's or one in herdr-core.
+	shell string
+	// started is when its program started, to tell a shell that exits
+	// as it starts from one the user ended.
+	started time.Time
+	// agent is the agent the Sessions view resumed in it, or showed it
+	// for, and resumed the key of the session, "" for none.
+	agent   agents.Harness
+	resumed string
+	// sessionTitle is the title of the session resumed in it, which it is
+	// called until the agent names it, "" once it did, and program the
+	// program of the command that resumed it.
+	sessionTitle, program string
 }
 
 // label is what the terminal is called: the name the user gave it, or
+// the title of the session resumed in it, until the agent names it, or
 // the title its programs give it.
 func (s *session) label() string {
-	return cmp.Or(s.name, s.title)
+	return cmp.Or(s.name, s.sessionTitle, s.title)
+}
+
+// retitle takes a title its programs give the terminal, which is the
+// agent's own, ending the session's title, unless it is as a shell names
+// a terminal: by a shell, a folder (as "~/src" or "me@host: ~/src"), or
+// the command line the shell runs (as "claude --resume …").
+func (s *session) retitle(title string) {
+	title = s.shellTitle(title)
+	s.title = title
+	if s.sessionTitle == "" {
+		return
+	}
+	t := strings.TrimSpace(title)
+	shellish := t == "" || isShellName(t) || strings.HasPrefix(t, "~") || strings.HasPrefix(t, "/") ||
+		(strings.Contains(t, "@") && strings.Contains(t, ":"))
+	if !shellish && s.program != "" {
+		shellish = strings.HasPrefix(t, s.program) || strings.Contains(t, s.program+" ")
+	}
+	if !shellish {
+		s.sessionTitle = ""
+	}
+}
+
+// shellTitle is a title as the terminal shows it: on Windows, where the
+// console titles a shell by its program's path, as
+// "C:\Program Files\WindowsApps\…\pwsh.exe", the shell's name, as "pwsh";
+// any other title, and a path with arguments, as it is.
+func (s *session) shellTitle(title string) string {
+	if hostOS != "windows" || !strings.ContainsAny(title, `/\`) {
+		return title
+	}
+	t := strings.TrimSpace(title)
+	// One program's path and nothing after it: ".exe" only at its end.
+	if lower := strings.ToLower(t); !strings.HasSuffix(lower, ".exe") || strings.Index(lower, ".exe") != len(lower)-len(".exe") {
+		return title
+	}
+	name := shellBase(t)
+	if isShellName(name) || (s.shell != "" && name == shellBase(s.shell)) {
+		return name
+	}
+	return title
 }
 
 type panelHeaderLayout struct {
@@ -126,14 +194,20 @@ func (a *app) workDir() string {
 
 // startTerminal starts a terminal in dir, nil when it cannot.
 func (a *app) startTerminal(dir string) *session {
-	s := &session{dir: dir, title: shellName()}
+	s := &session{dir: dir}
 	a.offerHC()
-	if c := sessionConn(s); c != nil {
-		s.title = c.Host
-	}
 	// A shell in herdr-core, of the host in a remote folder as one of hc's
 	// machines, starts in the background: the terminal shows meanwhile.
 	s.hcStarting = a.hcBackend()
+	// Named for its shell: that of terminalShell, which herdr-core leaves
+	// for its own, or its host's.
+	s.title = shellName()
+	if !s.hcStarting {
+		s.title = a.localShellName()
+	}
+	if c := sessionConn(s); c != nil {
+		s.title = c.Host
+	}
 	if a.addTerminal(s) == nil {
 		return nil
 	}
@@ -150,28 +224,60 @@ func (a *app) addTerminal(s *session) *session {
 	s.id = a.nextTerm
 	term, err := a.spawnTerminal(s, s.dir)
 	if err != nil {
-		a.fail("%s", locales.FailStartTerminal(err.Error()))
+		if se := (*shellStartError)(nil); errors.As(err, &se) {
+			a.fail("%s", locales.FailStartShell(se.err.Error()))
+		} else {
+			a.fail("%s", locales.FailStartTerminal(err.Error()))
+		}
 		return nil
 	}
-	s.term = term
+	s.term, s.started = term, time.Now()
 	a.terms = append(a.terms, s)
 	return s
+}
+
+// launch is what a terminal runs: its program and arguments, nil for
+// the user's shell, more of its environment and where it runs, and
+// whether that is the program of terminalShell.
+type launch struct {
+	command, env []string
+	dir          string
+	own          bool
+}
+
+// terminalLaunch is what the terminal s runs in dir: the program of
+// terminalShell, or the user's shell; hc attach on a terminal of
+// herdr-core; and the shell of the host in a remote folder.
+func (a *app) terminalLaunch(s *session, dir string) launch {
+	shell := localShell(a.settings.Prefs)
+	l := launch{command: shell, dir: dir, own: shell != nil}
+	// Attached to a terminal of herdr-core: hc attach here, which closing
+	// the terminal ends alone.
+	if s.attach != "" {
+		l = launch{command: hcAttach(s.attach, true), env: hcEnv()}
+		l.dir, _ = os.UserHomeDir()
+	} else if c, rdir, ok := remote.Lookup(dir); ok {
+		// In a remote folder, a shell of its host, over the connection.
+		l = launch{command: c.TerminalCommand(rdir)}
+		l.dir, _ = os.UserHomeDir()
+	}
+	// In herdr-core, its terminal there.
+	if s.hc != "" {
+		l.command, l.env, l.own = hcAttach(s.hc, !s.hcNew), hcEnv(), false
+	}
+	// Its shell still starting in herdr-core: nothing runs here yet.
+	if s.hcStarting {
+		l.own = false
+	}
+	return l
 }
 
 // spawnTerminal starts the program of a terminal in dir: the shell, of
 // the host in a remote folder.
 func (a *app) spawnTerminal(s *session, dir string) (*terminal.Terminal, error) {
 	light, dark := a.termThemes()
-	// In a remote folder, a shell of its host, over the connection.
-	var command, env []string
-	if c, rdir, ok := remote.Lookup(dir); ok {
-		command = c.TerminalCommand(rdir)
-		dir, _ = os.UserHomeDir()
-	}
-	// In herdr-core, its terminal there.
+	l := a.terminalLaunch(s, dir)
 	if s.hc != "" {
-		command = hcAttach(s.hc, !s.hcNew)
-		env = hcEnv()
 		s.attached, s.hcNew = time.Now(), false
 	}
 	// Its shell still starting in herdr-core, nothing yet.
@@ -186,10 +292,10 @@ func (a *app) spawnTerminal(s *session, dir string) (*terminal.Terminal, error) 
 	var term *terminal.Terminal
 	var in statusIn
 	term, err := terminal.New(terminal.Options{
-		Command:   command,
-		Env:       env,
+		Command:   l.command,
+		Env:       l.env,
 		Conn:      conn,
-		Dir:       dir,
+		Dir:       l.dir,
 		Font:      termFont(a.settings),
 		Theme:     light,
 		DarkTheme: dark,
@@ -197,7 +303,7 @@ func (a *app) spawnTerminal(s *session, dir string) (*terminal.Terminal, error) 
 		// Selecting copies, as in Ghostty and iTerm2.
 		CopyOnSelect: copyOnSelect(a.prefs().TerminalCopyOnSelect),
 		OnTitle: func(title string) {
-			a.post(func() { s.title = title })
+			a.post(func() { s.retitle(title) })
 		},
 		// A terminal of a host gets files and images pasted as copies
 		// uploaded to it.
@@ -268,7 +374,57 @@ func (a *app) spawnTerminal(s *session, dir string) (*terminal.Terminal, error) 
 			}
 		},
 	})
+	if err != nil && l.own {
+		return nil, &shellStartError{shell: l.command[0], err: err}
+	}
+	s.shell = ""
+	if l.own {
+		s.shell = l.command[0]
+	}
 	return term, err
+}
+
+// shellStartError is why the program of terminalShell didn't start.
+type shellStartError struct {
+	shell string
+	err   error
+}
+
+func (e *shellStartError) Error() string { return e.shell + ": " + e.err.Error() }
+func (e *shellStartError) Unwrap() error { return e.err }
+
+// localShell is the program, with its arguments, a new local terminal of
+// Mayoi's own runs, as terminalShell and terminalShellArgs choose it: nil
+// for the user's shell. Each argument goes to the program as it is,
+// never through a shell.
+func localShell(p settings.Prefs) []string {
+	shell := strings.TrimSpace(p.TerminalShell)
+	if shell == "" {
+		return nil
+	}
+	return append([]string{shell}, p.TerminalShellArgs...)
+}
+
+// localShellName is the name of the shell a new local terminal runs:
+// terminalShell's program's, as "pwsh" or "bash", else shellName.
+func (a *app) localShellName() string {
+	shell := strings.TrimSpace(a.settings.TerminalShell)
+	if shell == "" {
+		return shellName()
+	}
+	return shellBase(shell)
+}
+
+// shellBase is the name of the program at path: its last element, and on
+// Windows without .exe, in lower case, as shellName names one.
+func shellBase(path string) string {
+	if i := strings.LastIndexAny(path, `/\`); i >= 0 && (hostOS == "windows" || path[i] == '/') {
+		path = path[i+1:]
+	}
+	if hostOS == "windows" {
+		return strings.TrimSuffix(strings.ToLower(path), ".exe")
+	}
+	return path
 }
 
 // newTerminal starts a terminal in the panel and shows it.
@@ -316,7 +472,7 @@ func (a *app) terminalTab(col *column, at int, s *session, focus bool) bool {
 	}
 	s.tab = &colTab{term: s}
 	at = min(max(at, 0), len(col.tabs))
-	a.addTab(col, at, s.tab)
+	at = a.addTab(col, at, s.tab)
 	a.activate(col, at, focus)
 	return true
 }
@@ -341,6 +497,16 @@ func shellName() string {
 		return filepath.Base(sh)
 	}
 	return "shell"
+}
+
+// shellNames are the shells a terminal may run besides the user's own.
+var shellNames = []string{"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh", "powershell", "cmd"}
+
+// isShellName reports whether a title is a shell's name, as "zsh" or
+// "pwsh.exe".
+func isShellName(title string) bool {
+	name := strings.TrimSuffix(strings.ToLower(title), ".exe")
+	return name == shellName() || slices.Contains(shellNames, name)
 }
 
 // panelTerms returns the terminals of the panel.
@@ -501,7 +667,10 @@ func (a *app) panel(c *ui.Context) {
 			a.post(func() { a.terminalToPanel(it.tab.term) })
 		case it.file != nil && s != nil:
 			// A file of the sidebar types its path, as one from the Finder.
-			a.post(func() { a.pastePaths(s, []string{it.file.path}) })
+			a.post(func() { a.pastePaths(s, it.file.paths()) })
+		case it.link != nil && s != nil && a.owns(it):
+			// Issues and pull requests of the GitHub view type their links.
+			a.post(func() { a.pasteLinks(s, it.link) })
 		}
 	}
 	over, _ := a.dragOver(box)
@@ -575,7 +744,7 @@ func (a *app) panel(c *ui.Context) {
 							}
 							a.hcMenu(m, s)
 							if m.Item(locales.TermKill()).Chosen() {
-								a.post(func() { a.killTerminal(s) })
+								a.post(func() { a.killTerminalAsking(s) })
 							}
 						})
 					}
@@ -590,7 +759,7 @@ func (a *app) panel(c *ui.Context) {
 						a.post(func() { a.terminalToColumn(s, a.column(), a.column().active+1) })
 					}
 					if a.iconButton(c, iconTrash, locales.TermKill(), false).Clicked() {
-						a.post(func() { a.killTerminal(s) })
+						a.post(func() { a.killTerminalAsking(s) })
 					}
 				}
 				icon, label := iconMaximize, locales.PanelMaximize()
@@ -626,7 +795,7 @@ func (a *app) panel(c *ui.Context) {
 			} else {
 				a.terminalView(c, s)
 			}
-			if over.tab != nil && over.tab.term != nil || filesOver {
+			if over.tab != nil && over.tab.term != nil || over.link != nil && s != nil && a.owns(over) || filesOver {
 				a.dropMark(c)
 			}
 		})
@@ -647,6 +816,7 @@ func (a *app) terminalView(c *ui.Context, s *session) {
 			v.Opacity(o)
 		}
 		a.waitPill(c, s)
+		a.terminalPrompt(c, s)
 		a.termFindView(c, s)
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -15,8 +16,7 @@ import (
 )
 
 const (
-	nearRows   = 3 // how far past an edge of the view an edit scrolls as little as it takes
-	tabWidth   = 4
+	nearRows   = 3  // how far past an edge of the view an edit scrolls as little as it takes
 	editorPadY = 8  // above the first line
 	gutterGap  = 10 // between the line numbers and the text
 	textPadR   = 32 // right of the widest line
@@ -37,10 +37,21 @@ type codeFont struct {
 	lineHeight float32
 	lineH      float32
 	charW      float32
-	// tabW is how far apart the platform's text layout puts its tab stops,
-	// which is not a number of cells: a tab ends at the next stop.
-	tabW float32
+	// tabSize is how many cells apart the tab stops are, as the settings
+	// have it, and tabW how far apart that puts them: a tab ends at the
+	// next stop.
+	tabSize int
+	tabW    float32
 }
+
+// tabCols is how many columns a tab takes, as the settings have it: the
+// code that counts columns outside an editor's font reads it.
+var tabCols atomic.Int32
+
+func init() { tabCols.Store(4) }
+
+// tabWidth is how many columns a tab takes.
+func tabWidth() int { return int(tabCols.Load()) }
 
 func newCodeFont(p settings.Prefs) codeFont {
 	f := codeFont{
@@ -49,16 +60,18 @@ func newCodeFont(p settings.Prefs) codeFont {
 	}
 	w, _ := ui.ShapeText(strings.Repeat("0", 64), f.font(), 0).Size()
 	f.charW = w / 64
-	if f.tabW, _ = ui.ShapeText("\t", f.font(), 0).Size(); f.tabW <= 0 {
-		f.tabW = tabWidth * f.charW
-	}
+	// The text areas put their tab stops every tabSize spaces (TabSize).
+	f.tabSize = max(p.TabSize, 1)
+	f.tabW = float32(f.tabSize) * f.charW
+	tabCols.Store(int32(f.tabSize))
 	return f
 }
 
 // is reports whether the font is the one the preferences choose.
 func (f codeFont) is(p settings.Prefs) bool {
 	return f.charW != 0 && f.family == monoFallback(p.FontFamily) && f.size == p.FontSize && f.weight == p.FontWeight &&
-		f.features == strings.Join(p.FontFeatures, ",") && f.lineHeight == p.LineHeight
+		f.features == strings.Join(p.FontFeatures, ",") && f.lineHeight == p.LineHeight &&
+		f.tabSize == max(p.TabSize, 1)
 }
 
 // monoFallback is a font family list that ends in the system's monospaced
@@ -100,18 +113,52 @@ func (f codeFont) featureList() []string {
 }
 
 // width measures a run from the start of a line as the text area lays it
-// out: ASCII by its cells and the tab stops, anything else by shaping it.
-func (f codeFont) width(s string) float32 {
-	var x float32
+// out: ASCII by its cells and the tab stops, anything else by shaping it,
+// up to the next tab.
+func (f codeFont) width(s string) float32 { return f.widthFrom(0, s) }
+
+// runeAt returns the rune of a line of text, n runes long, whose glyph is
+// at x along it as width measures it, -1 past its end.
+func (f codeFont) runeAt(s string, n int, x float32) int {
+	if n == 0 || x < 0 || x >= f.width(s) {
+		return -1
+	}
+	offs := make([]int, 0, n)
+	for i := range s {
+		offs = append(offs, i)
+	}
+	lo, hi := 0, n-1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if f.width(s[:offs[mid]]) <= x {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo
+}
+
+// widthFrom returns where a run that starts at x along a line ends, as
+// width measures it: a line's width is the sum of its runs', but for the
+// kerning across where they meet.
+func (f codeFont) widthFrom(x float32, s string) float32 {
+	from := x // from is where the text after the last tab starts
+	last := 0 // and last its offset
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
 		case c == '\t':
 			x = f.afterTab(x)
+			from, last = x, i+1
 		case c < 0x80:
 			x += f.charW
 		default:
-			w, _ := ui.ShapeText(s, f.font(), 0).Size()
-			return w
+			end := len(s)
+			if j := strings.IndexByte(s[i:], '\t'); j >= 0 {
+				end = i + j
+			}
+			w, _ := ui.ShapeText(s[last:end], f.font(), 0).Size()
+			x, i = from+w, end-1
 		}
 	}
 	return x
@@ -175,6 +222,10 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 		d.hiddenPlaced = placed
 	}
 
+	// Vim mode and Live Preview have one caret of their own.
+	if len(d.cursors) > 0 && !a.multiOK(d) {
+		d.collapse()
+	}
 	if !a.prefs().Vim {
 		vimReset(d)
 		if a.vimLine.d == d {
@@ -204,11 +255,29 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 	d.lateLine = -1
 	// What was typed since the last frame, for undo.
 	d.observe()
+	if d.typedSel && keepLine < 0 {
+		// A bracket typed closed: an edit of the app's, which keeps the
+		// line at the top where it shows.
+		keepLine, keepY = a.topLine(d)
+	}
 	snap := d.buf.Snapshot()
 	edited := snap.Version() != d.version
 	d.version = snap.Version()
 	lines := snap.LineCount()
 	gutterW := a.editorGutterWidth(lines)
+	// Live Preview has no line numbers: its text stands in the middle,
+	// as the Reading view's does.
+	live := a.livePreview(d)
+	if live {
+		gutterW = 0
+	}
+	// The runs of lines that fold, found off the main thread; a jump into
+	// lines folded opens them, but Select All.
+	foldRanges := a.shownFolds(d, live)
+	if r := d.pending; r != nil && len(d.folding.marks) > 0 && !(r[0] == 0 && r[1] > 0 && r[1] == snap.Len()) {
+		d.revealAt(snap, r[1])
+		d.revealAt(snap, r[0])
+	}
 	d.gutterW = gutterW
 	view := d.hscroll.Bounds(c)
 	if view.H > 0 {
@@ -219,7 +288,12 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 		view = d.lastView
 	}
 	d.vim.viewH = view.H
-	textX := gutterW + gutterGap
+	textX, padR := gutterW+gutterGap, float32(textPadR)
+	if live {
+		a.followLive(d.document)
+		textX, padR = a.liveMargins(c, d.document, view.W)
+	}
+	d.textX = textX
 	// Vim's normal and visual modes take the keys as commands: the area
 	// types nothing, and shows a block for its caret.
 	vimKeys := a.prefs().Vim && d.vim.mode != vimInsert
@@ -246,12 +320,49 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 	}
 
 	ui.ScrollHorizontal(c).TrackScroll(&d.hscroll).Fill().Background(p.editor).Children(func() {
-		area := ui.TextAreaBufferBase(c, d.buf).
-			Font(f.family).FontSize(f.size).FontWeight(f.weight).FontFeatures(f.featureList()...).FixedLineHeight(f.lineH).TextColor(p.text).
-			FillHeight().
-			Padding(editorPadY, textPadR, editorPadY, textX).
+		area := ui.TextAreaBufferBase(c, d.buf)
+		if live {
+			// The text in the app's font, as it reads, its lines as high as
+			// what they hold.
+			area.Font(c.Theme().Font).FontSize(a.settings.FontSize).LineHeight(a.settings.LineHeight)
+		} else {
+			area.Font(f.family).FontSize(f.size).FontWeight(f.weight).FontFeatures(f.featureList()...).FixedLineHeight(f.lineH)
+		}
+		area.TextColor(p.text).
+			TabSize(float32(f.tabSize)).FillHeight().
+			Padding(editorPadY, padR, editorPadY, textX).
 			Label(locales.EditorLabel(d.name())).
 			ReadOnly(vimKeys || a.chording() || d.locked())
+		if !live {
+			if len(g.gaps) > 0 {
+				area.TrackLines(&d.lines)
+			}
+			var gaps []ui.TextGap
+			for line, height := range g.gaps {
+				gaps = append(gaps, ui.TextGap{Para: line, Height: height})
+			}
+			// In order, so the area appends each rather than inserting it.
+			slices.SortFunc(gaps, func(x, y ui.TextGap) int { return x.Para - y.Para })
+			area.TextGaps(gaps...)
+		}
+		// What an input method composes stays at the primary until it
+		// commits, which then types at the other selections too.
+		if composing := area.Composing(); composing != d.composing {
+			d.composing = composing
+			if !composing && d.held {
+				a.invalidate()
+			}
+		}
+		// A paste goes to every selection, a line at each when it has as
+		// many lines as there are of them.
+		area.OnPaste(func(text string) bool {
+			if len(d.cursors) == 0 || text == "" {
+				return false
+			}
+			d.cmds = append(d.cmds, func(d *editor) { a.pasteSpans(d, text) })
+			a.invalidate()
+			return true
+		})
 		a.takeKeys(area, placeEditor, func(ev ui.InputEvent) bool {
 			switch ev.Kind {
 			case ui.InputPointerDown:
@@ -294,9 +405,20 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			}
 		} else {
 			area.NoWrap()
+			if g.folds != nil {
+				area.TrackLines(&d.lines)
+			}
 			if keepLine >= 0 {
 				d.vscroll.Y = max(0, editorPadY+g.top(keepLine)-keepY)
 			}
+		}
+		// The lines folded take no room; the area is told the heights of
+		// those out of view.
+		for _, r := range g.runs {
+			area.TextBlocks(ui.TextBlock{First: r.from, Last: r.to})
+		}
+		if g.laid() != nil {
+			a.settleFolds(c, d, g.runs)
 		}
 
 		// A new area puts the caret at the end: at the editor's selection,
@@ -306,7 +428,8 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			d.resync = true // moved while it was out of sight
 		}
 		quiet := d.pending != nil && d.quiet
-		jump := d.pending != nil && !quiet
+		// A bracket typed that closes moves the caret as typing does.
+		jump := d.pending != nil && !quiet && !d.typedSel
 		// A jump asked for goes a third of the way down from an edge of
 		// the view too; an edit's selection only from well out of view: a
 		// line typed at the edge scrolls the view a line.
@@ -327,7 +450,7 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 		} else if r != nil {
 			// A jump asked for goes where it goes: no pin puts it back.
 			area.SetTextSelection(r[0], r[1])
-			d.pending, d.resync, d.parked, d.pinFrame = nil, false, -1, 0
+			d.pending, d.typedSel, d.resync, d.parked, d.pinFrame = nil, false, false, -1, 0
 			if d.landing {
 				d.landing, d.landLine, d.landAt = false, snap.LineAt(min(r[0], snap.Len())), c.Now()
 			}
@@ -344,6 +467,9 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			d.resync, d.parked = false, -1
 			if !focused && view.H > 0 && !a.inView(d, g, snap, d.sel[1], view.H) {
 				d.parked = a.offsetInView(d, g, snap, view.H)
+				if at, ok := liveCellPark(d, snap); ok {
+					d.parked = at
+				}
 				area.SetTextSelection(d.parked, d.parked)
 			} else {
 				a.setSelection(d, area)
@@ -355,6 +481,22 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 		anchor, caret := area.TextAnchorCaret()
 		if whole {
 			anchor, caret = d.sel[0], d.sel[1] // the area selects after this build
+		}
+		// The caret never stands in lines folded: a key that moves it in
+		// moves it past them, and anything else opens them.
+		if len(g.runs) > 0 && d.parked < 0 {
+			if r, ok := runAt(g.runs, snap.LineAt(min(caret, snap.Len()))); ok {
+				if d.areaInput {
+					to := snapOut(snap, r, caret, d.caret)
+					if anchor == caret {
+						anchor = to
+					}
+					caret = to
+					area.SetTextSelection(anchor, caret)
+				} else if d.revealAt(snap, caret) {
+					a.invalidate()
+				}
+			}
 		}
 		d.areaInput = false
 		if d.parked >= 0 {
@@ -374,6 +516,11 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			}
 		}
 		if sel := [2]int{anchor, caret}; sel != d.sel {
+			// The area moved its selection itself, as a drag or Find
+			// does: one selection again.
+			if !edited && !d.held && len(d.cursors) > 0 {
+				d.collapse()
+			}
 			if !edited {
 				d.hist.typing = false // the caret moved: typing after starts a step
 				if n := snap.Len(); snap.LineAt(min(caret, n)) != snap.LineAt(min(d.sel[1], n)) {
@@ -405,12 +552,27 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			}
 			d.caret, d.caretSeen = caret, true
 		}
+		if d.liveScroll != 0 {
+			// Live Preview's last frame asked, for a table's cell edited
+			// to show.
+			d.vscroll.Y, d.liveScroll = clamp(d.vscroll.Y+d.liveScroll, 0, d.vscroll.MaxY), 0
+		}
 		// Show the caret's line before the area takes the offset, so that
 		// it finds the caret in view and leaves the offset be.
 		d.sticky = append(d.sticky[:0], a.scrollToCaret(d, g, snap, caret, view.H, a.findCovers(c, d, view), center, jump || caretMoved || edited && follows && !quiet)...)
 		var sticky []stickyRow
 		if len(d.sticky) > 0 {
 			sticky = d.stuck.rows(a, d, snap, d.sticky)
+		}
+		if px, _, over := area.PointerPosition(); !live {
+			d.folding.hover = over && px-d.hscroll.X < gutterW
+			d.folding.reduce = c.Preferences().ReduceMotion
+		}
+		a.restHover(c, d, area, g, snap, live)
+		// A hand over a name as Cmd is held, as a click goes to where it is
+		// defined: the frame draws again as Cmd is pressed or let go.
+		if !live && a.defPointed(c, d, area, g, snap) {
+			area.Cursor(ui.CursorPointer)
 		}
 		d.reviewHover = -1
 		if a.settings.EditorAgentContext {
@@ -458,6 +620,16 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			d.vscroll.Focus(c)
 		}
 
+		if live {
+			area.SelectionColor(p.selected)
+			if !focused {
+				area.SelectionColor(p.selectedDim)
+			}
+			a.liveArea(c, d, area, liveFrame{snap: snap, g: g, first: first, last: last, left: textX,
+				width: max(1, contentW-textX-padR), viewH: view.H, anchor: anchor, caret: caret, vimKeys: vimKeys, focused: focused})
+			return
+		}
+		a.drawCodeLenses(c, d, g, textX, view.H)
 		// The ==highlighted== and ~~struck~~ runs of Markdown in view.
 		var highlights, strikes []lineRun
 		if d.hl != nil && d.hl.Lexer() != nil {
@@ -476,9 +648,15 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 
 		lineH, charW, size, family := f.lineH, f.charW, f.size, f.family
 		// Who changed the caret's line last, after it: after its last row
-		// when it wraps, placed as the frame lays the rows out.
-		var blame string
+		// when it wraps, placed as the frame lays the rows out. blameShown
+		// is what the view shows of it, blameRow its row, and blameLeft and
+		// blameRight the edges it shows between, the gutter's and the
+		// scroll bar's; blameCut is set when the view takes some of it.
+		var blame, blameShown string
 		var blameX float32
+		var blameRow int
+		var blameLeft, blameRight float32
+		var blameCut, tipped bool
 		// The comment of each review note after its last line, in its
 		// place, unless the lines wrap.
 		noted := a.notedLines(d)
@@ -487,11 +665,54 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			hints = a.editorHints(d, snap, noted, first, last)
 		}
 		if !slices.ContainsFunc(hints, func(h editorHint) bool { return h.line == caretLine }) {
-			if blame = a.blameLine(d, caretLine, snap.Version(), focused); blame != "" && !wrap {
-				s, e := snap.LineRange(caretLine)
-				blameX = textX + f.width(snap.Slice(s, min(e, s+maxBlameAfter))) + 4*charW
+			if blame = a.blameLine(d, caretLine, snap.Version(), focused); blame != "" {
+				if wrap {
+					blameX, blameRow, blameShown = a.blameAfterRows(d, snap, caretLine, blame, textX, contentW-textPadR, func(t string) float32 {
+						w, _ := c.MeasureText(0, ui.Span{Text: t, Font: family, Size: size * 0.92})
+						return w
+					})
+					blameRight = contentW - textPadR
+					blameCut = blameShown != blame && blameShown != ""
+				} else {
+					s, e := snap.LineRange(caretLine)
+					blameX = textX + f.width(snap.Slice(s, min(e, s+maxBlameAfter))) + 4*charW
+					blameShown = blame
+					// The view's edges: the gutter's right, which stays as
+					// the text scrolls sideways under it, and the scroll
+					// bar's left.
+					blameLeft, blameRight = d.hscroll.X+textX, d.hscroll.X+view.W
+					if d.vscroll.MaxY > 0 {
+						blameRight -= c.Theme().ScrollbarWidth
+					}
+					w, _ := c.MeasureText(0, ui.Span{Text: blame, Font: family, Size: size * 0.92})
+					end := blameX + w
+					blameCut = blameX < blameRight && end > blameLeft && (blameX < blameLeft || end > blameRight)
+					blameRight = min(blameRight, end)
+				}
+				// A blame the view cuts short says all of it as the pointer
+				// rests on the part it shows. A marker there takes the tip:
+				// it takes no pointer itself, so the text area keeps the
+				// I-beam, the clicks and the drags.
+				if blameCut {
+					y := editorPadY + g.top(caretLine) - d.vscroll.Y + float32(blameRow)*lineH
+					visible := max(blameX, blameLeft)
+					mark := ui.Box(c.Key("blame-mark")).Absolute().PassThrough().
+						Left((visible+blameRight)/2 - d.hscroll.X).Top(y).Width(0).Height(0)
+					if px, py, over := area.PointerPosition(); over && px >= visible && px <= blameRight && py >= y && py <= y+lineH {
+						a.blameTip(c, area, mark, blame)
+						tipped = true
+					}
+				}
 			}
 		}
+		// The text area counts as having a tip from the frame after the
+		// one that first offers it, and the pointer's rest from then: a
+		// frame now starts the rest as the pointer comes, or the blame
+		// comes under it, rather than at whatever frame comes next.
+		if tipped && !d.blame.tipped {
+			c.Invalidate()
+		}
+		d.blame.tipped = tipped
 		matches := a.visibleMatches(d, first, last)
 		if matches == nil {
 			matches = a.vimMatches(d, snap, first, last)
@@ -514,6 +735,11 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 		if !shape.native {
 			area.SelectionColor(ui.Color{})
 		}
+		// The carets of the other selections on the lines in view, painted
+		// still, as the primary's blinks, and the lines of those that
+		// select nothing, lit as the caret's is.
+		carets, caretLines := a.otherCarets(d, snap, first, last, caretLine, focused)
+		caretCol := c.Theme().Accent.Alpha(0.8)
 		// The block of vim's cursor: from the cursor to the next rune, or a
 		// cell wide at the end of a line.
 		var block *runeRect
@@ -574,10 +800,18 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 		}
 		lineY := func(r ui.Rect, i int) float32 { return r.Y + editorPadY + g.top(i) - d.vscroll.Y }
 		// lineHeight is the height of line i, all its rows.
-		lineHeight := func(i int) float32 { return float32(wr.rowCount(i)) * lineH }
+		lineHeight := func(i int) float32 {
+			if g.hidden(i) {
+				return 0
+			}
+			return float32(wr.rowCount(i)) * lineH
+		}
 		// place calls fn with the part on each row of a run along line i:
 		// its top, and its x's in the area.
 		place := func(r ui.Rect, i int, x0, x1 float32, fn func(y, x0, x1 float32)) {
+			if g.hidden(i) {
+				return
+			}
 			y := lineY(r, i)
 			wr.pieces(i, x0, x1, func(row int, x0, x1 float32) {
 				fn(y+float32(row)*lineH, r.X+textX+x0, r.X+textX+x1)
@@ -587,6 +821,11 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			rowsAt(r)
 			if y := lineY(r, caretLine); !selecting && y+lineH > r.Y && y < r.Y+r.H {
 				pt.Fill(ui.Rect{X: r.X, Y: y, W: r.W, H: lineHeight(caretLine)}, p.line, 0)
+			}
+			for _, l := range caretLines {
+				if !g.hidden(l) {
+					pt.Fill(ui.Rect{X: r.X, Y: lineY(r, l), W: r.W, H: lineHeight(l)}, p.line, 0)
+				}
 			}
 			// The line a jump landed on, lit, fading as the eye finds it.
 			if since := pt.Now().Sub(d.landAt); !d.landAt.IsZero() && since >= 0 && since < landFor && d.landLine < lines {
@@ -633,6 +872,9 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			// rows of a line that wraps.
 			for k, level := range deco.levels {
 				i := deco.first + k
+				if g.hidden(i) {
+					continue
+				}
 				y, h := lineY(r, i), lineHeight(i)
 				for l := range level {
 					col := p.guide
@@ -680,6 +922,9 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 				})
 			}
 			for _, h := range hints {
+				if g.hidden(h.line) {
+					continue
+				}
 				y := lineY(r, h.line)
 				pt.Fill(ui.Rect{X: r.X + h.x - 4, Y: y + 2, W: h.w + 8, H: lineH - 4}, p.accent.Alpha(0.09), 4)
 				icon := size * 0.85
@@ -688,26 +933,21 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 				_, th := pt.MeasureText(0, span)
 				pt.RichText(r.X+h.x+icon+hintGap*charW, y+(lineH-th)/2, 0, span)
 			}
-			if blame != "" {
-				span := ui.Span{Text: blame, Font: family, Size: size * 0.92, Color: p.faint}
-				x, y := blameX, lineY(r, caretLine)
-				if wrap {
-					var row int
-					x, row, span.Text = a.blameAfterRows(d, snap, caretLine, blame, textX, r.W-textPadR, func(t string) float32 {
-						w, _ := pt.MeasureText(0, ui.Span{Text: t, Font: family, Size: span.Size})
-						return w
-					})
-					y += float32(row) * lineH
-				}
-				if span.Text != "" {
-					_, h := pt.MeasureText(0, span)
-					pt.RichText(r.X+x, y+(lineH-h)/2, 0, span)
-				}
+			if blameShown != "" {
+				span := ui.Span{Text: blameShown, Font: family, Size: size * 0.92, Color: p.faint}
+				y := lineY(r, caretLine) + float32(blameRow)*lineH
+				_, h := pt.MeasureText(0, span)
+				pt.RichText(r.X+blameX, y+(lineH-h)/2, 0, span)
 			}
 		})
 		area.DrawOver(func(pt *ui.Painter, r ui.Rect) {
 			if wr == nil {
 				rowsAt(r)
+			}
+			for _, cr := range carets {
+				place(r, cr.line, cr.x0, cr.x0+0.01, func(y, x0, _ float32) {
+					pt.Fill(ui.Rect{X: x0 - 0.75, Y: y, W: 1.5, H: lineH}, caretCol, 0)
+				})
 			}
 			// Struck text has a line through it, over the text.
 			for _, m := range strikes {
@@ -724,11 +964,13 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 			x := r.X + d.hscroll.X
 			top := d.vscroll.Y
 			from, to := a.linesInView(g, top, r.H)
+			// A mark after each line folded, which a click opens.
+			a.paintFoldPills(pt, d, snap, g, from, to, r, place)
 			stuck := float32(len(sticky)) * lineH
 			_, numH := pt.MeasureText(0, ui.Span{Text: "0", Font: family, Size: size})
 			number := func(i int, y float32, col ui.Color) {
 				label := strconv.Itoa(i + 1)
-				pt.RichText(x+gutterW-14-float32(len(label))*charW, y+(lineH-numH)/2, 0,
+				pt.RichText(x+gutterW-14-foldColW-float32(len(label))*charW, y+(lineH-numH)/2, 0,
 					ui.Span{Text: label, Font: family, Size: size, Color: col})
 			}
 
@@ -790,6 +1032,9 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 				// notch where lines were removed.
 				barX := x + gutterW - 7
 				for i := from; i <= min(to, len(marks)-1); i++ {
+					if g.hidden(i) {
+						continue
+					}
 					y, h := lineY(r, i), lineHeight(i)
 					switch marks[i] {
 					case linediff.Added:
@@ -810,6 +1055,9 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 				}
 				// A number by the first row of each line.
 				for i := from; i <= to; i++ {
+					if g.hidden(i) {
+						continue
+					}
 					col := p.gutter
 					if i == caretLine && focused {
 						col = p.gutterNow
@@ -818,6 +1066,7 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 					}
 					number(i, lineY(r, i), col)
 				}
+				a.paintFoldChevrons(pt, d, snap, g, foldRanges, from, to, x+gutterW-14-foldColW, func(i int) float32 { return lineY(r, i) })
 			})
 			for k, row := range sticky {
 				number(row.line, r.Y+float32(k)*lineH, p.muted)
@@ -837,12 +1086,7 @@ func (a *app) editorView(c *ui.Context, d *editor) {
 // when the app edits its text, and guesses them again. The line is -1
 // when there was no edit, or one scrolled where it goes.
 func (a *app) runCmds(d *editor) (keepLine int, keepY float32) {
-	keepLine = -1
-	if a.wraps(d) {
-		g := a.geometry(d, d.buf.Snapshot().LineCount())
-		keepLine = g.at(d.vscroll.Y - editorPadY)
-		keepY = editorPadY + g.top(keepLine) - d.vscroll.Y
-	}
+	keepLine, keepY = a.topLine(d)
 	y, version := d.vscroll.Y, d.buf.Snapshot().Version()
 	cmds := d.cmds
 	d.cmds = nil
@@ -856,10 +1100,21 @@ func (a *app) runCmds(d *editor) (keepLine int, keepY float32) {
 	return keepLine, keepY
 }
 
+// topLine returns the line at the top of the view and where it shows,
+// while the lines wrap, -1 otherwise: an edit of the app's keeps it there.
+func (a *app) topLine(d *editor) (line int, y float32) {
+	if !a.wraps(d) {
+		return -1, 0
+	}
+	g := a.geometry(d, d.buf.Snapshot().LineCount())
+	line = g.at(d.vscroll.Y - editorPadY)
+	return line, editorPadY + g.top(line) - d.vscroll.Y
+}
+
 // linesInView returns the first and last lines that show, a little of
 // them or all, in a view viewH high, the area scrolled to y.
 func (a *app) linesInView(g geometry, y, viewH float32) (first, last int) {
-	if g.lines == nil {
+	if g.laid() == nil {
 		first = max(0, int((y-editorPadY)/g.lineH))
 		return first, min(g.n-1, first+int(viewH/g.lineH)+1)
 	}

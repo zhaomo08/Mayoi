@@ -11,13 +11,13 @@ import (
 )
 
 // crossFade is how a tab's cross comes and goes with the pointer.
-var crossFade = ui.ElementTransition{Duration: 100 * time.Millisecond, Enter: &ui.Motion{}, Exit: &ui.Motion{}}
+var crossFade = ui.ElementTransition{Duration: motionTap, Enter: &ui.Motion{}, Exit: &ui.Motion{}}
 
 // tabWheelGlide is how a notch of the wheel scrolls the tabs, as it scrolls
 // a container elsewhere; tabWheelLand is a touchpad's move, which already
 // follows the fingers, and so lands in the frame after it.
 var (
-	tabWheelGlide = ui.Animation{Duration: 150 * time.Millisecond, Ease: ui.EaseOut}
+	tabWheelGlide = ui.Animation{Duration: motionShow, Ease: ui.EaseOut}
 	tabWheelLand  = ui.Animation{Duration: time.Millisecond, Ease: ui.EaseOut}
 )
 
@@ -61,6 +61,11 @@ func (a *app) tabStrip(c *ui.Context, col *column) {
 		strip = strip.HandleInput(func(ev ui.InputEvent) bool { return a.tabWheel(col, ev) })
 		// Past the last tab: there.
 		drop(strip, nil)
+		// A double click past the last tab opens a new file there, as in
+		// other editors; one on a tab is the tab's own.
+		if strip.DoubleClicked() {
+			a.post(func() { a.newFileIn(col) })
+		}
 		_, atEnd := a.dragOver(strip)
 		atEnd = atEnd || strip.FileDragOver()
 		strip.Children(func() {
@@ -69,7 +74,7 @@ func (a *app) tabStrip(c *ui.Context, col *column) {
 					active := i == col.active
 					tip := locales.TabTerminal()
 					switch {
-					case t.tool != nil:
+					case t.tool != nil, t.issue != nil:
 						tip = t.name()
 					case t.term == nil:
 						tip = a.relOrPath(t.path())
@@ -144,6 +149,8 @@ func (a *app) tabStrip(c *ui.Context, col *column) {
 							icon, tint = iconDiff, p.changed
 						case t.tool != nil:
 							icon, tint = t.tool.icon(), p.accent
+						case t.issue != nil:
+							icon, tint = t.issue.icon(), p.addedFg
 						case t.term == nil:
 							icon, tint = fileIcon(p, t.name())
 						}
@@ -161,7 +168,9 @@ func (a *app) tabStrip(c *ui.Context, col *column) {
 						case t.ed != nil && t.ed.diskGone, t.view != nil && t.view.diskGone:
 							name.TextColor(p.dangerFg).Strikethrough()
 						case active:
-							name.FontWeight(550).TextColor(p.text)
+							// In color alone: a heavier weight would widen the tab
+							// and move those after it.
+							name.TextColor(p.text)
 						default:
 							name.TextColor(p.muted)
 						}
@@ -176,6 +185,9 @@ func (a *app) tabStrip(c *ui.Context, col *column) {
 							switch {
 							case t.ed != nil && t.ed.dirty() && !x.Hovered():
 								ui.Box(c.Key("dot")).Size(8, 8).Radius(4).Background(p.text.Alpha(0.7)).Transition(dotPop)
+							case t.pinned && !x.Hovered():
+								// A pinned tab shows its pin, the cross under the pointer.
+								ui.Icon(c.Key("pin"), iconPin).FontSize(12).TextColor(p.muted).Transition(crossFade)
 							case active || hovered || x.Hovered():
 								ui.Icon(c.Key("x"), iconX).FontSize(13).TextColor(p.muted).Transition(crossFade)
 							}
@@ -292,13 +304,30 @@ func (a *app) tabMenu(m *ui.Menu, col *column, t *colTab, closing **colTab) {
 		a.post(func() { a.closeOthers(col, t) })
 	}
 	if m.Item(locales.TabCloseAll()).Chosen() {
-		a.post(func() { a.closeTabs(slices.Clone(col.tabs), nil, nil) })
+		// Pinned tabs stay.
+		a.post(func() {
+			a.closeTabs(slices.DeleteFunc(slices.Clone(col.tabs), func(t *colTab) bool { return t.pinned }), nil, nil)
+		})
+	}
+	pin := locales.TabPin()
+	if t.pinned {
+		pin = locales.TabUnpin()
+	}
+	if m.Item(pin).Chosen() {
+		a.post(func() { a.pinTab(t, !t.pinned) })
 	}
 	m.Separator()
-	a.pluginMenuItems(m, "tab/context", t.path())
+	var pluginDoc *document
+	if t.ed != nil {
+		pluginDoc = t.ed.document
+	}
+	a.pluginMenuItems(m, "tab/context", t.path(), a.pluginContext("tab/context", pluginDoc))
 	a.columnLockMenu(m, col)
 	if m.Item(locales.CmdViewSplitRight()).Chosen() {
 		show(a.splitRight)
+	}
+	if m.Item(locales.CmdViewSplitDown()).Chosen() {
+		show(a.splitDown)
 	}
 	at := slices.Index(a.cols, col)
 	alone := len(col.tabs) < 2

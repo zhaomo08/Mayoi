@@ -17,8 +17,24 @@ import (
 
 	gitpkg "mayoi/internal/git"
 	"mayoi/internal/linediff"
+	"mayoi/internal/remote"
 	"mayoi/locales"
 )
+
+func TestRemoteStatusDirsKeepSlashPaths(t *testing.T) {
+	root := remote.Path("box", "/home/me/app")
+	file := remote.Join(root, "src/a.go")
+	ctx := &gitContext{git: &gitState{repo: &gitpkg.Repo{Root: root}}}
+	ctx.setStatus(&gitpkg.Status{Entries: []gitpkg.Entry{{Path: file, X: '.', Y: 'M'}}})
+	if ctx.git.dirs[remote.Join(root, "src")] != 'M' {
+		t.Fatalf("dirs %#v", ctx.git.dirs)
+	}
+	for dir := range ctx.git.dirs {
+		if strings.Contains(dir, `\`) {
+			t.Errorf("backslash dir %q", dir)
+		}
+	}
+}
 
 // gitRepo makes the harness's folder a work tree with all its files
 // committed, and returns a function that runs git there.
@@ -310,9 +326,9 @@ func TestGutterHunkActions(t *testing.T) {
 	a.openFile(hs.path("main.go"), true)
 	hs.settleGit()
 	d := a.activeEditor()
-	if hs := editorHunks(d); len(hs) != 2 {
-		t.Fatalf("hunks %v", hs)
-	}
+	hs.until("the hunks", func() bool { return len(editorHunks(d)) == 2 })
+	// The click goes where the gutter is once the layout has settled.
+	hs.settle()
 	// A click on the mark of line 7 shows what it was.
 	x := a.window.SidebarWidth + d.gutterW - 5
 	y := titleBarH + tabStripH + crumbsH + editorPadY + 6.5*a.font.lineH
@@ -465,6 +481,214 @@ func TestBlameWraps(t *testing.T) {
 	}
 	if _, _, text := a.blameAfterRows(d, snap, 3, d.blame.text, 0, x+10*f.charW, width); text != "t, just n…" {
 		t.Errorf("blame cut to %q", text)
+	}
+}
+
+// waitReloaded waits for an open editor to take the text written to its
+// file: opening the file again reads nothing, the watcher reloads it, and
+// on Windows its event can come after the settling, the reload then making
+// the line blamed anew.
+func waitReloaded(hs *harness, d *editor, text string) {
+	hs.t.Helper()
+	hs.until("the editor takes the file's new text", func() bool { return d.buf.String() == text })
+	hs.settleGit()
+}
+
+// A blame the view cuts short shows all of it as the pointer rests on
+// the part it shows.
+func TestBlameTipShowsCutText(t *testing.T) {
+	hs := newHarness(t, true)
+	git := hs.gitRepo()
+	a := hs.a
+	a.openFile(hs.path("README.md"), true)
+	hs.settleGit()
+	d := a.activeEditor()
+	area, ok := hs.tt.Find(locales.EditorLabel(d.name()))
+	if !ok {
+		t.Fatal("no editor")
+	}
+	// A line as wide as the view: its blame starts inside the view and
+	// runs past its right edge.
+	n := int((area.W - 90 - d.textX - 4*a.font.charW) / a.font.charW)
+	if n < 20 {
+		t.Fatalf("the editor is too narrow for the test: %v wide", area.W)
+	}
+	text := "# Mayoi\n\nA small editor.\n" + strings.Repeat("x", n) + "\n"
+	os.WriteFile(hs.path("README.md"), []byte(text), 0o644)
+	git("commit", "-qam", "a long line, its blame cut")
+	a.openFile(hs.path("README.md"), true)
+	hs.settleGit()
+	d = a.activeEditor()
+	waitReloaded(hs, d, text)
+	area, ok = hs.tt.Find(locales.EditorLabel(d.name()))
+	if !ok {
+		t.Fatal("no editor")
+	}
+	const line = 3
+	s, _ := d.buf.Snapshot().LineRange(line)
+	d.selectRange(s, s, false)
+	hs.settle()
+	hs.until("the line is blamed", func() bool {
+		step(hs.tt)
+		return d.blame.phase == blameRead && d.blame.line == line
+	})
+	step(hs.tt)
+	if d.blame.text == "" {
+		t.Fatal("no blame")
+	}
+	if hs.tt.HasText(d.blame.text) {
+		t.Fatal("the full blame shows before the pointer rests")
+	}
+	bx := area.X + d.textX + a.font.width(d.buf.Snapshot().Slice(s, s+n)) + 4*a.font.charW
+	if bx >= area.X+area.W {
+		t.Fatalf("the blame starts at %v, out of the view %v wide", bx-area.X, area.W)
+	}
+	x, y := bx+2*a.font.charW, area.Y+editorPadY+line*a.font.lineH+a.font.lineH/2
+	if x > area.X+area.W-2 {
+		x = area.X + area.W - 2
+	}
+	// The pointer rests on the part of the blame the view shows, which is
+	// not all of it.
+	hs.tt.Move(x, y)
+	hs.tt.Advance(500 * time.Millisecond)
+	if hs.tt.HasText(d.blame.text) {
+		t.Fatal("the tip shows before the pointer rested")
+	}
+	hs.tt.Advance(200 * time.Millisecond)
+	hs.tt.Frame()
+	if !hs.tt.HasText(d.blame.text) {
+		t.Fatalf("DEBUG blame=%+v line=%q; no tip over the cut blame; texts %q", d.blame, d.buf.Snapshot().String(), hs.tt.Texts())
+	}
+	hs.shot("blame-tip")
+	// The tip takes no pointer: the text area keeps the I-beam, and a
+	// drag that starts on the blame selects the lines it passes.
+	if cur := hs.tt.Cursor(); cur != ui.CursorText {
+		t.Errorf("cursor over the blame = %v, want the I-beam", cur)
+	}
+	ex, ey := area.X+d.textX+2*a.font.charW, area.Y+editorPadY+a.font.lineH*1.5
+	hs.tt.Press(x, y)
+	hs.tt.Frame()
+	hs.tt.Move(ex, ey)
+	hs.tt.Frame()
+	hs.tt.Release(ex, ey)
+	hs.settle()
+	snap := d.buf.Snapshot()
+	from, to := snap.LineAt(d.sel[0]), snap.LineAt(d.sel[1])
+	if min(from, to) != 1 || max(from, to) != line {
+		t.Fatalf("the drag from the blame selected lines %d..%d", min(from, to)+1, max(from, to)+1)
+	}
+}
+
+// With word wrap, a blame cut on the last row of its line shows all of
+// it too.
+func TestBlameTipWraps(t *testing.T) {
+	hs := newHarness(t, true)
+	git := hs.gitRepo()
+	a := hs.a
+	a.settings.WordWrap = true
+	a.openFile(hs.path("README.md"), true)
+	hs.settleGit()
+	d := a.activeEditor()
+	area, ok := hs.tt.Find(locales.EditorLabel(d.name()))
+	if !ok {
+		t.Fatal("no editor")
+	}
+	// The line takes two rows, the last leaving no room for the blame.
+	row := int((area.W - d.textX - textPadR) / a.font.charW)
+	n := 2*row - 20
+	if row < 40 {
+		t.Fatalf("the editor is too narrow for the test: %v wide", area.W)
+	}
+	text := "# Mayoi\n\nA small editor.\n" + strings.Repeat("x", n) + "\n"
+	os.WriteFile(hs.path("README.md"), []byte(text), 0o644)
+	git("commit", "-qam", "a long line that wraps, its blame cut")
+	a.openFile(hs.path("README.md"), true)
+	hs.settleGit()
+	d = a.activeEditor()
+	waitReloaded(hs, d, text)
+	area, ok = hs.tt.Find(locales.EditorLabel(d.name()))
+	if !ok {
+		t.Fatal("no editor")
+	}
+	const line = 3
+	s, e := d.buf.Snapshot().LineRange(line)
+	d.selectRange(s, s, false)
+	hs.settle()
+	hs.until("the line is blamed", func() bool {
+		step(hs.tt)
+		return d.blame.phase == blameRead && d.blame.line == line
+	})
+	step(hs.tt)
+	if d.blame.text == "" {
+		t.Fatal("no blame")
+	}
+	rows := d.lines.AppendRows(nil, line)
+	if len(rows) < 2 {
+		t.Fatalf("the line took %d rows, not two", len(rows))
+	}
+	last := e - s - rows[len(rows)-1]
+	bx := area.X + d.textX + float32(last)*a.font.charW + 4*a.font.charW
+	x := bx + 2*a.font.charW
+	if x > area.X+area.W-2 {
+		x = area.X + area.W - 2
+	}
+	y := area.Y + editorPadY + float32(line+len(rows)-1)*a.font.lineH + a.font.lineH/2
+	hs.tt.Move(x, y)
+	hs.tt.Advance(700 * time.Millisecond)
+	hs.tt.Frame()
+	if !hs.tt.HasText(d.blame.text) {
+		t.Fatalf("no tip over the blame cut on its last row; texts %q", hs.tt.Texts())
+	}
+	hs.shot("blame-tip-wraps")
+}
+
+// Scrolled sideways, a blame whose start went under the gutter shows all
+// of it too, over the part the gutter leaves, and not over the gutter.
+func TestBlameTipCutOnTheLeft(t *testing.T) {
+	hs := newHarness(t, true)
+	git := hs.gitRepo()
+	a := hs.a
+	// A wider line below lets the view scroll past the blame's start.
+	os.WriteFile(hs.path("README.md"), []byte("# Mayoi\n\nA small editor.\n"+strings.Repeat("x", 300)+"\n"+strings.Repeat("y", 700)+"\n"), 0o644)
+	git("commit", "-qam", "a long line, its blame under the gutter")
+	a.openFile(hs.path("README.md"), true)
+	hs.settleGit()
+	d := a.activeEditor()
+	area, ok := hs.tt.Find(locales.EditorLabel(d.name()))
+	if !ok {
+		t.Fatal("no editor")
+	}
+	const line = 3
+	snap := d.buf.Snapshot()
+	s, e := snap.LineRange(line)
+	d.selectRange(e, e, false)
+	hs.settle()
+	hs.until("the line is blamed", func() bool {
+		step(hs.tt)
+		return d.blame.phase == blameRead && d.blame.line == line
+	})
+	step(hs.tt)
+	if d.blame.text == "" {
+		t.Fatal("no blame")
+	}
+	bx := d.textX + a.font.width(snap.Slice(s, e)) + 4*a.font.charW
+	d.hscroll.X = bx - d.textX + 3*a.font.charW
+	hs.tt.Frame()
+	y := area.Y + editorPadY + line*a.font.lineH + a.font.lineH/2
+	// Over the gutter, where the blame's start is hidden, nothing.
+	hs.tt.Move(area.X+d.textX/2, y)
+	hs.tt.Frame()
+	hs.tt.Advance(700 * time.Millisecond)
+	hs.tt.Frame()
+	if hs.tt.HasText(d.blame.text) {
+		t.Fatal("the tip shows over the gutter")
+	}
+	hs.tt.Move(area.X+d.textX+2*a.font.charW, y)
+	hs.tt.Frame()
+	hs.tt.Advance(700 * time.Millisecond)
+	hs.tt.Frame()
+	if !hs.tt.HasText(d.blame.text) {
+		t.Fatalf("no tip over the blame cut on the left; texts %q", hs.tt.Texts())
 	}
 }
 
@@ -683,6 +907,7 @@ func TestDiffTab(t *testing.T) {
 	hs.shot("git-diff-split")
 	// Typing in the file changes the diff.
 	a.openFile(hs.path("main.go"), true)
+	hs.settle()
 	d := a.activeEditor()
 	d.edit(d.sel, textEdit{0, 0, "// top\n"})
 	col, i := a.changesTab()
@@ -919,10 +1144,19 @@ func TestDiffFolds(t *testing.T) {
 	hs.settleGit()
 	a.toggleDiffWrap(v)
 	hs.settle()
-	tall := 0
-	for _, r := range v.rows {
-		tall = max(tall, r.h)
+	tallest := func() int {
+		tall := 0
+		for _, r := range v.rows {
+			tall = max(tall, r.h)
+		}
+		return tall
 	}
+	// The diff reads the file again in the background, which on a busy
+	// machine can come after git's status has settled.
+	for deadline := time.Now().Add(settleTimeout); tallest() < 3 && time.Now().Before(deadline); {
+		hs.settleGit()
+	}
+	tall := tallest()
 	if tall < 3 || v.tops[len(v.rows)] <= len(v.rows) {
 		t.Errorf("wrapped: tallest row %d", tall)
 	}

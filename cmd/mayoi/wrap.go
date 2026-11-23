@@ -1,7 +1,7 @@
 package main
 
 import (
-	"unicode/utf8"
+	"slices"
 
 	"github.com/egoist/mygo/ui"
 
@@ -11,6 +11,9 @@ import (
 // wraps reports whether an editor wraps its lines: as its tab chose, or
 // else as the settings say.
 func (a *app) wraps(d *editor) bool {
+	if a.livePreview(d) {
+		return true // Live Preview's text reads as a page
+	}
 	if d.wrap != nil && d.wrapGen == a.settings.WrapGen {
 		return *d.wrap
 	}
@@ -66,11 +69,16 @@ func (a *app) toggleMergeWrap(v *mergeView) {
 
 // geometry places the lines of an editor in the text area's content,
 // below its padding: one row each, lineH apart, or where the area laid
-// them out, as it wraps them.
+// them out, as it wraps them or as it folds them.
 type geometry struct {
+	gaps  map[int]float32
 	lines *ui.TextLines // nil while the editor does not wrap
 	lineH float32
 	n     int // the lines
+	// folds is where the area laid out the lines of an editor that does
+	// not wrap while it folds some, and runs the lines hidden.
+	folds *ui.TextLines
+	runs  []hiddenRun
 }
 
 func (a *app) geometry(d *editor, n int) geometry {
@@ -78,23 +86,54 @@ func (a *app) geometry(d *editor, n int) geometry {
 	if a.wraps(d) {
 		g.lines = &d.lines
 	}
+	if len(d.folding.marks) > 0 || d.folding.settle {
+		g.runs = a.hiddenRuns(d, d.buf.Snapshot())
+		if g.lines == nil {
+			g.folds = &d.lines
+		}
+	}
+	if len(d.currentLenses()) > 0 && !a.livePreview(d) {
+		g.gaps = map[int]float32{}
+		if g.laid() == nil {
+			g.folds = &d.lines
+		}
+		a.codeLensGaps(d, g)
+	}
 	return g
+}
+
+// laid returns where the area laid out the lines, nil where they are all
+// lineH apart.
+func (g geometry) laid() *ui.TextLines {
+	if g.lines != nil {
+		return g.lines
+	}
+	return g.folds
 }
 
 // top returns the top of line i.
 func (g geometry) top(i int) float32 {
-	if g.lines != nil {
-		return g.lines.Top(i)
+	if l := g.laid(); l != nil {
+		return l.Top(i) + g.gaps[i]
 	}
 	return float32(i) * g.lineH
 }
 
-// at returns the line at y, within the text.
+// at returns the line at y, within the text: one that shows, not one a
+// fold hides.
 func (g geometry) at(y float32) int {
-	if g.lines != nil {
-		return g.lines.At(y)
+	l := g.laid()
+	if l == nil {
+		return min(max(0, int(y/g.lineH)), g.n-1)
 	}
-	return min(max(0, int(y/g.lineH)), g.n-1)
+	i := l.At(y)
+	if r, ok := runAt(g.runs, i); ok {
+		if r.to+1 < g.n {
+			return r.to + 1
+		}
+		return max(0, r.from-1)
+	}
+	return i
 }
 
 // topF returns the top of a fractional line i, between the tops of the
@@ -102,34 +141,42 @@ func (g geometry) at(y float32) int {
 // Below the first line it goes on by the first line's rows, as i*lineH
 // does and as atF reads it back.
 func (g geometry) topF(i float32) float32 {
-	if g.lines == nil {
+	l := g.laid()
+	if l == nil {
 		return i * g.lineH
 	}
 	if i < 0 {
-		return i * (g.lines.Top(1) - g.lines.Top(0))
+		return i * (l.Top(1) - l.Top(0))
 	}
 	lo, f := float32(int(i)), i-float32(int(i))
-	t0 := g.lines.Top(int(lo))
+	t0 := l.Top(int(lo))
 	if f == 0 {
 		return t0
 	}
-	return t0 + f*(g.lines.Top(int(lo)+1)-t0)
+	return t0 + f*(l.Top(int(lo)+1)-t0)
 }
 
 // atF returns the fractional line at y: the line y falls in, and how far
 // into it, as the line across from y goes. Past the last line it stays
 // at the last.
 func (g geometry) atF(y float32) float32 {
-	if g.lines == nil {
+	l := g.laid()
+	if l == nil {
 		return min(y/g.lineH, float32(g.n))
 	}
-	i := g.lines.At(y)
-	t0 := g.lines.Top(i)
-	t1 := g.lines.Top(i + 1)
+	i := g.at(y)
+	t0 := l.Top(i)
+	t1 := l.Top(i + 1)
 	if t1 <= t0 {
 		return float32(i)
 	}
 	return min(float32(i)+(y-t0)/(t1-t0), float32(g.n))
+}
+
+// hidden reports whether a fold hides line i.
+func (g geometry) hidden(i int) bool {
+	_, ok := runAt(g.runs, i)
+	return ok
 }
 
 // height returns the height of all the lines.
@@ -178,6 +225,15 @@ type wrapRows struct {
 
 	starts [][]float32 // of lines first up to last; nil for one row
 	runes  []int
+	// lines keeps the rows of each line found at version, in font, for
+	// scrolling to find again only the lines it brings into view.
+	lines map[int]wrappedLine
+}
+
+// wrappedLine holds the runes a line's rows start at, and their x's.
+type wrappedLine struct {
+	runes []int
+	xs    []float32
 }
 
 // rowsOf finds the rows of lines first up to last, as the text area,
@@ -187,46 +243,76 @@ func (a *app) rowsOf(d *editor, snap ui.TextSnapshot, first, last int, width flo
 	if wr.found && wr.version == snap.Version() && wr.first == first && wr.last == last && wr.width == width && wr.font == a.font {
 		return wr
 	}
+	if wr.lines == nil || wr.version != snap.Version() || wr.font != a.font {
+		wr.lines = map[int]wrappedLine{}
+	}
 	wr.version, wr.first, wr.last, wr.width, wr.font, wr.found = snap.Version(), first, last, width, a.font, true
 	clear(wr.starts)
 	wr.starts = wr.starts[:0]
-	f := a.font
 	for i := first; i <= last; i++ {
 		wr.runes = d.lines.AppendRows(wr.runes[:0], i)
 		if len(wr.runes) < 2 {
 			wr.starts = append(wr.starts, nil)
 			continue
 		}
-		s, e := snap.LineRange(i)
-		text := snap.Slice(s, e)
-		xs := make([]float32, 0, len(wr.runes))
-		ascii := isASCII(text)
-		var x float32
-		k, at := 0, 0 // the rune, and the row next found
-		for j, r := range text {
-			for at < len(wr.runes) && wr.runes[at] == k {
-				xs = append(xs, x)
-				at++
-			}
-			if at == len(wr.runes) {
-				break
-			}
-			switch {
-			case r == '\t':
-				x = f.afterTab(x)
-			case ascii || e-s > highlightRunes:
-				x += f.charW
-			default:
-				x = f.width(text[:j+utf8.RuneLen(r)])
-			}
-			k++
+		if lr, ok := wr.lines[i]; ok && slices.Equal(lr.runes, wr.runes) {
+			wr.starts = append(wr.starts, lr.xs)
+			continue
 		}
-		for len(xs) < len(wr.runes) {
-			xs = append(xs, x)
-		}
+		xs := a.rowXs(snap, i, wr.runes)
+		wr.lines[i] = wrappedLine{slices.Clone(wr.runes), xs}
 		wr.starts = append(wr.starts, xs)
 	}
+	// Forget the lines far out of view.
+	if span := last - first + 1; len(wr.lines) > 4*span+4*rowSlack {
+		for i := range wr.lines {
+			if i < first-span-rowSlack || i > last+span+rowSlack {
+				delete(wr.lines, i)
+			}
+		}
+	}
 	return wr
+}
+
+// rowXs returns the x's along line i where its rows, starting at runes,
+// start. ASCII goes by its cells; anything else is shaped a row at a time,
+// not up to each rune, for a long line to cost its length once.
+func (a *app) rowXs(snap ui.TextSnapshot, i int, runes []int) []float32 {
+	f := a.font
+	s, e := snap.LineRange(i)
+	text := snap.Slice(s, e)
+	xs := make([]float32, 0, len(runes))
+	cells := isASCII(text) || e-s > highlightRunes
+	var x float32
+	k, at, from := 0, 0, 0 // the rune, the row next found, and the byte x is at
+	for j, r := range text {
+		for at < len(runes) && runes[at] == k {
+			if !cells {
+				x = f.widthFrom(x, text[from:j])
+				from = j
+			}
+			xs = append(xs, x)
+			at++
+		}
+		if at == len(runes) {
+			break
+		}
+		if cells {
+			if r == '\t' {
+				x = f.afterTab(x)
+			} else {
+				x += f.charW
+			}
+		}
+		k++
+	}
+	if !cells && len(xs) < len(runes) {
+		x = f.widthFrom(x, text[from:])
+	}
+	for len(xs) < len(runes) {
+		xs = append(xs, x)
+	}
+	return xs
 }
 
 // rowStarts returns where the rows of line i start along it, nil for a

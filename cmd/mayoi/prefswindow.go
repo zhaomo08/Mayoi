@@ -108,6 +108,9 @@ func (m *mayoi) showPrefs(section, key string, from *desktop) {
 			Title: locales.PrefsTitle(), Width: 940, Height: 680, MinWidth: 640, MinHeight: 420,
 			StateKey: "settings", BackgroundColor: "#131317", Content: ui.View(w.view),
 		})
+		// A field closed with the window, which no frame draws without,
+		// keeps what was typed in it.
+		w.win.OnClose(func(*mygo.CloseEvent) { w.closing() })
 		w.win.OnClosed(func() {
 			if m.prefs == w {
 				m.prefs = nil
@@ -439,8 +442,8 @@ func (w *prefsWindow) sectionMark(c *ui.Context, section string, focused bool) f
 	}
 	host := ui.Box(c.Key("prefs-section-mark")).Absolute().Size(0, 0)
 	y := host.Animate("y", item.Y-list.Y, 160*time.Millisecond)
-	fill = host.AnimateColor("fill", fill, ui.Animation{Duration: 120 * time.Millisecond})
-	edge = host.AnimateColor("edge", edge, ui.Animation{Duration: 120 * time.Millisecond})
+	fill = host.AnimateColor("fill", fill, ui.Animation{Duration: motionHover})
+	edge = host.AnimateColor("edge", edge, ui.Animation{Duration: motionHover})
 	x, h := item.X-list.X, item.H
 	return func(pt *ui.Painter, r ui.Rect) {
 		box := ui.Rect{X: r.X + x, Y: r.Y + y, W: item.W, H: h}
@@ -658,7 +661,7 @@ func (w *prefsWindow) row(c *ui.Context, f settings.Field, scope *prefFolder) {
 	}
 	raw := eff.Raw(f.Key)
 	row := ui.Column(c.Key("prefs-row-"+f.Key)).Padding(14, 16).Gap(10).Transition(ui.ElementTransition{
-		Colors: true, Duration: 160 * time.Millisecond, Enter: &ui.Motion{Y: 4},
+		Colors: true, Duration: motionShow, Enter: &ui.Motion{Y: 4},
 	})
 	if f.Key == w.jump {
 		row.ScrollIntoView()
@@ -904,6 +907,36 @@ func (w *prefsWindow) settleDrafts() {
 		}
 	}
 	clear(w.drawn)
+}
+
+// commitDrafts applies what was typed in the fields the window closes with.
+// A field that goes away with its page applies as the window is drawn
+// without it, but a window closing draws no frame after the one that typed:
+// it applies here instead.
+func (w *prefsWindow) commitDrafts() {
+	for key, apply := range w.drafts {
+		delete(w.drafts, key)
+		w.editing[key] = false
+		apply()
+	}
+}
+
+// closing applies what was typed in the fields the window closes with,
+// and has the window in front show what failed, as this one no longer
+// draws.
+func (w *prefsWindow) closing() {
+	w.commitDrafts()
+	if len(w.errors) == 0 || len(w.m.wins) == 0 {
+		return
+	}
+	errs := slices.Clone(w.errors)
+	w.errors = w.errors[:0]
+	h := w.m.wins[0]
+	h.do(func() {
+		for _, msg := range errs {
+			h.a.fail("%s", msg)
+		}
+	})
 }
 
 // listSuggestions are what a list of a preference offers.

@@ -64,6 +64,12 @@ type host interface {
 	// setLocale shows the windows in the language of tag, or of the
 	// system for "".
 	setLocale(tag string)
+	// focused is whether the window is the one the keys go to, of the
+	// app in front.
+	focused() bool
+	// notify shows a notification of the system, which a click brings
+	// the window to the front for, then runs onClick on its app.
+	notify(title, body string, onClick func())
 	// showFolder brings the other window that has dir open to the front,
 	// and reports whether there is one.
 	showFolder(dir string) bool
@@ -85,10 +91,18 @@ type host interface {
 	showSettings(section, key string)
 	// redrawWindows draws every window with the current font and zoom.
 	redrawWindows()
+	// quitApp quits Mayoi as Cmd+Q does, asking first in this window
+	// while confirmBeforeQuit is on.
+	quitApp()
 	// installCLI and uninstallCLI put the mayoi command on the shell's
 	// path, and take it away, saying how it went.
 	installCLI()
 	uninstallCLI()
+	// addContextMenu and removeContextMenu put "Open with Mayoi" in
+	// Explorer's right-click menu on Windows, and take it away, saying how
+	// it went.
+	addContextMenu()
+	removeContextMenu()
 	// account is the name of the person settings sync syncs for, "" when
 	// signed out. signIn signs in, showing the code to approve in the
 	// window, signOut signs out, and syncNow syncs at once.
@@ -127,6 +141,10 @@ type host interface {
 	otherProjects() []*app
 	projectOf(t *colTab) *app
 	carryTab(t *colTab, to *app, copy bool)
+	// everyProject are the projects of every window, this one among
+	// them, and showApp shows the project to in its window, in front.
+	everyProject() []*app
+	showApp(to *app)
 	// nativeDrags reports whether a drag can leave the app as a system
 	// drag other apps read. The headless test host has no system
 	// pasteboard, and says no, which keeps drags in-process value drags
@@ -209,6 +227,11 @@ type app struct {
 	// crumbs is the box a folder of the breadcrumbs opens.
 	crumbs  crumbsPicker
 	fileRow int
+	// explorerSel are the files and folders Shift and Cmd choose with the
+	// row chosen, by their paths, none while it is chosen alone;
+	// explorerAnchor is the one Shift chooses from.
+	explorerSel    ui.Selection[string]
+	explorerAnchor string
 	// filesView is the explorer's list, which focusFiles has take the
 	// keyboard as it next shows.
 	filesView  ui.Handle
@@ -238,6 +261,8 @@ type app struct {
 	index     []string
 	recent    []string // the files shown last, latest first
 	indexRead bg.Refresher[folderKey]
+	// wikiSug is the box of suggestions of a wiki link being typed.
+	wikiSug wikiSuggest
 	// opening is set while a file opens as a preview tab.
 	opening bool
 	// openingText is set while a file opens for its text — a search
@@ -248,9 +273,17 @@ type app struct {
 	// docs are the documents open, each in a tab or several; cols the
 	// columns of the editor area, and col the one that has the keyboard,
 	// or had it last, which commands are for.
-	docs []*document
-	cols []*column
-	col  int
+	docs        []*document
+	localReads  int
+	localRead   localReader
+	localStuck  time.Duration // 0 is localReadStuck
+	loadsClosed bool
+	cols        []*column
+	// layout is how the columns are laid out, side by side and one above
+	// another; cols are its columns as they read.
+	layout   *tile
+	nextTile int
+	col      int
 	// findCol is the column the find widget shows in, the one with the
 	// keyboard as the frame's columns began: a click on another's tab as
 	// they draw moves col, and the widget's input binds one control.
@@ -265,11 +298,14 @@ type app struct {
 	// fileCol caches the last unlocked column used for files. Removal clears
 	// it; column and activate refresh it. Use fileColumn to resolve a live,
 	// unlocked target before opening files, including during restoration.
-	fileCol  *column
-	nextID   int
-	nextTab  int
-	nextCol  int
-	untitled int
+	fileCol        *column
+	nextID         int
+	pluginWindowID uint64
+	nextPluginCall uint64
+	pluginCalls    map[uint64]func()
+	nextTab        int
+	nextCol        int
+	untitled       int
 	// closed are the tabs closed, the last last, which ⇧⌘T opens again.
 	closed []closedTab
 	// shownDoc is the document the column with the keyboard showed last
@@ -301,23 +337,28 @@ type app struct {
 	// transfers are the copies to and from hosts running.
 	transfers []*transfer
 
-	panelMax    bool // the panel takes the editor's room
-	welcomeView ui.Handle
-	rain        rainState   // The Matrix's, behind the welcome page
-	mascot      mascotState // the theme's character, Claude's or Qoder's
-	toldAt      time.Time   // when a toast last told what a command did
-	spin        spinState   // Claude's spinner, while Git works
+	panelMax bool        // the panel takes the editor's room
+	rain     rainState   // The Matrix's, behind the welcome page
+	mascot   mascotState // the theme's character, Claude's or Qoder's
+	toldAt   time.Time   // when a toast last told what a command did
+	spin     spinState   // Claude's spinner, while Git works
 	// blurred is set while the window has not the keyboard.
-	blurred  bool
-	colsView ui.Handle // the columns, whose width their weights share
+	blurred bool
 	// frame counts the frames, and frameAt is when the last started: a
 	// frame may build the view several times.
 	frame   int
 	frameAt time.Time
+	// keyedAt is when a key last ran a binding, for keyedOpen.
+	keyedAt time.Time
 	// builds counts the builds of the view.
 	builds int
 	// dragging is set while a tab is dragged, as the frame before found.
 	dragging, dragNow bool
+	// rootMoveOver is set while a file or a folder of the explorer that
+	// would move into the workspace is over the space below its rows;
+	// moving holds those moving to a host, until it answers.
+	rootMoveOver bool
+	moving       map[string]bool
 	// carried is a tab of another project dragged in over the rail, until
 	// the drag ends: the frame clears it once nothing here sees the drag,
 	// dragSeen, any more. copyDrop says Alt is held, which copies a tab
@@ -353,14 +394,27 @@ type app struct {
 	// viewStates are the folders open and the row chosen in each plugin
 	// view the sidebar showed, by view id: this window's own.
 	viewStates map[string]*pluginView
-	hover      *hoverCard // the card Show Hover shows
+	hover      *hoverCard   // the card Show Hover shows
+	rest       pointerHover // the name the pointer rests on in an editor, for its card
+	nav        navHistory   // where Go Back and Go Forward go
+	defAsked   int          // the last language server jump, whose answer alone goes
+	hoverAsked int          // the Show Hover last asked, as defAsked
+	restAsked  int          // the hover the pointer last asked for, apart: it never drops Show Hover's
 	find       findState
 	inFiles    searchState // search in the files, of the sidebar
+	sessions   sessionsState
+	github     githubPanel
 	prompt     *prompt
 	confirm    *confirm
 	asks       []*confirm // the questions asked in the background, waiting their turn
 	signin     *signin
 	diagram    *diagramOverlay // a preview's diagram shown over the window
+	// completeAsked is the Complete Word last asked, as defAsked: each
+	// its own, so one does not drop another's answer.
+	completeAsked int
+	// picksOpened counts the pickers opened, Quick Open's and the plugins':
+	// an answer asked for before one opened does not take its place.
+	picksOpened int
 	// syncOpen shows the account's panel above its part of the status
 	// bar, and tickAt is when a countdown shown repaints next.
 	syncOpen bool
@@ -382,7 +436,10 @@ type app struct {
 	chord       []keymap.Stroke
 	keyFocus    keyPlace
 	cutInEditor bool
-	keyTerm     *session
+	// copyAll is whether the editor with the keyboard has several
+	// selections, which the Edit menu's Copy copies.
+	copyAll bool
+	keyTerm *session
 	// held is the key the keymap took last, until it is let go of.
 	held *ui.Key
 	// chain are the commands of runCommands still to run, which stop at
@@ -395,6 +452,10 @@ type app struct {
 	// rail builds the rail of project tabs left of the sidebar, nil for
 	// none.
 	rail func(c *ui.Context)
+	// shared is the sidebar this project last shared with the others,
+	// once it has (sharedSeen).
+	shared     sidebarShare
+	sharedSeen bool
 	// alert is what a terminal of the project last asked attention for,
 	// by its bell, a notification or work that finished or failed, until
 	// the project shows: the rail marks its square, in the color of
@@ -425,6 +486,7 @@ func newApp(h host, s *settings.Settings, w *settings.Window) *app {
 	a.scm.row, a.inFiles.row = -1, -1
 	a.files.List.Selected = &a.fileRow
 	a.cols = []*column{a.newColumn()}
+	a.layout = a.rowOf(a.cols)
 	return a
 }
 
@@ -528,7 +590,9 @@ func (a *app) start() {
 
 // openFolder makes dir the workspace.
 func (a *app) openFolder(dir string) {
-	dir = filepath.Clean(dir)
+	// remote.Clean keeps /ssh: and /wsl: as slash paths. filepath.Clean
+	// on Windows rewrites them with backslashes.
+	dir = remote.Clean(dir)
 	if a.tree != nil {
 		a.tree.Close()
 	}
@@ -545,6 +609,7 @@ func (a *app) openFolder(dir string) {
 	a.files = ui.OutlineState[string]{Indent: treeStep}
 	a.explorer = explorerTree{}
 	a.fileRow = -1
+	a.clearExplorerSelection()
 	a.files.List.Selected = &a.fileRow
 	a.index, a.ignored = nil, nil
 	a.indexRead.Invalidate()
@@ -602,7 +667,7 @@ func (a *app) closeFolder() {
 		a.resetRepositories()
 		a.root, a.tree, a.index, a.git = "", nil, nil, gitState{}
 		a.resetSearch()
-		a.closed = nil
+		a.closed, a.recent = nil, nil
 		a.window.Folder = ""
 		a.settings.Changed()
 	}, nil)
@@ -626,7 +691,8 @@ func (a *app) saveDocElse(d *document, then, cancelled func()) {
 				return
 			}
 			a.dropKept(d)
-			d.path = path
+			d.path, d.markdown = path, false
+			d.language, d.languageOwner, d.lexerOwner = "", "", nil
 			d.hl.Close()
 			d.hl = highlight.New(highlight.Lexer(path), a.invalidate)
 			a.saveDocElse(d, then, cancelled)
@@ -680,7 +746,12 @@ func (a *app) docEditor(d *document) *editor {
 }
 
 func (a *app) saveActive() {
-	if t := a.activeTab(); t != nil && t.merge != nil {
+	t := a.activeTab()
+	if t != nil {
+		// Saving keeps a preview tab, changed or not.
+		a.keepTab(t)
+	}
+	if t != nil && t.merge != nil {
 		a.saveMerge(t.merge)
 		return
 	}
@@ -703,7 +774,8 @@ func (a *app) saveDocAs(d *document, path string) {
 	if path == "" {
 		return
 	}
-	d.path = path
+	d.path, d.markdown = path, false
+	d.language, d.languageOwner, d.lexerOwner = "", "", nil
 	d.hl.Close()
 	d.hl = highlight.New(highlight.Lexer(path), a.invalidate)
 	a.saveDoc(d, nil)
@@ -727,6 +799,20 @@ func (a *app) diskChanged(changed, removed []string) {
 	}
 	a.indexRead.Invalidate()
 	a.ignoredRead.Invalidate()
+	// A note made or removed may be one a wiki link names: the previews
+	// find their links again.
+	if wikiFilesChanged(changed, removed) {
+		for _, d := range a.docs {
+			if d.live != nil && d.live.cache.arrived != nil {
+				d.live.cache.arrived()
+			}
+		}
+		for _, v := range a.imageViewers() {
+			if v.markdown != nil && v.markdown.cache.arrived != nil {
+				v.markdown.cache.arrived()
+			}
+		}
+	}
 	a.diffsOnDisk(append(changed, removed...))
 	a.searchAgain(append(changed, removed...))
 	// An image shows the file's new picture, or that it is gone.
@@ -749,7 +835,7 @@ func (a *app) diskChanged(changed, removed []string) {
 		}
 		d := a.docs[i]
 		d.diskGone = false
-		if d.dirty() {
+		if d.dirty() || d.unread() {
 			continue
 		}
 		a.reloadDoc(d)
@@ -787,17 +873,23 @@ func (a *app) reloadDoc(d *document) {
 		return
 	}
 	data, err := os.ReadFile(d.path)
-	if err != nil || isBinary(data) || hasLongLine(data) {
+	if err != nil {
 		return
 	}
-	d.takeText(data)
+	data, enc, long, err := decodeDocument(d.path, data)
+	if err != nil {
+		return
+	}
+	d.longLine = long
+	d.takeText(data, enc)
 }
 
-// takeText makes a document's text data, read from its file, as a step of
-// undo, and clean. Only the part that changed is replaced, so that the
+// takeText makes a document's text data, read from its file in enc, as a
+// step of undo, and clean. Only the part that changed is replaced, so that the
 // selections stay on their text, and the editors stay where they are
 // scrolled, the line at the top of each on its text too.
-func (d *document) takeText(data []byte) {
+func (d *document) takeText(data []byte, enc *textEncoding) {
+	d.encoding = enc
 	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
 	if old := d.buf.String(); string(data) != old {
 		if ed := d.main(); ed != nil {
@@ -935,9 +1027,17 @@ func (a *app) isIgnored(path string) bool {
 	if len(a.ignored) == 0 {
 		return false
 	}
-	for p := path; len(p) > len(a.root); p = filepath.Dir(p) {
+	// Ignored stores remote.Join paths. remote.Dir stays on that form;
+	// filepath.Dir on Windows rewrites /ssh: and /wsl: with backslashes.
+	if remote.Is(path) {
+		path = remote.Clean(path)
+	}
+	for p := path; len(p) > len(a.root); p = remote.Dir(p) {
 		if a.ignored[p] {
 			return true
+		}
+		if remote.Dir(p) == p {
+			break
 		}
 	}
 	return false
@@ -955,8 +1055,8 @@ func (a *app) windowTitle() string {
 	}
 	if a.root != "" {
 		parts = append(parts, filepath.Base(a.root))
-		if host := remote.HostOf(a.root); host != "" {
-			parts[len(parts)-1] = filepath.Base(hostPath(a.root)) + " [SSH: " + host + "]"
+		if label, ok := folderTargetLabel(a.root); ok {
+			parts[len(parts)-1] = filepath.Base(hostPath(a.root)) + " [" + label + "]"
 		}
 	}
 	if len(parts) == 0 {
@@ -973,6 +1073,7 @@ func (a *app) tick() {
 	a.markOffline()
 	a.refreshIgnored()
 	a.refreshGit()
+	a.takeIssueHandoff()
 	a.searchTick()
 	a.keepEdited()
 	if t := a.windowTitle(); t != a.title {

@@ -1,11 +1,13 @@
 package main
 
 import (
-	"path"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/egoist/mygo/plugins/terminal"
 
-	"mayoi/internal/remote"
 	"mayoi/locales"
 )
 
@@ -29,6 +31,19 @@ func (a *app) terminalExited(s *session, t *terminal.Terminal, code int) {
 		a.hcExited(s, t)
 		return
 	}
+	// Attached to a terminal of herdr-core: it closes as hc attach ends,
+	// and the shell there runs on. One that ends as it starts, as for an
+	// address that runs nothing, stays with what hc printed.
+	if s.attach != "" {
+		if time.Since(s.started) < exitedEarlyWithin {
+			s.attachEnded = true
+			t.Feed([]byte("\r\n\x1b[0;2m" + locales.TermAttachEnded(s.attach) + "\x1b[0m\r\n"))
+			a.fail("%s", locales.FailAttachHCEnded(s.attach))
+			return
+		}
+		a.removeTerminal(s)
+		return
+	}
 	// ssh exits with 255 when the connection fails, which a shell does
 	// only if asked.
 	if c := sessionConn(s); c != nil && c == a.conn && (code == 255 || !c.Connected()) {
@@ -39,7 +54,38 @@ func (a *app) terminalExited(s *session, t *terminal.Terminal, code int) {
 		}
 		return
 	}
+	if time.Since(s.started) < exitedEarlyWithin {
+		a.exitedEarly(s, t, code)
+		return
+	}
 	a.removeTerminal(s)
+}
+
+// exitedEarlyWithin is how soon after it started a shell that exits
+// counts as one that could not start, as for a broken rc file or a
+// $SHELL that is not there, rather than one the user ended.
+const exitedEarlyWithin = 2 * time.Second
+
+// exitedEarly keeps a terminal whose shell exited as it started, rather
+// than have it flash and vanish: it shows what the shell printed and why
+// it stopped, and offers to report it.
+func (a *app) exitedEarly(s *session, t *terminal.Terminal, code int) {
+	shell, c, path := shellName(), strconv.Itoa(code), os.Getenv("SHELL")
+	if s.shell != "" {
+		shell, path = shellBase(s.shell), s.shell
+	}
+	t.Feed([]byte("\r\n\x1b[0;2m" + locales.TermExitedEarly(shell, c) + "\x1b[0m\r\n"))
+	out := lastLines(t.Text(), 20)
+	a.tell(note{message: locales.NoteTermExitedEarly(shell, c), label: locales.ReportProblem(), action: func() {
+		a.reportProblem(shell+" exited with code "+c+" as the terminal started",
+			"Shell: "+path+"\nExit code: "+c+"\n\nWhat it printed:\n```\n"+out+"\n```")
+	}})
+}
+
+// lastLines returns the last n lines of s that have text.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n "), "\n")
+	return strings.Join(lines[max(len(lines)-n, 0):], "\n")
 }
 
 // restartTerminals starts again the terminals of the host the connection
@@ -64,10 +110,7 @@ func (a *app) restartTerminal(s *session) {
 	if c == nil {
 		return
 	}
-	dir := s.dir
-	if d := s.term.Dir(); path.IsAbs(d) {
-		dir = remote.Path(c.Host, d)
-	}
+	dir := shellDir(s.dir, s.term.Dir())
 	old := s.term
 	t, err := a.spawnTerminal(s, dir)
 	if err != nil {

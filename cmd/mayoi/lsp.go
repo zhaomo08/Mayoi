@@ -6,14 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
-	"github.com/egoist/mygo/ui"
-
+	"mayoi/internal/bg"
 	"mayoi/internal/lsp"
 	"mayoi/internal/plugin"
 	"mayoi/internal/remote"
@@ -28,15 +30,54 @@ import (
 
 // lspServer is a language server of a folder.
 type lspServer struct {
-	plugin   *plugin.Plugin
-	contrib  plugin.ServerContrib
-	root     string
-	client   *lsp.Client
-	ready    chan struct{} // closed once started, or failed to
-	err      error
-	failedAt time.Time // when it could not start
-	starts   int       // since its plugin was last loaded or turned on
+	plugin  *plugin.Plugin
+	contrib plugin.ServerContrib
+	root    string
+	key     string // of lspServers
+	client  *lsp.Client
+	ready   chan struct{} // closed once started, or failed to
+	err     error
+	failure lspFailure
+	// nativeTSC is whether, for lspFailNoTypeScript, the folder's tsc is
+	// TypeScript 7 or later.
+	nativeTSC bool
+	command   string       // the program it ran, once resolved
+	launch    serverLaunch // how it ran, once resolved
+	failedAt  time.Time    // when it could not start
+	starts    int          // since its plugin was last loaded or turned on
+	// asked is whether a person asked for it to start, as a restart does.
+	asked bool
+	// ctx is cancelled to stop it starting; stopping is set as it is
+	// stopped on purpose, so its end is not told of.
+	ctx      context.Context
+	cancel   context.CancelFunc
+	stopping atomic.Bool
 }
+
+// lspFailure is why a language server could not start.
+type lspFailure int
+
+const (
+	lspFailOther   lspFailure = iota // as err says
+	lspFailMissing                   // its program is not on the folder's machine
+	lspFailQuit                      // its program ended before it answered
+	lspFailSilent                    // it did not answer in time
+	// its program ended with 127 on the folder's host, and whether it is
+	// there could not be told
+	lspFailUnchecked
+	// typescript-language-server found no TypeScript with a tsserver in the
+	// folder: nativeTSC is whether the tsc of the folder's machine is
+	// TypeScript 7's, which brings its own server
+	lspFailNoTypeScript
+)
+
+// lspStartTimeout is how long a server has to start and answer, and
+// lspCheckTimeout how long its host has to say whether its program is
+// there, when that is not clear from how it ended.
+var (
+	lspStartTimeout = 30 * time.Second
+	lspCheckTimeout = 10 * time.Second
+)
 
 // lspState is where a language server is in its life.
 type lspState int
@@ -71,6 +112,18 @@ var lspServers = struct {
 	sync.Mutex
 	m map[string]*lspServer // by folder and server id
 }{m: map[string]*lspServer{}}
+
+// serverKey is the key of the server of id in the folder root.
+func serverKey(root, id string) string { return root + "\x00" + id }
+
+// current reports whether s is still the server of its folder: one
+// restarted, forgotten or stopped as the app quits is not, and what it
+// would do then is left to the one after it.
+func (s *lspServer) current() bool {
+	lspServers.Lock()
+	defer lspServers.Unlock()
+	return lspServers.m[s.key] == s
+}
 
 // maxServerStarts is how many times a server is started, after it stops
 // or fails to start, until its plugin is reloaded or turned on again.
@@ -111,8 +164,8 @@ func serverPath(root, uri string) string {
 	if p == "" {
 		return ""
 	}
-	if host, _, ok := remote.Split(root); ok {
-		return remote.Path(host, p)
+	if remote.Is(root) {
+		return remote.On(root, p)
 	}
 	return p
 }
@@ -129,7 +182,7 @@ func (a *app) lspFor(d *document, opening bool) *lspServer {
 	if p == nil {
 		return nil
 	}
-	key := a.root + "\x00" + sc.ID
+	key := serverKey(a.root, sc.ID)
 	lspServers.Lock()
 	defer lspServers.Unlock()
 	s := lspServers.m[key]
@@ -147,26 +200,75 @@ func (a *app) lspFor(d *document, opening bool) *lspServer {
 	if s != nil {
 		starts = s.starts
 	}
-	s = &lspServer{plugin: p, contrib: *sc, root: a.root, ready: make(chan struct{}), starts: starts + 1}
+	s = newServer(p, *sc, a.root, starts+1)
 	lspServers.m[key] = s
-	go s.start(a)
+	go s.start(a, nil)
 	return s
 }
 
-// start starts the server on the folder's machine.
-func (s *lspServer) start(a *app) {
+// lspRunningFor returns the language server of document d that runs, nil
+// for none: unlike lspFor, it starts none, nor again one that stopped.
+func (a *app) lspRunningFor(d *document) *lspServer {
+	if a.root == "" || d.path == "" {
+		return nil
+	}
+	_, sc := serverContrib(languageOf(d))
+	if sc == nil {
+		return nil
+	}
+	lspServers.Lock()
+	s := lspServers.m[serverKey(a.root, sc.ID)]
+	lspServers.Unlock()
+	if s == nil || s.state() != lspRunning {
+		return nil
+	}
+	return s
+}
+
+// newServer is a server of root yet to start, for lspServers.
+func newServer(p *plugin.Plugin, sc plugin.ServerContrib, root string, starts int) *lspServer {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &lspServer{plugin: p, contrib: sc, root: root, key: serverKey(root, sc.ID), ready: make(chan struct{}), starts: starts,
+		ctx: ctx, cancel: cancel}
+}
+
+// start starts the server on the folder's machine, once prev, the one
+// before it there, is gone.
+func (s *lspServer) start(a *app, prev *lspServer) {
 	defer func() {
 		// One that could not start is told of once, in the window that
-		// started it.
+		// started it, unless another took its place.
 		if s.client == nil {
+			s.failure = s.classify()
+			switch s.failure {
+			case lspFailUnchecked:
+				s.failure = s.check()
+			case lspFailNoTypeScript:
+				s.nativeTSC = s.checkNativeTSC()
+			}
 			s.failedAt = time.Now()
-			msg := locales.LspFailed(firstLine(s.err.Error()))
-			a.post(func() { a.fail("%s", msg) })
+			if s.ctx.Err() == nil && s.current() {
+				msg := s.failMessage()
+				a.post(func() {
+					a.fails++
+					a.tell(note{message: msg, label: locales.RunningRestart(), action: func() { a.restartServer(s.key) }})
+				})
+			}
 		}
 		close(s.ready)
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if prev != nil {
+		prev.stop()
+		if plugins != nil {
+			plugins.setDiagnosticList(s.owner(), "", "", true, nil)
+		}
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, lspStartTimeout)
 	defer cancel()
+	if ctx.Err() != nil {
+		s.err = ctx.Err()
+		return
+	}
 	launch, err := s.resolve(ctx)
 	if err != nil {
 		s.err = err
@@ -181,7 +283,8 @@ func (s *lspServer) start(a *app) {
 		s.err = err
 		return
 	}
-	owner := "lsp:" + s.contrib.ID
+	s.command, s.launch = launch.Command, launch
+	owner := s.owner()
 	root := s.root
 	rootURI := serverURI(root)
 	if len(launch.WorkspaceFolders) > 0 {
@@ -192,7 +295,7 @@ func (s *lspServer) start(a *app) {
 		Handlers: lsp.Handlers{
 			Diagnostics: func(uri string, items []lsp.Diagnostic) {
 				path := serverPath(root, uri)
-				if path == "" || plugins == nil {
+				if path == "" || plugins == nil || !s.current() {
 					return
 				}
 				list := make([]diagnostic, len(items))
@@ -212,37 +315,85 @@ func (s *lspServer) start(a *app) {
 	if err != nil {
 		pr.Close()
 		pw.Close()
-		s.err = fmt.Errorf("%s: %v", launch.Command, err)
+		s.err = fmt.Errorf("%s: %w", launch.Command, err)
 		s.plugin.Log("error", "could not start "+s.contrib.ID+": "+err.Error())
 		return
 	}
 	s.client = c
 	s.plugin.Log("info", "started "+s.contrib.ID)
-	// The documents open of its languages.
+	// The documents open of its languages, in each window of the folder.
 	a.post(func() {
-		for _, d := range a.docs {
-			if slices.Contains(s.contrib.Languages, languageOf(d)) {
-				c.Open(serverURI(d.path), languageOf(d), d.buf.String())
+		if !s.current() {
+			return
+		}
+		for _, w := range s.windows(a) {
+			for _, d := range w.docs {
+				if slices.Contains(s.contrib.Languages, languageOf(d)) {
+					c.Open(serverURI(d.path), languageOf(d), d.buf.String())
+				}
 			}
+		}
+		if s.asked {
+			a.tell(note{message: locales.LspRestarted(s.contrib.ID)})
 		}
 	})
 	go func() {
 		<-c.Done()
 		s.plugin.Log("warn", s.contrib.ID+" stopped")
+		// One stopped on purpose, or replaced, leaves the diagnostics to
+		// what comes after it.
+		if s.stopping.Load() || !s.current() {
+			return
+		}
 		if plugins != nil {
 			plugins.setDiagnosticList(owner, "", "", true, nil)
 		}
+		a.post(func() {
+			a.tell(note{message: locales.LspStoppedOf(s.contrib.ID), label: locales.RunningRestart(),
+				action: func() { a.restartServer(s.key) }})
+		})
 	}()
 }
 
+// owner is whose the server's diagnostics are, of its folder's.
+func (s *lspServer) owner() string { return "lsp:" + s.contrib.ID + "\x00" + s.root }
+
+// windows are the windows of the server's folder, a among them when it
+// still shows it.
+func (s *lspServer) windows(a *app) []*app {
+	var ws []*app
+	if a.root == s.root {
+		ws = append(ws, a)
+	}
+	if plugins != nil {
+		for _, w := range plugins.apps() {
+			if w != a && w.root == s.root {
+				ws = append(ws, w)
+			}
+		}
+	}
+	return ws
+}
+
+// stop stops the server, starting or running, and returns once its
+// process is gone.
+func (s *lspServer) stop() {
+	s.stopping.Store(true)
+	s.cancel()
+	<-s.ready
+	if s.client != nil {
+		s.client.Close()
+	}
+}
+
 // forgetFailedServers forgets the servers of the plugins of names, or of
-// every plugin for none, that could not start, so that a document of their
-// languages opening starts them afresh.
+// every plugin for none, that could not start or stopped, so that a
+// document of their languages opening starts them afresh.
 func forgetFailedServers(names ...string) {
 	lspServers.Lock()
 	defer lspServers.Unlock()
 	for key, s := range lspServers.m {
-		if s.state() == lspFailed && (len(names) == 0 || slices.Contains(names, s.plugin.Name)) {
+		if st := s.state(); (st == lspFailed || st == lspStopped) && (len(names) == 0 || slices.Contains(names, s.plugin.Name)) {
 			delete(lspServers.m, key)
 		}
 	}
@@ -299,6 +450,9 @@ func (a *app) lspDoc(event string, d *document) {
 		return
 	}
 	s := a.lspFor(d, event == "open")
+	if s == nil && event == "open" {
+		a.offerServer(d)
+	}
 	c := s.live()
 	if c == nil {
 		return // the server opens it as it starts
@@ -323,13 +477,11 @@ func stopServers() {
 	lspServers.Unlock()
 	var wg sync.WaitGroup
 	for _, s := range servers {
-		if c := s.live(); c != nil {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				c.Close()
-			}()
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.stop()
+		}()
 	}
 	wg.Wait()
 }
@@ -340,22 +492,38 @@ func caretPosition(d *editor) position {
 	return positionOf(snap, min(d.sel[1], snap.Len()))
 }
 
-// hoverCard is what Show Hover shows: Markdown of the language server and
-// the plugins, over the editor.
-type hoverCard struct {
-	tree *viewNode
-}
-
 // showHover asks the server and the plugins of the document's language
-// what is at the caret, and shows it.
+// what is at the caret, and shows it. Asked again while its card shows,
+// it gives the card the keys that scroll it.
 func (a *app) showHover() {
 	d := a.textEditor()
 	if d == nil {
 		return
 	}
-	pos := caretPosition(d)
-	s := a.lspFor(d.document, false)
-	doc := docJSON(d.document)
+	if h := a.hover; h != nil && h.ed == d && !a.staleHover(h) {
+		// The pointer's card, given the keys, stays as the pointer leaves.
+		h.auto, h.focused = false, true
+		return
+	}
+	// From the menu too, the pointer still on a name asks nothing more.
+	a.hushRest()
+	snap := d.buf.Snapshot()
+	a.askHover(d, min(d.sel[1], snap.Len()), nil)
+}
+
+// askHover asks the server and the plugins of d's language what is at
+// rune at, and shows it. rest is the name the pointer rests on, asked of
+// quietly: of a server that runs, saying nothing of none or a failure;
+// nil is the caret, as Show Hover asks.
+func (a *app) askHover(d *editor, at int, rest *pointerHover) {
+	pos := positionOf(d.buf.Snapshot(), at)
+	var s *lspServer
+	if rest == nil {
+		s = a.lspFor(d.document, false)
+	} else {
+		s = a.lspRunningFor(d.document)
+	}
+	doc := a.docJSON(d.document)
 	lang := languageOf(d.document)
 	uri := serverURI(d.path)
 	var providers []*plugin.Plugin
@@ -366,16 +534,42 @@ func (a *app) showHover() {
 			}
 		}
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if rest != nil && s == nil && len(providers) == 0 {
+		return
+	}
+	text := d.buf.String()
+	var current func() bool
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if rest == nil {
+		current = a.lspAsked(s, d, &a.hoverAsked)
+	} else {
+		// Of the editor the pointer is over, which need not have the
+		// keyboard: the name it still rests on, its text as it was.
+		a.restAsked++
+		n, version, word, picks := a.restAsked, d.buf.Version(), rest.word, a.picksOpened
+		rest.ctx, rest.cancel = ctx, cancel
+		current = func() bool {
+			r := &a.rest
+			return a.restAsked == n && r.ed == d && r.word == word && d.buf.Version() == version &&
+				a.picksOpened == picks && (s == nil || s.current())
+		}
+	}
+	auto := rest != nil
+	bg.Go(func() {
 		defer cancel()
 		var parts []string
+		var span *lsp.Range
 		if c := s.wait(3 * time.Second); c != nil && c.Hover() {
-			if text, err := c.HoverAt(ctx, uri, lsp.Position(pos)); err == nil && strings.TrimSpace(text) != "" {
-				parts = append(parts, text)
+			// The server knows the text as it is now.
+			c.Open(uri, lang, text)
+			if hover, err := c.HoverAt(ctx, uri, lsp.Position(pos)); err == nil && strings.TrimSpace(hover.Markdown) != "" {
+				parts, span = append(parts, hover.Markdown), hover.Range
 			}
 		}
 		for _, p := range providers {
+			if ctx.Err() != nil {
+				break
+			}
 			res, err := p.Request(ctx, "hover", map[string]any{"language": lang, "document": doc, "position": pos})
 			var text string
 			if err == nil && json.Unmarshal(res, &text) == nil && strings.TrimSpace(text) != "" {
@@ -383,84 +577,232 @@ func (a *app) showHover() {
 			}
 		}
 		a.post(func() {
+			if !current() {
+				return
+			}
 			if len(parts) == 0 {
+				if auto {
+					return // the pointer asked: nothing shows, nothing is said
+				}
+				// A server not running did not say there is nothing.
+				if s != nil && s.state() != lspRunning {
+					a.lspFailed(s)
+					return
+				}
 				a.tell(note{message: locales.HoverNone()})
 				return
 			}
-			a.hover = &hoverCard{tree: &viewNode{Type: "markdown", Text: strings.Join(parts, "\n\n---\n\n")}}
-		})
-	}()
-}
-
-// hoverView draws the hover card while it shows.
-func (a *app) hoverView(c *ui.Context) {
-	h := a.hover
-	if h == nil {
-		return
-	}
-	p := a.pal
-	ui.Overlay(c, func() {
-		back := a.dialogBack(c)
-		back.Children(func() {
-			box := a.floating(c, ui.Column(c).Width(620).MaxWidthPercent(92).MaxHeightPercent(70).Margin(titleBarH+8, 0, 0, 0).Radius(10), true).
-				Clip().Role(ui.RoleDialog).Label(locales.CmdGoHover())
-			box.Children(func() {
-				ui.Scroll(c.Key("hover-card")).Padding(12, 16).Background(p.editor).Children(func() {
-					a.drawViewNode(c, "hover", h.tree, nil)
-				})
-			})
-			if box.PressedOutside() || back.OverlayShortcut(0, ui.KeyEscape) {
-				a.hover = nil
+			if h := a.hover; auto && h != nil && !h.auto && !a.staleHover(h) {
+				return // the card asked for at the caret stays
 			}
+			h := newHoverCard(d, strings.Join(parts, "\n\n---\n\n"), span, at)
+			h.auto = auto
+			a.hover = h
 		})
 	})
+}
+
+// lspAsked counts a question asked at the caret of d, of s or none, in
+// asked, and is whether its answer still goes: the last of its kind asked,
+// of the server still the folder's, at the caret, view and text it was
+// asked at. One gone on from, a server restarted, or a picker opened
+// since, as Quick Open, leaves it too late.
+func (a *app) lspAsked(s *lspServer, d *editor, asked *int) func() bool {
+	*asked++
+	n, root, version, sel, picks := *asked, a.root, d.buf.Version(), d.sel, a.picksOpened
+	return func() bool {
+		return *asked == n && a.root == root && a.activeEditor() == d && d.buf.Version() == version && d.sel == sel &&
+			a.picksOpened == picks && (s == nil || s.current())
+	}
+}
+
+const sourceDefinition lsp.Navigation = "sourceDefinition"
+
+func (a *app) jumpCommand(kind lsp.Navigation) func() {
+	return func() {
+		if d := a.textEditor(); d != nil {
+			a.locationsAt(d, kind, false)
+		}
+	}
 }
 
 // goToDefinition goes to where what is at the caret is defined, as the
 // document's language server says.
 func (a *app) goToDefinition() {
-	d := a.textEditor()
-	if d == nil {
-		return
+	if d := a.textEditor(); d != nil {
+		a.definitionAt(d, false)
 	}
+}
+
+// definitionAt goes to where what is at the caret of d is defined, or
+// offers the places when there are several. A click, which a Cmd-click is,
+// says nothing of a language with no server.
+func (a *app) definitionAt(d *editor, click bool) {
+	a.locationsAt(d, lsp.Definition, click)
+}
+
+// locationsAt uses the same document, stale-answer checks and targets for
+// keyboard commands and Cmd-click. A click says nothing about missing servers.
+func (a *app) locationsAt(d *editor, kind lsp.Navigation, click bool) {
 	s := a.lspFor(d.document, false)
+	current := a.lspAsked(s, d, &a.defAsked)
 	if s == nil {
-		a.tell(note{message: locales.LspNone(languageOf(d.document))})
+		if !click {
+			a.tell(note{message: locales.LspNone(languageOf(d.document))})
+		}
 		return
 	}
 	pos, uri, root := caretPosition(d), serverURI(d.path), a.root
-	go func() {
+	lang, text := languageOf(d.document), d.buf.String()
+	command := s.contrib.SourceDefinitionCommand
+	bg.Go(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		c := s.wait(5 * time.Second)
-		if c == nil || !c.Definition() {
-			a.post(func() { a.lspFailed(s) })
+		if c == nil {
+			a.post(func() {
+				if current() {
+					a.lspFailed(s)
+				}
+			})
 			return
 		}
-		locs, err := c.DefinitionAt(ctx, uri, lsp.Position(pos))
+		supported := c.CanNavigate(kind)
+		var sourceMethod string
+		if kind == sourceDefinition {
+			if source := s.launch.SourceDefinition; source != nil && c.SupportsExperimental(source.Capability) {
+				sourceMethod = source.Method
+			}
+			supported = sourceMethod != "" || c.SupportsCommand(command)
+		}
+		if !supported {
+			a.post(func() {
+				if current() && !click {
+					a.tell(note{message: locales.LspNavigationUnsupported()})
+				}
+			})
+			return
+		}
+		// The server knows the text as it is now: not as the last change
+		// it was told of a moment ago, nor before the documents open are
+		// told of, as a server that just started is.
+		c.Open(uri, lang, text)
+		var locs []lsp.Location
+		var err error
+		if sourceMethod != "" {
+			locs, err = c.SourceDefinitionRequestAt(ctx, sourceMethod, uri, lsp.Position(pos))
+		} else if kind == sourceDefinition {
+			locs, err = c.SourceDefinitionAt(ctx, command, uri, lsp.Position(pos))
+		} else {
+			locs, err = c.NavigateAt(ctx, kind, uri, lsp.Position(pos))
+		}
 		a.post(func() {
-			if err != nil || len(locs) == 0 {
-				a.tell(note{message: locales.DefinitionNone()})
+			if !current() {
 				return
 			}
-			path := serverPath(root, locs[0].URI)
-			if path == "" {
+			// A server that stopped or restarted did not say there is none.
+			if err != nil && s.state() != lspRunning {
+				a.lspFailed(s)
 				return
 			}
-			a.openFileAt(path, locs[0].Range.Start.Line, true)
-			if ed := a.activeEditor(); ed != nil && ed.path == path {
-				at := posRune(ed.buf.Snapshot(), fromLSP(locs[0].Range.Start))
-				ed.selectRange(at, at, true)
+			if err != nil {
+				s.plugin.Log("warn", fmt.Sprintf("%s: %v", kind, err))
+				a.tell(note{message: locales.LspNavigationFailed()})
+				return
 			}
+			if len(locs) == 0 {
+				message := locales.LspNavigationNone()
+				if kind == lsp.Definition {
+					message = locales.DefinitionNone()
+				}
+				a.tell(note{message: message})
+				return
+			}
+			type place struct {
+				path string
+				loc  lsp.Location
+			}
+			type spot struct {
+				path string
+				pos  lsp.Position
+			}
+			places := make([]place, 0, len(locs))
+			seen := make(map[spot]bool, len(locs))
+			lines := make(map[spot]int)
+			for _, l := range locs {
+				path := serverPath(root, l.URI)
+				target := spot{path: path, pos: l.Range.Start}
+				if path == "" || seen[target] {
+					continue
+				}
+				seen[target] = true
+				lines[spot{path: path, pos: lsp.Position{Line: target.pos.Line}}]++
+				places = append(places, place{path, l})
+			}
+			if len(places) == 0 {
+				message := locales.LspLocationElsewhere(locs[0].URI)
+				if kind == lsp.Definition {
+					message = locales.DefinitionElsewhere(locs[0].URI)
+				}
+				a.tell(note{message: message})
+				return
+			}
+			if len(places) == 1 && kind != lsp.References {
+				a.goToLocation(places[0].path, places[0].loc)
+				return
+			}
+			items := make([]pickItem, len(places))
+			for i, p := range places {
+				start := p.loc.Range.Start
+				label := filepath.Base(p.path) + ":" + strconv.Itoa(start.Line+1)
+				// Places on one line are told apart by their column.
+				if kind == lsp.References || lines[spot{path: p.path, pos: lsp.Position{Line: start.Line}}] > 1 {
+					label += ":" + strconv.Itoa(start.Character+1)
+				}
+				items[i] = pickItem{Label: label, Description: a.relPath(filepath.Dir(p.path)), Icon: "file"}
+			}
+			title := locales.LspChooseLocation()
+			switch kind {
+			case lsp.Definition:
+				title = locales.DefinitionPick()
+			case lsp.References:
+				title = locales.CmdGoReferences()
+			}
+			a.openPluginPicker(items, title, func(i int) {
+				// The list opened is a picker, which current() counts:
+				// the choice goes while the folder is the same.
+				if i >= 0 && a.root == root {
+					a.goToLocation(places[i].path, places[i].loc)
+				}
+			})
+			a.pluginPick.icon = iconFileSearch
 		})
-	}()
+	})
+}
+
+// goToLocation shows a place a language server named, the caret at its
+// start.
+func (a *app) goToLocation(path string, loc lsp.Location) {
+	a.openFileAt(path, loc.Range.Start.Line, true)
+	if ed := a.activeEditor(); ed != nil && ed.path == path {
+		// At the name, once the file is read, not the line's start.
+		ed.whenRead(func(ed *editor) {
+			at := posRune(ed.buf.Snapshot(), fromLSP(loc.Range.Start))
+			ed.selectRange(at, at, true)
+			ed.lightLanding()
+		})
+	}
 }
 
 // lspFailed tells why a language server did not answer: one that could
 // not start was told of as it failed.
 func (a *app) lspFailed(s *lspServer) {
-	if s != nil && (s.state() == lspFailed || s.state() == lspStopped) {
-		a.tell(note{message: locales.LspDown()})
+	switch {
+	case s != nil && s.state() == lspFailed:
+		a.tell(note{message: s.failMessage(), label: locales.RunningRestart(), action: func() { a.restartServer(s.key) }})
+		return
+	case s != nil && s.state() == lspStopped:
+		a.tell(note{message: locales.LspDown(), label: locales.RunningRestart(), action: func() { a.restartServer(s.key) }})
 		return
 	}
 	a.tell(note{message: locales.LspNotReady()})
@@ -474,31 +816,44 @@ func (a *app) complete() {
 	if d == nil {
 		return
 	}
+	// In a wiki link of a note, the notes it may link to.
+	if a.wikiSuggestNow(d) {
+		return
+	}
 	s := a.lspFor(d.document, false)
 	if s == nil {
 		a.tell(note{message: locales.LspNone(languageOf(d.document))})
 		return
 	}
-	// The server knows the text as it is now.
-	if c := s.live(); c != nil {
-		c.Open(serverURI(d.path), languageOf(d.document), d.buf.String())
-	}
-	pos, uri, version := caretPosition(d), serverURI(d.path), d.buf.Version()
-	go func() {
+	pos, uri := caretPosition(d), serverURI(d.path)
+	lang, text := languageOf(d.document), d.buf.String()
+	current := a.lspAsked(s, d, &a.completeAsked)
+	bg.Go(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		c := s.wait(5 * time.Second)
 		if c == nil || !c.Completion() {
-			a.post(func() { a.lspFailed(s) })
+			a.post(func() {
+				if current() {
+					a.lspFailed(s)
+				}
+			})
 			return
 		}
+		// The server knows the text as it is now.
+		c.Open(uri, lang, text)
 		items, err := c.CompletionAt(ctx, uri, lsp.Position(pos))
 		a.post(func() {
-			if err != nil || len(items) == 0 {
-				a.tell(note{message: locales.CompletionNone()})
+			if !current() {
 				return
 			}
-			if d.buf.Version() != version {
+			// A server that stopped did not say there is none.
+			if err != nil && s.state() != lspRunning {
+				a.lspFailed(s)
+				return
+			}
+			if err != nil || len(items) == 0 {
+				a.tell(note{message: locales.CompletionNone()})
 				return
 			}
 			slices.SortStableFunc(items, func(x, y lsp.CompletionItem) int {
@@ -517,7 +872,7 @@ func (a *app) complete() {
 				}
 			})
 		})
-	}()
+	})
 }
 
 func sortKey(it lsp.CompletionItem) string {
@@ -596,7 +951,7 @@ func (a *app) lspFormat(d *editor, limit time.Duration, then func()) bool {
 	version := snap.Version()
 	size, spaces := max(d.indent.size, 1), !d.indent.tabs
 	if d.indent.tabs {
-		size = tabWidth
+		size = tabWidth()
 	}
 	uri := serverURI(d.path)
 	go func() {

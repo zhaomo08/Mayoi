@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -14,6 +15,7 @@ import (
 
 	"mayoi/internal/bg"
 	"mayoi/internal/git"
+	"mayoi/internal/remote"
 	"mayoi/internal/vfs"
 	"mayoi/locales"
 )
@@ -119,6 +121,9 @@ type scmState struct {
 	// for.
 	openCommits map[string]bool
 	commitFiles map[string]*commitFilesRead
+	// commitStats are how much the commits whose cards showed changed,
+	// by hash, each read once.
+	commitStats map[string]*commitStatRead
 	commitsGen  int
 	rowsCommits int
 	// rowsGen counts the rows made; appear follows them as they come, as
@@ -280,7 +285,7 @@ func fileTree(es []git.Entry, root string, closed func(dir string) bool) []treeR
 		if d, ok := at[path]; ok {
 			return d
 		}
-		up := filepath.Dir(path)
+		up := remote.Dir(path)
 		if up == path {
 			// The top of the disk, reached without meeting root, as a
 			// root spelled otherwise than Git spells its files, which
@@ -295,7 +300,7 @@ func fileTree(es []git.Entry, root string, closed func(dir string) bool) []treeR
 		return d
 	}
 	for _, e := range es {
-		dir := filepath.Dir(e.Path)
+		dir := remote.Dir(e.Path)
 		if dir != root && !inFolder(root, dir) {
 			dir = root // outside the work tree: shown at its top
 		}
@@ -371,6 +376,9 @@ func (a *gitContext) dirEntries(g scmGroup, dir string) []git.Entry {
 // /, does. On Windows the case of the letters does not count, as C:\Proj
 // and c:\proj are one folder.
 func inFolder(dir, path string) bool {
+	if remote.Is(dir) || remote.Is(path) {
+		return remote.Contains(dir, path) && remote.Clean(path) != remote.Clean(dir)
+	}
 	sep := string(filepath.Separator)
 	if !strings.HasSuffix(dir, sep) {
 		dir += sep
@@ -1056,7 +1064,14 @@ func (a *gitContext) scmFile(c *ui.Context, r scmRow, action *func()) {
 		if letter == 'D' {
 			label.Strikethrough()
 		}
-		if dir := filepath.Dir(a.git.repo.Rel(e.Path)); dir != "." && !tree {
+		rel := a.git.repo.Rel(e.Path)
+		// Rel is a slash path. filepath.Dir on Windows prints src\lib for
+		// a remote file, which is not the folder on the host.
+		dir := filepath.Dir(rel)
+		if remote.Is(e.Path) {
+			dir = path.Dir(rel)
+		}
+		if dir != "." && !tree {
 			ui.Text(c, dir).FontSize(11.5).TextColor(p.faint).SingleLine().Shrink(1)
 		}
 		if e.Submodule() {
@@ -1209,12 +1224,24 @@ func (a *gitContext) scmCommit(c *ui.Context, r scmRow, action *func()) {
 	head := g.status != nil && g.status.Head == cm.Hash
 	badges := refBadges(cm.Refs)
 	prs := a.prHeadsAt(cm.Hash)
-	tip := fmt.Sprintf("%s\n%s · %s · %s", cm.Subject, cm.Author, ago(cm.Time, time.Now()), cm.Short())
+	// What the card says past its fields, which the row's description
+	// says too, for those who do not see the card.
+	var extra []string
 	if unpushed {
-		tip += locales.ScmNotPushed()
+		extra = append(extra, strings.TrimPrefix(locales.ScmNotPushed(), " · "))
 	}
 	if len(cm.Parents) > 1 {
-		tip += locales.ScmMerge()
+		extra = append(extra, strings.TrimPrefix(locales.ScmMerge(), " · "))
+	}
+	for _, pr := range prs {
+		extra = append(extra, prHeadTip(pr))
+	}
+	if st, ok := a.checksOf(cm.Hash); ok {
+		extra = append(extra, checksSummary(st))
+	}
+	tip := fmt.Sprintf("%s\n%s · %s · %s", cm.Subject, cm.Author, ago(cm.Time, time.Now()), cm.Short())
+	if len(cm.CoAuthors) > 0 {
+		tip += "\n" + locales.ScmCoAuthoredWith(coAuthorNames(cm.CoAuthors))
 	}
 	if len(badges) > 0 {
 		names := make([]string, len(badges))
@@ -1223,8 +1250,8 @@ func (a *gitContext) scmCommit(c *ui.Context, r scmRow, action *func()) {
 		}
 		tip += "\n" + strings.Join(names, ", ")
 	}
-	for _, pr := range prs {
-		tip += "\n" + prHeadTip(pr)
+	for _, s := range extra {
+		tip += "\n" + s
 	}
 	indent := float32(6)
 	if r.at < 0 {
@@ -1234,8 +1261,9 @@ func (a *gitContext) scmCommit(c *ui.Context, r scmRow, action *func()) {
 	if wait := scmScrollQuiet - c.Now().Sub(a.scm.scrolledAt); wait > 0 {
 		c.After(wait)
 	} else {
-		row.Tooltip(tip)
+		a.commitHoverCard(c, row, cm, extra)
 	}
+	row.Description(tip)
 	a.scmFade(c, row, r.key)
 	if a.scm.selection.Has(r.key) {
 		row.Background(p.active)
@@ -1268,11 +1296,11 @@ func (a *gitContext) scmCommit(c *ui.Context, r scmRow, action *func()) {
 				}
 			})
 		}
-		author := avatarColor(p, cm.Email+cm.Author)
-		ui.Box(c).Size(15, 15).Shrink(0).Draw(func(pt *ui.Painter, b ui.Rect) {
-			pt.Fill(b, author.Alpha(0.22), b.W/2)
-			paintInitials(pt, b, cm.Author, 7, author)
-		})
+		ring := p.chrome
+		if a.scm.selection.Has(r.key) {
+			ring = mix(p.chrome, p.active.Alpha(1), float32(p.active.A)/255)
+		}
+		a.app.commitAvatar(c, cm.Author, cm.Email, cm.CoAuthors, 15, ring)
 		lane := p.accent
 		if gr != nil {
 			lane = graphColor(p, gr.color)
@@ -1309,6 +1337,9 @@ func (a *gitContext) scmCommit(c *ui.Context, r scmRow, action *func()) {
 		ui.Spacer(c)
 		if unpushed {
 			ui.Icon(c, iconArrowUp).FontSize(11).TextColor(p.accent).Shrink(0)
+		} else if a.hasCommitChecks() {
+			// How its checks went, in room every pushed row keeps.
+			a.commitChecksIcon(c, cm.Hash, action)
 		}
 		ui.Text(c, shortAgo(cm.Time, time.Now())).FontSize(11).TextColor(p.faint).Shrink(0).Padding(0, 2, 0, 0)
 	})
@@ -1531,6 +1562,11 @@ func (a *gitContext) scmCommitMenu(m *ui.Menu, cm *git.Commit, head bool, action
 	in := a.inHead(cm.Hash)
 	if m.Item(locales.CmdGitOpenChanges()).Chosen() {
 		*action = func() { a.showCommit(*cm, true) }
+	}
+	if _, ok := a.checksOf(cm.Hash); ok || a.git.ghOK {
+		if m.Item(locales.PrShowChecks()).Disabled(!ok).Chosen() {
+			*action = func() { a.openCommitChecks(cm.Hash) }
+		}
 	}
 	m.Separator()
 	if m.Item(locales.ScmCheckOutEllipsis()).Disabled(moving || head).Chosen() {
@@ -1799,7 +1835,7 @@ func (a *gitContext) scmMenu(m *ui.Menu) {
 	if g.ghOK {
 		if pr := a.currentPR(); pr != nil {
 			if m.Item(locales.PrOpenChanges()).Chosen() {
-				a.app.post(func() { a.openPullRequest(pr.Number) })
+				a.app.post(func() { a.openPullRequest(pr.Number, prChanges) })
 			}
 			if m.Item(locales.PrShowChecks()).Disabled(pr.Checks == git.ChecksNone).Chosen() {
 				a.app.post(a.openChecks)

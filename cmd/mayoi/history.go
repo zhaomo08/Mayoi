@@ -53,6 +53,8 @@ func (h *history) grouped(s histStep) {
 type histStep struct {
 	snap ui.TextSnapshot
 	sel  [2]int
+	// cursors are the editor's other selections then (multicursor.go).
+	cursors []cursor
 }
 
 const (
@@ -88,24 +90,38 @@ func (d *document) observe() {
 		h.snap = snap
 		return
 	}
+	// Typed with several selections: the text area typed at one, which
+	// the others wait for while an input method composes (multicursor.go).
+	if len(t.cursors) > 0 && t.holdTyping(h.snap, snap) {
+		return
+	}
 	now := time.Now()
 	old, sel := h.snap, t.sel
-	switch {
-	case h.group != groupNone:
-		h.grouped(histStep{h.snap, t.sel})
-	case !h.typing || now.Sub(h.at) > typingPause || len(h.undo) == 0:
-		h.push(histStep{h.snap, t.sel})
-	default:
-		clear(h.redo)
-		h.redo = h.redo[:0]
-	}
+	h.pushTyping(histStep{h.snap, t.sel, slices.Clone(t.cursors)}, now)
 	h.snap, h.typing, h.at = snap, true, now
+	if len(t.cursors) > 0 && t.typeAtAll(old, snap, sel) {
+		return
+	}
 	// Brackets and quotes typed close, in the same step.
 	if t.autoClose(old, snap, sel) {
 		h.snap = d.buf.Snapshot()
 	}
 	t.keepClosers(h.snap)
 	t.followChange(old, h.snap, min(sel[0], sel[1]))
+}
+
+// pushTyping makes the step of undo for typing at now: a new one, unless
+// it joins the typing before it or the group's.
+func (h *history) pushTyping(s histStep, now time.Time) {
+	switch {
+	case h.group != groupNone:
+		h.grouped(s)
+	case !h.typing || now.Sub(h.at) > typingPause || len(h.undo) == 0:
+		h.push(s)
+	default:
+		clear(h.redo)
+		h.redo = h.redo[:0]
+	}
 }
 
 // textEdit replaces the runes start up to end with text.
@@ -122,7 +138,15 @@ func (d *editor) edit(sel [2]int, edits ...textEdit) {
 	}
 	d.observe()
 	h := &d.hist
-	h.grouped(histStep{h.snap, d.sel})
+	h.grouped(histStep{h.snap, d.sel, slices.Clone(d.cursors)})
+	d.applyEdits(sel, edits)
+}
+
+// applyEdits makes edits, which must not overlap, and selects sel, after
+// the step of undo they belong to was made. The other selections of the
+// editor, of its other views, its marks and its folds move with them.
+func (d *editor) applyEdits(sel [2]int, edits []textEdit) {
+	h := &d.hist
 	sortEdits(edits)
 	before := h.snap.Len()
 	for _, e := range edits {
@@ -137,16 +161,24 @@ func (d *editor) edit(sel [2]int, edits ...textEdit) {
 	if len(edits) == 1 && edits[0].start <= 0 && edits[0].end >= before {
 		edits = nil // the whole text, as reloading it: the offsets stay
 	}
-	moved := func(x int) int {
+	moved := movedByEdits(edits)
+	d.cursors = d.keepCursors(moved)
+	d.follow(moved)
+	d.moveMarks(moved)
+	d.foldsFollow(edits, moved, h.snap)
+	if len(edits) > 0 {
+		d.changed = min(edits[len(edits)-1].start, n)
+	}
+}
+
+// movedByEdits returns where an offset of the text before edits, sorted
+// from the last, is after them.
+func movedByEdits(edits []textEdit) func(x int) int {
+	return func(x int) int {
 		for _, e := range edits {
 			x = movedBy(x, e.start, e.end, utf8.RuneCountInString(e.text))
 		}
 		return x
-	}
-	d.follow(moved)
-	d.moveMarks(moved)
-	if len(edits) > 0 {
-		d.changed = min(edits[len(edits)-1].start, n)
 	}
 }
 
@@ -174,6 +206,10 @@ func movedBy(x, start, end, n int) int {
 func (d *editor) follow(moved func(x int) int) {
 	n := d.buf.Len()
 	for _, o := range d.views {
+		if o.liveCell.on {
+			// The table of the cell edited in place, by its header.
+			o.liveCell.at = min(moved(o.liveCell.at), n)
+		}
 		if o.hidden {
 			o.hiddenAt = min(moved(o.hiddenAt), n)
 		}
@@ -181,6 +217,7 @@ func (d *editor) follow(moved func(x int) int) {
 			continue
 		}
 		o.sel = [2]int{min(moved(o.sel[0]), n), min(moved(o.sel[1]), n)}
+		o.cursors = o.keepCursors(moved)
 		o.closers = o.closers[:0]
 		o.resync = true
 	}
@@ -189,7 +226,7 @@ func (d *editor) follow(moved func(x int) int) {
 // followChange is follow for an edit that is only known by the text
 // before and after it, as typing is, made near offset hint.
 func (d *editor) followChange(old, now ui.TextSnapshot, hint int) {
-	if len(d.views) < 2 && !d.marked() {
+	if len(d.views) < 2 && !d.marked() && !d.hasFolds() && !d.liveCell.on {
 		return
 	}
 	start, end, ok := changedRunes(old, now, hint)
@@ -200,6 +237,11 @@ func (d *editor) followChange(old, now ui.TextSnapshot, hint int) {
 		}
 		return movedBy(x, start, end, n)
 	}
+	var edits []textEdit
+	if ok {
+		edits = []textEdit{{start, end, now.Slice(start, start+n)}}
+	}
+	d.foldsFollow(edits, moved, now)
 	d.follow(moved)
 	if ok {
 		d.moveMarks(moved)
@@ -258,7 +300,7 @@ func (d *editor) undo() bool {
 	if h.group == groupJoin {
 		h.group = groupOpen // what is typed next is a step of its own
 	}
-	h.redo = append(h.redo, histStep{d.buf.Snapshot(), d.sel})
+	h.redo = append(h.redo, histStep{d.buf.Snapshot(), d.sel, slices.Clone(d.cursors)})
 	d.restore(s)
 	return true
 }
@@ -278,7 +320,7 @@ func (d *editor) redo() bool {
 	if h.group == groupJoin {
 		h.group = groupOpen
 	}
-	h.undo = append(h.undo, histStep{d.buf.Snapshot(), d.sel})
+	h.undo = append(h.undo, histStep{d.buf.Snapshot(), d.sel, slices.Clone(d.cursors)})
 	d.restore(s)
 	return true
 }
@@ -296,6 +338,9 @@ func (d *editor) restore(s histStep) {
 	n := s.snap.Len()
 	d.selectRange(min(s.sel[0], n), min(s.sel[1], n), false)
 	d.sel = [2]int{min(s.sel[0], n), min(s.sel[1], n)}
+	// The other selections come back too: the frame drops them where
+	// the editor takes only one (multiOK).
+	d.restoreCursors(s.cursors)
 	d.measureWidest()
 	d.followChange(old, d.hist.snap, min(s.sel[0], s.sel[1]))
 }

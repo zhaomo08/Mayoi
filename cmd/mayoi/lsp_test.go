@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,10 +13,19 @@ import (
 )
 
 // The test binary is a fake language server when asked, for the plugins'
-// language servers.
+// language servers: one that answers, one that quits as it starts, with
+// an error or without, or one that never answers.
 func init() {
-	if os.Getenv("MAYOI_FAKE_LSP") == "1" {
+	switch os.Getenv("MAYOI_FAKE_LSP") {
+	case "1":
 		lsptest.Serve(os.Stdin, os.Stdout)
+		os.Exit(0)
+	case "crash":
+		os.Exit(3)
+	case "quit":
+		os.Exit(0)
+	case "hang":
+		io.Copy(io.Discard, os.Stdin)
 		os.Exit(0)
 	}
 }
@@ -37,7 +47,7 @@ func TestLanguageServer(t *testing.T) {
 	os.WriteFile(path, []byte("fine\nso bad\n"), 0o644)
 	a.openFile(path, true)
 	// Started as a process, which a busy machine takes its time with.
-	hs.untilLong("the server's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 1 })
+	hs.until("the server's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 1 })
 	dg := h.diagnosticsOf(path)[0]
 	if dg.Severity != "error" || dg.Message != "bad word" || dg.Range.Start.Line != 1 || dg.Range.Start.Character != 3 {
 		t.Fatalf("diagnostic = %+v", dg)
@@ -45,7 +55,7 @@ func TestLanguageServer(t *testing.T) {
 	d := a.activeEditor()
 	// An edit goes to the server, which finds nothing bad now.
 	a.queueEdit(d, func(d *editor) { d.edit([2]int{0, 0}, textEdit{8, 11, "good"}) })
-	hs.untilLong("the edit's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 0 })
+	hs.until("the edit's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 0 })
 
 	a.showHover()
 	hs.until("the hover", func() bool { return a.hover != nil })
@@ -99,7 +109,7 @@ func TestLanguageServerRetry(t *testing.T) {
 	}
 	failed := func(starts int) {
 		t.Helper()
-		hs.untilLong("the failed start", func() bool {
+		hs.until("the failed start", func() bool {
 			s := server()
 			return s != nil && s.starts == starts && s.state() == lspFailed
 		})
@@ -146,7 +156,7 @@ func TestLanguageServerRetry(t *testing.T) {
 	}
 	h.reloadAll()
 	path := hs.path("a.fake")
-	hs.untilLong("the server's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 1 })
+	hs.until("the server's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 1 })
 	if s := server(); s.starts != 1 || s.state() != lspRunning {
 		t.Fatalf("after the reload: starts %d, state %d", s.starts, s.state())
 	}
@@ -174,7 +184,7 @@ func TestLanguageServerRetryOnOpen(t *testing.T) {
 	a := hs.a
 	os.WriteFile(hs.path("a.fake"), []byte("so bad\n"), 0o644)
 	a.openFile(hs.path("a.fake"), true)
-	hs.untilLong("the failed start", func() bool { return a.fails == 1 })
+	hs.until("the failed start", func() bool { return a.fails == 1 })
 	if err := os.Symlink(os.Args[0], filepath.Join(bin, "mayoi-fake-lsp.exe")); err != nil {
 		t.Fatal(err)
 	}
@@ -184,5 +194,5 @@ func TestLanguageServerRetryOnOpen(t *testing.T) {
 	path := hs.path("b.fake")
 	os.WriteFile(path, []byte("so bad\n"), 0o644)
 	a.openFile(path, true)
-	hs.untilLong("the server's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 1 })
+	hs.until("the server's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 1 })
 }

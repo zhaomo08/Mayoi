@@ -68,7 +68,7 @@ func StatMany(paths []string) (map[string]fs.FileInfo, error) {
 			return out, err
 		}
 		for rp, info := range infos {
-			out[remote.Path(c.Host, rp)] = info
+			out[c.Path(rp)] = info
 		}
 	}
 	return out, nil
@@ -230,7 +230,9 @@ func ReadDir(dir string) ([]Entry, error) {
 	out := make([]Entry, 0, len(entries))
 	for _, e := range entries {
 		isDir := e.IsDir()
-		if e.Type()&os.ModeSymlink != 0 {
+		// Windows calls a directory junction irregular: neither a link nor
+		// a folder.
+		if e.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 			if info, err := os.Stat(filepath.Join(dir, e.Name())); err == nil && info.IsDir() {
 				isDir = true
 			}
@@ -263,7 +265,7 @@ func ReadDirs(dirs []string) (map[string][]Entry, map[string]error, error) {
 			return lists, errs, err
 		}
 		for rp, l := range got {
-			p := remote.Path(c.Host, rp)
+			p := c.Path(rp)
 			if l.Err != nil {
 				errs[p] = l.Err
 				continue
@@ -312,7 +314,7 @@ func Look(dirs, files []string) (map[string][]Entry, map[string]error, map[strin
 	}
 	lists, errs, infos := map[string][]Entry{}, map[string]error{}, map[string]fs.FileInfo{}
 	for rp, l := range got {
-		p := remote.Path(c.Host, rp)
+		p := c.Path(rp)
 		if l.Err != nil {
 			errs[p] = l.Err
 			continue
@@ -324,7 +326,7 @@ func Look(dirs, files []string) (map[string][]Entry, map[string]error, map[strin
 		lists[p] = es
 	}
 	for rp, info := range stats {
-		infos[remote.Path(c.Host, rp)] = info
+		infos[c.Path(rp)] = info
 	}
 	return lists, errs, infos, nil
 }
@@ -354,7 +356,7 @@ exec env "$@"`
 	}
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	hideWindow(cmd)
+	HideWindow(cmd)
 	if len(env) > 0 || len(unset) > 0 {
 		cmd.Env = []string{}
 		for _, value := range os.Environ() {

@@ -47,6 +47,11 @@ func (a *gitContext) openPRPicker() {
 	}
 	pick := &a.app.prs
 	*pick = prPicker{open: true, repoRoot: a.git.repo.Root, loading: true}
+	if o := a.githubOverview(); o != nil {
+		// Those the GitHub view read: no need to ask again.
+		pick.prs, pick.loading = o.PRList(), false
+		return
+	}
 	r, g := a.git.repo, a.git
 	bg.Go(func() {
 		defer recoverCrash()
@@ -136,7 +141,7 @@ func (a *app) prPickerView(c *ui.Context) {
 	p := a.pal
 	open := func(n int) {
 		pick.open = false
-		a.post(func() { g.openPullRequest(n) })
+		a.post(func() { g.openPullRequest(n, prConversation) })
 	}
 	ui.Overlay(c, func() {
 		back := a.dialogBack(c)

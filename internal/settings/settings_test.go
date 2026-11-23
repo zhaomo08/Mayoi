@@ -468,6 +468,24 @@ func TestTerminalBackendHcPreferences(t *testing.T) {
 	}
 }
 
+// terminalShell and terminalShellArgs are kept as they are written, and
+// saved again, each argument as one.
+func TestTerminalShellPreferences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	s := Load(path)
+	if s.TerminalShell != "" || s.TerminalShellArgs != nil {
+		t.Fatalf("default shell %q %q", s.TerminalShell, s.TerminalShellArgs)
+	}
+	shell, args := `C:\Program Files\PowerShell\7-preview\pwsh.exe`, []string{"-NoLogo", "a b", "$X;"}
+	s.TerminalShell, s.TerminalShellArgs = shell, args
+	s.Changed()
+	s.Flush()
+	got := Load(path)
+	if got.TerminalShell != shell || !slices.Equal(got.TerminalShellArgs, args) {
+		t.Errorf("shell %q %q", got.TerminalShell, got.TerminalShellArgs)
+	}
+}
+
 func TestScmRepositoryPreferencesRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	s := Load(path)
@@ -490,11 +508,12 @@ func TestSyncedPrefs(t *testing.T) {
 	}
 	p.FontSize, p.Theme, p.ScmRemotes, p.ScmRepositoryOpen = 15, "claude", true, true
 	p.TerminalBackendHcPath, p.TerminalBackendHcEnv = "/opt/hc/bin/hc", []string{"MY_TOKEN=secret"}
+	p.TerminalShell, p.TerminalShellArgs = "/opt/bin/fish", []string{"-l"}
 	if p.IsDefault() {
 		t.Error("changed preferences are default")
 	}
 	m := p.Synced()
-	for _, k := range []string{"scmRemotes", "terminalBackendHcPath", "terminalBackendHcEnv"} {
+	for _, k := range []string{"scmRemotes", "terminalBackendHcPath", "terminalBackendHcEnv", "terminalShell", "terminalShellArgs"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("%s syncs", k)
 		}
@@ -507,6 +526,8 @@ func TestSyncedPrefs(t *testing.T) {
 	m["fontSize"] = json.RawMessage("40")
 	m["terminalBackendHcPath"] = json.RawMessage(`"perl"`)
 	m["terminalBackendHcEnv"] = json.RawMessage(`["PERL5OPT=-e1"]`)
+	m["terminalShell"] = json.RawMessage(`"perl"`)
+	m["terminalShellArgs"] = json.RawMessage(`["-e1"]`)
 	delete(m, "theme")
 	q, err := p.WithSynced(m)
 	if err != nil {
@@ -517,6 +538,9 @@ func TestSyncedPrefs(t *testing.T) {
 	}
 	if q.TerminalBackendHcPath != "/opt/hc/bin/hc" || !slices.Equal(q.TerminalBackendHcEnv, []string{"MY_TOKEN=secret"}) {
 		t.Errorf("hc %q %q", q.TerminalBackendHcPath, q.TerminalBackendHcEnv)
+	}
+	if q.TerminalShell != "/opt/bin/fish" || !slices.Equal(q.TerminalShellArgs, []string{"-l"}) {
+		t.Errorf("shell %q %q", q.TerminalShell, q.TerminalShellArgs)
 	}
 	if !slices.Contains(PrefKeys, "fontSize") || !slices.Contains(PrefKeys, "locale") {
 		t.Errorf("PrefKeys = %v", PrefKeys)
@@ -629,5 +653,91 @@ func TestEdited(t *testing.T) {
 	}
 	if _, ok := s.Edited(); ok {
 		t.Error("an edit taken is an edit again")
+	}
+}
+
+// markdownPreview, which opened Markdown rendered, is markdownMode
+// "reading" now, in the settings' file and in a folder's.
+func TestMigrateMarkdownPreview(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	os.WriteFile(path, []byte(`{"markdownPreview": true}`), 0o644)
+	if s := Load(path); s.MarkdownMode != "reading" {
+		t.Errorf("markdownPreview migrated to %q", s.MarkdownMode)
+	}
+	os.WriteFile(path, []byte(`{"markdownPreview": true, "markdownMode": "live"}`), 0o644)
+	if s := Load(path); s.MarkdownMode != "live" {
+		t.Errorf("markdownMode %q, chosen live", s.MarkdownMode)
+	}
+	os.WriteFile(path, []byte(`{"markdownMode": "other"}`), 0o644)
+	if s := Load(path); s.MarkdownMode != "" {
+		t.Errorf("an unknown markdownMode is %q", s.MarkdownMode)
+	}
+	os.MkdirAll(filepath.Join(dir, FolderDir), 0o755)
+	os.WriteFile(FolderPath(dir), []byte(`{"markdownPreview": true}`), 0o644)
+	if p := LoadFolder(dir).Apply(Default().Prefs); p.MarkdownMode != "reading" {
+		t.Errorf("a folder's markdownPreview applied as %q", p.MarkdownMode)
+	}
+}
+
+// Trimming trailing whitespace is off until chosen, and a folder may
+// choose it.
+func TestTrimTrailingWhitespace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	s := Load(path)
+	if s.TrimTrailingWhitespace {
+		t.Fatal("on by default")
+	}
+	if err := os.WriteFile(path, []byte(`{"trimTrailingWhitespace": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := s.Edited(); !ok || !p.TrimTrailingWhitespace {
+		t.Fatal("the edited setting was not read")
+	}
+	if !slices.Contains(FolderKeys(), "trimTrailingWhitespace") {
+		t.Error("a folder can't choose it")
+	}
+}
+
+// The sessions archived are kept in state.json, by agent, Claude Code
+// folder and id, and come back archived after a restart; archiving one
+// twice, or bringing back one not archived, changes nothing.
+func TestArchivedSessionsPersist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	s := Load(path)
+	a := SessionRef{Agent: "claude", Root: "/h/.claude", ID: "s1"}
+	b := SessionRef{Agent: "claude", Root: "/h/.claude-work", ID: "s1"}
+	at := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	gen := s.ArchiveGen()
+	if got := s.Archive([]ArchivedSession{{a, at}, {a, at}}); len(got) != 1 || !s.IsArchived(a) || s.IsArchived(b) {
+		t.Fatalf("archived %v: a %v, b %v", got, s.IsArchived(a), s.IsArchived(b))
+	}
+	if s.ArchiveGen() == gen {
+		t.Error("archiving left the generation be")
+	}
+	if got := s.Archive([]ArchivedSession{{a, at}}); got != nil {
+		t.Errorf("archived again: %v", got)
+	}
+	s.Flush()
+	state, _ := os.ReadFile(filepath.Join(dir, "state.json"))
+	if !strings.Contains(string(state), `"archivedSessions"`) {
+		t.Fatalf("state %s", state)
+	}
+	again := Load(path)
+	if !again.IsArchived(a) || again.IsArchived(b) || !again.ArchivedSessions[0].At.Equal(at) {
+		t.Fatalf("loaded again: %+v", again.ArchivedSessions)
+	}
+	if got := again.Unarchive([]SessionRef{b}); got != nil {
+		t.Errorf("brought back one not archived: %v", got)
+	}
+	gone := again.Unarchive([]SessionRef{a})
+	if len(gone) != 1 || again.IsArchived(a) || len(again.ArchivedSessions) != 0 {
+		t.Fatalf("brought back %v, left %v", gone, again.ArchivedSessions)
+	}
+	// What Unarchive returns archives them again as they were.
+	again.Archive(gone)
+	if !again.IsArchived(a) || !again.ArchivedSessions[0].At.Equal(at) {
+		t.Errorf("archived again: %+v", again.ArchivedSessions)
 	}
 }

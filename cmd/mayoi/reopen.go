@@ -47,6 +47,8 @@ func (a *app) rememberClosed(t *colTab) {
 	switch {
 	case t.term != nil:
 		c.termDir = t.term.dir
+	case t.diff != nil && t.diff.commit.pending():
+		return // a pull request still read opens again from GitHub
 	case t.diff != nil:
 	case t.path() == "":
 		return
@@ -96,7 +98,7 @@ func (a *app) reopenClosed() {
 			}
 			v.scroll.Y, v.full, v.wrap, v.wrapGen = c.y, c.full, c.wrap, c.wrapGen
 			at := min(max(c.at, 0), len(col.tabs))
-			a.addTab(col, at, &colTab{diff: v})
+			at = a.addTab(col, at, &colTab{diff: v})
 			a.activate(col, at, true)
 			return
 		}
@@ -125,10 +127,20 @@ func (a *app) reopenClosed() {
 			return
 		}
 		if ed := col.tab().ed; ed != nil {
-			ed.sel, ed.caret = c.sel, c.caret
-			ed.vscroll.Y, ed.hscroll.X = c.y, c.x
-			ed.wrap, ed.wrapGen = c.wrap, c.wrapGen
-			a.setPreview(ed, c.preview)
+			restore := func(ed *editor) {
+				ed.sel, ed.caret = c.sel, c.caret
+				ed.vscroll.Y, ed.hscroll.X = c.y, c.x
+				if ed.hidden {
+					ed.hiddenY, ed.hiddenPlaced = c.y, false
+				}
+				ed.wrap, ed.wrapGen = c.wrap, c.wrapGen
+				a.setPreview(ed, c.preview)
+			}
+			if ed.unread() {
+				ed.loadedTarget = restore
+			} else {
+				restore(ed)
+			}
 			a.focusTab(col.tab())
 		}
 		return
@@ -148,10 +160,12 @@ func (a *app) closedColumn(c closedTab) (col *column, made bool) {
 	} else {
 		col = a.newColumn()
 		col.weight = c.weight
-		at := min(c.colAt, len(a.cols))
-		a.cols = slices.Insert(a.cols, at, col)
-		if a.col >= at {
-			a.col++
+		// Where it was among the columns as they read: before the one in
+		// its place now, or after the last.
+		if at := min(c.colAt, len(a.cols)); at < len(a.cols) {
+			a.placeColumn(col, a.cols[at], false)
+		} else {
+			a.placeColumn(col, a.cols[len(a.cols)-1], true)
 		}
 		made = true
 	}

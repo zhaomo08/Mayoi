@@ -12,6 +12,7 @@ import (
 	"mayoi/internal/remote"
 	"mayoi/internal/settings"
 	"mayoi/locales"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -63,9 +64,11 @@ type mayoi struct {
 	wins   []*desktop
 	frames []*frame
 	// pending are the folders and files the app was asked to open before
-	// it was ready.
-	ready   bool
-	pending []string
+	// it was ready, and pendingTargets the files a URL asked for with a
+	// line and column.
+	ready          bool
+	pending        []string
+	pendingTargets []cli.Target
 	// life is how far the app is along quitting: closing once it quits,
 	// so that the windows it closes stay in the settings, to open again
 	// at the next start.
@@ -89,6 +92,14 @@ type mayoi struct {
 	update      string
 	// prefs is the settings window, nil while it is closed.
 	prefs *prefsWindow
+	// sidebar is what of the sidebar every project shares, once one has
+	// (sidebarSeen).
+	sidebar     sidebarShare
+	sidebarSeen bool
+	// quitAsking is the window whose question whether to quit shows,
+	// quitConfirm, nil while none does.
+	quitAsking  *desktop
+	quitConfirm *confirm
 }
 
 func (h *desktop) openFolder(done func(string)) {
@@ -96,7 +107,9 @@ func (h *desktop) openFolder(done func(string)) {
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 			Parent: h.f.win, Title: locales.DialogOpenFolder(), ButtonLabel: locales.DialogOpen(), Directory: true, CreateDirectories: true,
 		})
-		if err == nil && len(paths) > 0 {
+		if err != nil {
+			h.dialogFailed(err)
+		} else if len(paths) > 0 {
 			h.a.post(func() { done(paths[0]) })
 		}
 	}()
@@ -108,7 +121,9 @@ func (h *desktop) choosePaths(title, button, dir string, folders bool, done func
 			Parent: h.f.win, Title: title, ButtonLabel: button, DefaultPath: dir,
 			Directory: folders, Multiple: !folders, CreateDirectories: folders,
 		})
-		if err == nil && len(paths) > 0 {
+		if err != nil {
+			h.dialogFailed(err)
+		} else if len(paths) > 0 {
 			h.a.post(func() { done(paths) })
 		}
 	}()
@@ -129,7 +144,9 @@ func (h *desktop) chooseIcon(dir string, done func(string)) {
 			Parent: h.f.win, Title: locales.DialogChooseIcon(), ButtonLabel: locales.DialogChoose(), DefaultPath: dir,
 			Filters: []mygo.FileFilter{{Name: locales.DialogImages(), Extensions: exts}},
 		})
-		if err == nil && len(paths) > 0 {
+		if err != nil {
+			h.dialogFailed(err)
+		} else if len(paths) > 0 {
 			h.a.post(func() { done(paths[0]) })
 		}
 	}()
@@ -143,9 +160,16 @@ func (h *desktop) saveAs(name string, done func(string)) {
 		})
 		if err != nil {
 			path = ""
+			h.dialogFailed(err)
 		}
 		h.a.post(func() { done(path) })
 	}()
+}
+
+// dialogFailed tells, from any goroutine, that a file dialog could not
+// show, rather than let the click do nothing.
+func (h *desktop) dialogFailed(err error) {
+	h.a.post(func() { h.a.dialogFailed(err) })
 }
 
 func (h *desktop) exportAs(path, ext string, done func(string)) {
@@ -180,6 +204,28 @@ func (h *desktop) trash(path string) error { return mygo.Shell.TrashItem(path) }
 func (h *desktop) nativeDrags() bool       { return true }
 func (h *desktop) shown() bool {
 	return h.f.active == h && h.f.win.IsVisible() && !h.f.win.IsMinimized()
+}
+func (h *desktop) focused() bool {
+	return h.f.active == h && h.f.win.IsFocused()
+}
+
+// notify shows a notification of the system, when the app may show them.
+func (h *desktop) notify(title, body string, onClick func()) {
+	go func() {
+		if !mygo.NotificationsSupported() {
+			return
+		}
+		n := mygo.NewNotification(mygo.NotificationOptions{Title: title, Body: body})
+		n.OnClick(func() {
+			h.do(func() {
+				h.show()
+				if onClick != nil {
+					onClick()
+				}
+			})
+		})
+		n.Show()
+	}()
 }
 func (h *desktop) reveal(path string) {
 	if !remote.Is(path) {
@@ -236,6 +282,8 @@ func (h *desktop) newWindow(dir string) {
 }
 
 func (h *desktop) newBlankWindow() { h.m.openBlankWindow() }
+
+func (h *desktop) quitApp() { h.m.quitApp(h) }
 
 func (h *desktop) openFolders(dirs []string) {
 	for _, dir := range dirs {
@@ -297,6 +345,30 @@ func (h *desktop) uninstallCLI() {
 	}()
 }
 
+func (h *desktop) addContextMenu() {
+	go func() {
+		if err := cli.AddContextMenu(appLocation(), locales.ContextMenuOpen()); err != nil {
+			h.tell(mygo.MessageWarning, locales.ContextMenuAddFailed(), err.Error())
+			return
+		}
+		h.tell(mygo.MessageInfo, locales.ContextMenuAdded(), locales.ContextMenuAddedDetail())
+	}()
+}
+
+func (h *desktop) removeContextMenu() {
+	go func() {
+		removed, err := cli.RemoveContextMenu()
+		switch {
+		case err != nil:
+			h.tell(mygo.MessageWarning, locales.ContextMenuRemoveFailed(), err.Error())
+		case !removed:
+			h.tell(mygo.MessageInfo, locales.ContextMenuNotAdded(), "")
+		default:
+			h.tell(mygo.MessageInfo, locales.ContextMenuRemoved(), "")
+		}
+	}()
+}
+
 // tell shows a message on the window.
 func (h *desktop) tell(kind mygo.MessageType, message, detail string) {
 	mygo.Dialog.Message(mygo.MessageOptions{Parent: h.f.win, Type: kind, Message: message, Detail: detail})
@@ -325,7 +397,20 @@ func settingsPath() string {
 	return filepath.Join(dir, "settings.json")
 }
 
+// shellPathReady is closed once PATH is the user's shell's, which main
+// reads in the background; closed from the start where it is not read.
+var shellPathReady = func() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
+
 func main() {
+	// The bridge is an internal process of this executable. It has to run
+	// before the command client and the single-instance lock: those would
+	// hand its arguments to the running Mayoi, or leave without bridging.
+	// It does not set MAYOI_CLI and it does not open a window.
+	remote.HandleBridge(os.Args)
 	mygo.App.SetName("Mayoi")
 	keyRepeat()
 	// MAYOI_DATA_DIR keeps the settings and window state elsewhere, such as
@@ -359,12 +444,17 @@ func main() {
 	}
 	// Opened from the Finder or the Dock, Mayoi has the system's PATH
 	// only; git, its hooks and what else Mayoi runs look for commands
-	// where the user's shell does. In the background, as a slow shell
-	// would hold up the window.
-	shellPathReady := make(chan struct{})
+	// where the user's shell does, and ssh signs with the agent of the
+	// user's session, whose socket the app does not inherit either. In the
+	// background, as a slow shell would hold up the window.
+	shellPathReady = make(chan struct{})
 	if runtime.GOOS != "windows" && os.Getenv("MAYOI_SNAPSHOT") == "" {
 		go func() {
-			os.Setenv("PATH", strings.Join(cli.ShellPath(), string(os.PathListSeparator)))
+			path, env := cli.ShellEnvironment()
+			os.Setenv("PATH", strings.Join(path, string(os.PathListSeparator)))
+			for key, value := range env {
+				os.Setenv(key, value)
+			}
 			close(shellPathReady)
 		}()
 	} else {
@@ -375,13 +465,7 @@ func main() {
 	// updater never checks by itself. Development builds never check.
 	mygo.Use(native.New(updater.Options{DisableAutomaticChecks: true}))
 	m := &mayoi{}
-	mygo.App.OnSecondInstance(func(args []string, wd string) {
-		if paths := argPaths(args, wd); len(paths) > 0 {
-			m.open(paths)
-		} else if len(m.wins) > 0 {
-			m.wins[0].show()
-		}
-	})
+	mygo.App.OnSecondInstance(m.secondInstance)
 	// The folders and files of `mayoi` and the Finder, also those the app
 	// starts with.
 	mygo.App.OnOpenFile(func(path string) {
@@ -390,6 +474,19 @@ func main() {
 			return
 		}
 		m.open([]string{path})
+	})
+	// A mayoi:// URL, as LocatorJS opens a file, once the windows are
+	// ready to show it.
+	mygo.App.OnOpenURL(func(rawURL string) {
+		t, ok := openURLTarget(rawURL)
+		if !ok {
+			return
+		}
+		if !m.ready {
+			m.pendingTargets = append(m.pendingTargets, t)
+			return
+		}
+		m.openURL(t)
 	})
 	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
 		if !m.beforeQuit() {
@@ -431,6 +528,10 @@ func main() {
 		m.ready = true
 		m.launch(append(m.pending, argPaths(os.Args[1:], wd)...))
 		m.pending = nil
+		for _, t := range m.pendingTargets {
+			m.openURL(t)
+		}
+		m.pendingTargets = nil
 		m.listenCLI()
 		go func() {
 			<-shellPathReady
@@ -441,6 +542,7 @@ func main() {
 		setThemeSource(themeSource(m.s.Theme, m.s.Appearance))
 		m.startCloud()
 		m.startUpdates()
+		m.startUsage()
 		if len(m.wins) == 0 {
 			return
 		}
@@ -449,6 +551,7 @@ func main() {
 		m.setMenu(first.a)
 		if os.Getenv("MAYOI_SNAPSHOT") == "" {
 			m.offerCrashes(first)
+			m.offerNativeBuild(first)
 		}
 		if out := os.Getenv("MAYOI_SNAPSHOT"); out != "" {
 			// For checking the real window: capture it once it settles, and
@@ -477,11 +580,22 @@ func main() {
 func argPaths(args []string, wd string) []string {
 	var paths []string
 	for _, arg := range args {
-		if arg == "" || strings.HasPrefix(arg, "-") {
+		// A mayoi:// URL, which Windows and Linux start the app with,
+		// reaches OnOpenURL.
+		if arg == "" || strings.HasPrefix(arg, "-") || isMayoiURL(arg) {
 			continue
 		}
-		if !filepath.IsAbs(arg) {
-			arg = filepath.Join(wd, arg)
+		// A file:// URL, which Linux file managers pass for %U.
+		if u, err := url.Parse(arg); err == nil && u.Scheme == "file" {
+			arg = filepath.FromSlash(u.Path)
+			if runtime.GOOS == "windows" {
+				arg = strings.TrimPrefix(arg, `\`) // file:///C:/x
+			}
+		}
+		if remote.Is(arg) {
+			arg = remote.Clean(arg)
+		} else if !remote.IsAbs(arg) {
+			arg = remote.Join(wd, arg)
 		}
 		paths = append(paths, arg)
 	}
@@ -540,6 +654,22 @@ func (m *mayoi) launch(paths []string) {
 	}
 }
 
+// secondInstance opens the folders and files another Mayoi was started
+// with, or brings the first window to the front. Before the app is
+// ready, when it has no settings yet, they wait for launch.
+func (m *mayoi) secondInstance(args []string, wd string) {
+	paths := argPaths(args, wd)
+	if !m.ready {
+		m.pending = append(m.pending, paths...)
+		return
+	}
+	if len(paths) > 0 {
+		m.open(paths)
+	} else if len(m.wins) > 0 {
+		m.wins[0].show()
+	}
+}
+
 // open opens folders and files the app is asked to while it runs.
 func (m *mayoi) open(paths []string) {
 	folders, files := splitPaths(paths)
@@ -563,7 +693,11 @@ func splitPaths(paths []string) (folders, files []string) {
 				folders = append(folders, p)
 			}
 		case info.Mode().IsRegular():
-			files = append(files, p)
+			// MyGo also hands the files of its associations to
+			// OnOpenFile.
+			if !slices.Contains(files, p) {
+				files = append(files, p)
+			}
 		}
 	}
 	return folders, files
@@ -622,10 +756,10 @@ func (m *mayoi) openFileIn(in *desktop, path string, then func(a *app)) {
 			win, deepest = w, root
 		}
 	}
-	if deepest != "" {
+	if deepest != "" && !remote.Is(deepest) && !remote.Is(path) {
 		// As the window spells its folder, which on Windows a path given
 		// in other letters, c:\proj for C:\Proj, is too: the file opens
-		// once, as the Explorer has it.
+		// once, as the Explorer has it. A remote path stays as it is.
 		path = filepath.Join(deepest, path[len(strings.TrimSuffix(deepest, string(filepath.Separator))):])
 	}
 	if win == nil && len(m.wins) > 0 {
@@ -693,6 +827,7 @@ func (m *mayoi) reload(p settings.Prefs) {
 	if plugins != nil {
 		plugins.syncPrefs()
 		plugins.toggled(old.Plugins, p.Plugins)
+		m.restartServersOf(changedInitOptions(old.LanguageServers, p.LanguageServers))
 		if !maps.Equal(p.PluginSources, old.PluginSources) {
 			plugins.syncPlugins()
 		}
@@ -841,6 +976,9 @@ func menuKey(items []*mygo.MenuItem) string {
 // one focused last.
 func (m *mayoi) run(id string, win *mygo.Window) {
 	if len(m.wins) == 0 {
+		if id == "file.quit" {
+			appQuit()
+		}
 		return
 	}
 	// The menu toggled the item chosen, which the command may leave as
@@ -872,6 +1010,12 @@ func (m *mayoi) run(id string, win *mygo.Window) {
 			h = f.active
 		}
 	}
+	if id == "file.quit" {
+		// At once, rather than at the next frame of a window that may be
+		// minimized or hidden, and draw none.
+		m.quitApp(h)
+		return
+	}
 	a := h.a
 	h.do(func() { a.run(id) })
 }
@@ -901,6 +1045,42 @@ func (m *mayoi) beforeQuit() bool {
 		mygo.App.Quit()
 	}, func() { m.life = lifeOpen })
 	return false
+}
+
+// appQuit quits the app, which a test replaces.
+var appQuit = func() { mygo.App.Quit() }
+
+// quitApp quits as Cmd+Q and Quit Mayoi do. With confirmBeforeQuit on,
+// it asks first in h, the window in front, and Quit goes on as quitting
+// does (beforeQuit), asking about the changes. Asked again meanwhile, it
+// brings the question shown to the front. Quitting otherwise, as to
+// update, from the Dock or to log out, does not ask.
+func (m *mayoi) quitApp(h *desktop) {
+	if w := m.quitAsking; w != nil {
+		if slices.Contains(m.wins, w) && (w.a.confirm == m.quitConfirm || slices.Contains(w.a.asks, m.quitConfirm)) {
+			w.show()
+			return
+		}
+		// Its window closed meanwhile.
+		m.quitAsking, m.quitConfirm = nil, nil
+	}
+	if h == nil || !m.s.ConfirmBeforeQuit || m.life != lifeOpen || m.settling() {
+		appQuit()
+		return
+	}
+	cf := &confirm{title: locales.QuitTitle(), ok: locales.QuitButton(), check: locales.QuitDontAsk()}
+	cf.run = func() {
+		m.quitAsking, m.quitConfirm = nil, nil
+		if cf.checked {
+			m.s.ConfirmBeforeQuit = false
+			m.s.Changed()
+		}
+		appQuit()
+	}
+	cf.cancel = func() { m.quitAsking, m.quitConfirm = nil, nil }
+	m.quitAsking, m.quitConfirm = h, cf
+	h.show()
+	h.a.present(cf)
 }
 
 // settling reports whether the app, or a window, is asking about

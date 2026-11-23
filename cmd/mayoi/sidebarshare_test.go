@@ -1,0 +1,129 @@
+package main
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+
+	"mayoi/internal/agents"
+	"mayoi/internal/settings"
+	"mayoi/locales"
+)
+
+// The sidebar's width, whether it is closed and the scope of the Sessions
+// view follow from one project to the next; what it shows is each one's,
+// but for the sessions of every folder.
+func TestSidebarSharedAcrossProjects(t *testing.T) {
+	root, other := workspaceFixture(t), workspaceFixture(t)
+	f, hs, tt := railFixture(t, root, other)
+	a, b := hs[0].a, hs[1].a
+	a.showSessions()
+	a.window.SidebarWidth = 300
+	step(tt)
+	f.activate(hs[1])
+	step(tt)
+	if b.window.SidebarWidth != 300 || b.sessions.all != 0 || b.window.SidebarClosed {
+		t.Fatalf("other project: width %v, all %d, closed %v; want 300, 0, open", b.window.SidebarWidth, b.sessions.all, b.window.SidebarClosed)
+	}
+	if b.window.SidebarView == "sessions" {
+		t.Errorf("other project shows %q, want its own view", b.window.SidebarView)
+	}
+	f.activate(hs[0])
+	step(tt)
+	a.sessions.all = 1
+	step(tt)
+	f.activate(hs[1])
+	step(tt)
+	if b.sessions.all != 1 || b.window.SidebarView != "sessions" {
+		t.Fatalf("other project: all %d, view %q; want 1, sessions", b.sessions.all, b.window.SidebarView)
+	}
+	b.window.SidebarView = ""
+	step(tt)
+	b.window.SidebarClosed = true
+	step(tt)
+	f.activate(hs[0])
+	step(tt)
+	if !a.window.SidebarClosed || a.window.SidebarView != "sessions" {
+		t.Errorf("back: closed %v, view %q; want closed, sessions", a.window.SidebarClosed, a.window.SidebarView)
+	}
+}
+
+// A project not shown yet, which starts as it shows, takes the Sessions
+// view of every folder too, and keeps it for the others.
+func TestUnstartedProjectTakesAllSessions(t *testing.T) {
+	f, hs, tt := railFixture(t, workspaceFixture(t), workspaceFixture(t))
+	a, b := hs[0].a, hs[1].a
+	a.showSessions()
+	a.sessions.all = 1
+	step(tt)
+	if b.started {
+		t.Fatal("other project started before it showed")
+	}
+	f.activate(hs[1])
+	step(tt)
+	if b.window.SidebarView != "sessions" || !f.m.sidebar.allSessions {
+		t.Errorf("other project: view %q, shared %v; want sessions, true", b.window.SidebarView, f.m.sidebar.allSessions)
+	}
+}
+
+// A remote folder lists no sessions, as those read are of this machine:
+// it doesn't take the Sessions view of every folder from another.
+func TestRemoteProjectHasNoSessions(t *testing.T) {
+	a := &app{root: "/ssh:box/home/me/proj", window: &settings.Window{SidebarView: "git"}}
+	a.setSidebarShare(sidebarShare{all: 1, allSessions: true})
+	if a.window.SidebarView != "git" || a.hasSessions() {
+		t.Errorf("view %q, has sessions %v; want git, none", a.window.SidebarView, a.hasSessions())
+	}
+	a.showSessions()
+	if a.window.SidebarView != "git" {
+		t.Errorf("showSessions shows %q in a remote project", a.window.SidebarView)
+	}
+	// It passes the view on to the next project rather than ending it.
+	a.shared, a.sessions.all = sidebarShare{all: 1, allSessions: true}, 1
+	if !a.sidebarShare().allSessions {
+		t.Error("remote project stops sharing the Sessions view of every folder")
+	}
+}
+
+// A session open in a terminal of another project is marked so, and
+// resuming it shows that project and terminal rather than starting one.
+func TestResumeShowsTerminalOfAnotherProject(t *testing.T) {
+	root, other := workspaceFixture(t), workspaceFixture(t)
+	f, hs, tt := railFixture(t, root, other)
+	a, b := hs[0].a, hs[1].a
+	ps := []*app{a, b}
+	for _, p := range ps {
+		p.host.(*fakeHost).projects = ps
+	}
+	ses := agents.Session{Harness: agents.Claude, Root: "/h/.claude", ID: "c1", Dir: other, Updated: time.Now()}
+	term := hcSession(t, b, "t1")
+	term.resumed = ses.Key()
+	a.sessions.sessions = []agents.Session{ses}
+	a.placeLive(time.Now())
+	k := liveKey(ses.Harness, ses.ID)
+	if o := a.sessions.open[k]; o.owner != b || o.t != term {
+		t.Fatalf("open %+v, want the terminal of the other project", o)
+	}
+	// Its row names the project whose terminal shows it, rather than its
+	// own folder.
+	a.sessions.all = 1
+	a.showSessions()
+	shown := ses
+	shown.Dir = root
+	a.sessions.sessions, a.sessions.loaded = []agents.Session{shown}, true
+	a.placeLive(time.Now())
+	step(tt)
+	if !tt.HasText(filepath.Base(other)) || tt.HasText(locales.SessionsInTab()) {
+		t.Errorf("the row says %q, want %q", locales.SessionsInTab(), filepath.Base(other))
+	}
+	n := len(a.terms)
+	a.resumeSession(ses)
+	if got := a.host.(*fakeHost).showed; got != b || len(a.terms) != n {
+		t.Fatalf("showed %v with %d terminals here; want the other project, none started", got, len(a.terms))
+	}
+	f.activate(hs[1])
+	step(tt)
+	if term.tab == nil || b.column().tab() != term.tab {
+		t.Errorf("the other project shows %v, want the session's terminal", b.column().tab())
+	}
+}

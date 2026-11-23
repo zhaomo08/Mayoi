@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 
+	"mayoi/internal/agents"
 	"mayoi/internal/bg"
 	"mayoi/locales"
 )
@@ -199,6 +201,40 @@ func progPilled(s *session) (terminal.StatusRecord, bool) {
 // progShown reports whether the pill shows a record in state st.
 func progShown(st terminal.StatusState) bool {
 	return st == terminal.StatusWorking || st == terminal.StatusBlocked
+}
+
+// terminalBusy returns the record of a terminal's program that works or
+// waits for the user, which closing the terminal would stop.
+func terminalBusy(s *session) (terminal.StatusRecord, bool) {
+	r, ok := progStatus(s)
+	return r, ok && progShown(r.State)
+}
+
+// confirmKillTerminal runs kill, which closes a terminal, asking first
+// while one of its programs works or waits for the user: cancelled runs
+// when the person keeps it. A terminal gone by the answer is let be.
+func (a *app) confirmKillTerminal(s *session, kill, cancelled func()) {
+	r, busy := terminalBusy(s)
+	if !busy {
+		kill()
+		return
+	}
+	a.present(&confirm{
+		title: locales.TermCloseBusyQuestion(), message: locales.TermCloseBusyDetail(progLine(r)),
+		ok: locales.TabClose(), danger: true, cancel: cancelled,
+		run: func() {
+			if slices.Contains(a.terms, s) {
+				kill()
+			} else if cancelled != nil {
+				cancelled()
+			}
+		},
+	})
+}
+
+// killTerminalAsking kills a terminal, asking first while it is busy.
+func (a *app) killTerminalAsking(s *session) {
+	a.confirmKillTerminal(s, func() { a.killTerminal(s) }, nil)
 }
 
 // statusIn is the newest status of a terminal's programs that waits for
@@ -432,7 +468,11 @@ func (a *app) termIcon(c *ui.Context, s *session, size float32, tint, bg ui.Colo
 		box.Tooltip(termWait(s)).Label(termWait(s))
 	}
 	box.Children(func() {
-		ui.Icon(c, iconTerminal).FontSize(size).TextColor(tint)
+		icon := iconTerminal
+		if h, ok := termAgent(s); ok {
+			icon, tint = agentIcon(p, h)
+		}
+		ui.Icon(c, icon).FontSize(size).TextColor(tint)
 		if st == termHere && !busy {
 			return
 		}
@@ -468,6 +508,19 @@ func (a *app) termIcon(c *ui.Context, s *session, size float32, tint, bg ui.Colo
 		}
 		badge.Draw(func(pt *ui.Painter, r ui.Rect) { statusDot(pt, r, cut, col, bg, pulse, ready) })
 	})
+}
+
+// termAgent is the agent that runs in a terminal, as far as it is known:
+// the one the Sessions view resumed in it, or else the one its programs
+// say runs.
+func termAgent(s *session) (agents.Harness, bool) {
+	if s.agent != "" {
+		return s.agent, true
+	}
+	if r, ok := s.status.Top(); ok {
+		return agents.HarnessOfApp(r.App)
+	}
+	return "", false
 }
 
 // statusDot paints a dot of col in r, inside a ring of bg cut wide. For
@@ -534,7 +587,7 @@ func (a *app) hcMenu(m *ui.Menu, s *session) {
 
 // pillMotion is how the pill over a terminal comes, changes and goes: it
 // drops in, its width follows what it says, and it rises away.
-var pillMotion = ui.ElementTransition{Duration: 160 * time.Millisecond, Colors: true, Size: true, Enter: &ui.Motion{Y: -6}, Exit: &ui.Motion{Y: -4}}
+var pillMotion = ui.ElementTransition{Duration: motionShow, Colors: true, Size: true, Enter: &ui.Motion{Y: -6}, Exit: &ui.Motion{Y: -4}}
 
 // waitPill is the pill over a terminal that waits, at its upper right:
 // a spinner in the color of its badge and what it waits for, which turns
@@ -578,7 +631,7 @@ func (a *app) waitPill(c *ui.Context, s *session) {
 
 // pillText is how what the pill over a terminal says changes: it fades
 // across.
-var pillText = ui.ContentTransition{Animation: &ui.Animation{Duration: 140 * time.Millisecond}}
+var pillText = ui.ContentTransition{Animation: &ui.Animation{Duration: motionShow}}
 
 // progBar is how the bar of the pill over a terminal follows the
 // progress of the work it shows.

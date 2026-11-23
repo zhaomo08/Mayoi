@@ -205,7 +205,7 @@ func (a *app) startSearch() {
 	s.seen = map[string]uint64{}
 	texts := map[string]string{}
 	for _, d := range a.docs {
-		if d.path == "" {
+		if d.path == "" || d.unread() {
 			continue
 		}
 		s.seen[d.path] = d.buf.Version()
@@ -227,10 +227,14 @@ func (s *searchState) wants(rel string) bool {
 // relOf returns a path relative to the root, with slashes, false for a
 // path outside it.
 func (a *app) relOf(path string) (string, bool) {
-	if a.root == "" || !strings.HasPrefix(path, a.root+string(filepath.Separator)) {
+	if a.root == "" || path == a.root || !remote.Contains(a.root, path) {
 		return "", false
 	}
-	return filepath.ToSlash(path[len(a.root)+1:]), true
+	rel, err := remote.Rel(a.root, path)
+	if err != nil {
+		return "", false
+	}
+	return rel, true
 }
 
 // runSearch looks for re in the files rels, of the text in texts for
@@ -313,7 +317,7 @@ func (a *app) runSearch(gen int, re *regexp.Regexp, fold foldQuery, rels []strin
 // one too large or binary. fold, when it is of a query, finds its
 // matches as re does, quicker. It may run on any goroutine.
 func searchFileText(root, rel string, texts map[string]string, re *regexp.Regexp, fold foldQuery, limit int, partial bool) *searchFile {
-	path := filepath.Join(root, filepath.FromSlash(rel))
+	path := remote.Join(root, rel)
 	f := &searchFile{path: path, rel: rel}
 	text, ok := texts[rel]
 	if !ok && !remote.Is(path) {
@@ -512,7 +516,7 @@ const maxSearchWatched = 256
 // results follow it as it changes on disk.
 func (a *app) watchResult(path string) {
 	s := &a.inFiles
-	dir := filepath.Dir(path)
+	dir := remote.Dir(path)
 	if a.tree == nil || s.watched[dir] || len(s.watched) >= maxSearchWatched {
 		return
 	}
@@ -541,7 +545,7 @@ func (a *app) searchAgain(paths []string) {
 		if !shown && !slices.Contains(a.index, rel) {
 			continue // a file search does not look in
 		}
-		if i := a.docIndex(p); i >= 0 {
+		if i := a.docIndex(p); i >= 0 && !a.docs[i].unread() {
 			texts[rel] = a.docs[i].buf.String()
 		}
 		rels = append(rels, rel)
@@ -563,7 +567,7 @@ func (a *app) searchTick() {
 	}
 	var edited []string
 	for _, d := range a.docs {
-		if d.path == "" {
+		if d.path == "" || d.unread() {
 			continue
 		}
 		v := d.buf.Version()
@@ -624,6 +628,14 @@ func (a *app) selectMatch(path string, m searchMatch) {
 	if d.preview != nil {
 		// The match is in the text.
 		a.setPreview(d, false)
+	}
+	d.selectMatch(m)
+}
+
+func (d *editor) selectMatch(m searchMatch) {
+	if d.unread() {
+		d.loadedTarget = func(ed *editor) { ed.selectMatch(m) }
+		return
 	}
 	snap := d.buf.Snapshot()
 	if m.line >= snap.LineCount() {
@@ -1138,7 +1150,7 @@ func (a *app) searchMatchRow(c *ui.Context, i int, f *searchFile, m searchMatch,
 	row := ui.Row(c).Grow(1).Gap(6).AlignItems(ui.Center).Height(22).Padding(0, 0, 0, 30)
 	// The matches of a file just unfolded fade in.
 	if at, ok := s.unfolded[f.rel]; ok {
-		if k := ui.EaseOut(min(float32(c.Now().Sub(at))/float32(showFor), 1)); k < 1 {
+		if k := ui.EaseOut(min(float32(c.Now().Sub(at))/float32(motionShow), 1)); k < 1 {
 			row.Opacity(k)
 			c.AnimationFrame()
 		} else {

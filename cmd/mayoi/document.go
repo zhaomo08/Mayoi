@@ -13,6 +13,7 @@ import (
 
 	"mayoi/internal/gitmarks"
 	"mayoi/internal/highlight"
+	"mayoi/internal/plugin"
 	"mayoi/internal/settings"
 	"mayoi/internal/vfs"
 	"mayoi/locales"
@@ -34,32 +35,67 @@ var (
 // document is a file open in the editor: its text, and what follows from
 // the text alone. Each tab that shows it has an editor of its own.
 type document struct {
-	id    int
-	path  string // absolute; "" for an untitled document
-	title string // an untitled document's name
+	outputOwner, outputKey string
+
+	language      string // explicit language, reset when saved under a new path
+	languageOwner string // retain the selected declaration across plugin reloads
+	lexerOwner    *plugin.Plugin
+	lenses        []codeLensBatch
+	id            int
+	path          string // absolute; "" for an untitled document
+	title         string // an untitled document's name
 	// number is the number of an untitled document's name, and kept the
 	// file that keeps its text as the app quits, of version keptVersion.
-	number      int
+	number int
+	// markdown is set on an untitled document a preview command was run
+	// on, which shows it as Markdown until a name it is saved as decides.
+	markdown    bool
 	kept        string
 	keptVersion uint64
 	buf         *ui.TextBuffer
-	saved       uint64 // the buffer's version on disk
+	// headings are the outline of a Markdown document's headings, which
+	// its breadcrumbs show.
+	headings headingOutline
+	// live is the document's Live Preview, nil until an editor shows it
+	// so.
+	live *liveState
+	// folds are the callouts that fold, [!faq]- or [!faq]+, folded or
+	// opened by a click, by their marker lines, as both Live Preview and
+	// the Reading view show them; foldKey is the one folded or opened
+	// last, at foldAt, from which its chevron turns, foldNow set until
+	// a frame notes when.
+	folds map[string]bool
+	// foldScan holds the runs of lines the text folds as code.
+	foldScan foldScan
+	foldKey  string
+	foldAt   time.Time
+	foldNow  bool
+	saved    uint64 // the buffer's version on disk
 	// savedSnap is the text on disk, which undoing back to makes the
 	// document clean again.
 	savedSnap ui.TextSnapshot
 	crlf      bool // saved with CRLF line endings
-	diskCRLF  bool // the file on disk has CRLF line endings
-	hl        *highlight.Highlighter
-	indent    indentStyle
-	hist      history
-	git       gitmarks.Marks
+	// encoding is the one the file is written in, nil for UTF-8.
+	encoding *textEncoding
+	// longLine is the first line, from 1, of the text longer than
+	// maxLineBytes, 0 for none. Only a file of JSON Lines has one: its
+	// table shows it, and in place of its source the editor says why not.
+	longLine int
+	diskCRLF bool     // the file on disk has CRLF line endings
+	trimmed  trimSeen // the text last found without trailing whitespace
+	hl       *highlight.Highlighter
+	indent   indentStyle
+	hist     history
+	git      gitmarks.Marks
 	// marks are vim mode's marks in the text, which move with its edits:
 	// those of m, and ' for where the cursor jumped from. changed is where
 	// the last change was, the mark . of vim. tracked are offsets that a
-	// command of many steps, as :g, follows the lines of.
+	// command of many steps, as :g, follows the lines of, and navs the
+	// places of Go Back's history in the text.
 	marks   map[rune]int
 	changed int
 	tracked []int
+	navs    []*navPlace
 
 	// widest is the longest line in columns seen, which sizes the text
 	// area's width; widestVersion is the version it was last measured at
@@ -70,12 +106,15 @@ type document struct {
 	autoSave      autoSave
 
 	// sync is where the document is in reading and writing its file, and
-	// loadErr why a remote one could not be read. Until it is read the
+	// loadErr why it could not be read. Until it is read the
 	// document is read-only, as while offline, while its host is not
 	// connected. stamp is what stat said of the file as it was last read
 	// or written, and restored is set for a tab of the last session.
 	sync              syncState
 	loadErr           error
+	localQueued       bool
+	readingAt         time.Time // when its tab first showed it reading
+	readWaits         []func()  // what waits for the read under way to end
 	stamp             *fileStamp
 	offline, restored bool
 	// waiters are the saves the write under way answers, or the question
@@ -94,6 +133,7 @@ type document struct {
 // text and its undo history, so that a file shows in several columns.
 type editor struct {
 	*document
+	bufferDiff bool // synthetic compare editors do not keep a closed source alive
 	// cmds are edits asked for by keys and menus, which the next frame
 	// makes, once the editor has its selection.
 	cmds []func(d *editor)
@@ -104,7 +144,16 @@ type editor struct {
 	// sticky are the lines stuck at the top of the editor in the last
 	// frame, which a click goes to.
 	sticky []int
-	scopes scopeCache
+	// defClick is set while a Cmd-click, which goes to a definition as it
+	// is let go, is held.
+	defClick bool
+	// defProbe is where the pointer was when defFound was found: that a
+	// name is there, which a Cmd-click goes to the definition of.
+	defProbe restProbe
+	defFound bool
+	scopes   scopeCache
+	// folding is the runs of lines the editor folded.
+	folding foldView
 	// win is the text of the lines around the view, of version winVersion,
 	// which the decorations and the scopes read their lines from.
 	win        *lineWindow
@@ -139,8 +188,29 @@ type editor struct {
 	// out.
 	rows wrapRows
 
-	caret         int           // the caret's rune offset in the last frame
-	sel           [2]int        // the selection in the last frame
+	caret int     // the caret's rune offset in the last frame
+	textX float32 // where the text starts in the view, in the last frame
+	sel   [2]int  // the selection in the last frame
+	// cursors are the selections besides sel, which edit with it, sorted
+	// and apart, nil while there is one (multicursor.go). goal is the
+	// column moves up and down keep for sel while it is goalSel; column
+	// is the rectangle a column selection grows, added the carets Add
+	// Cursor Above or Below added in a row, and mdrag a press that adds
+	// a caret or selects a column. matchWhole is the text Add Next
+	// Occurrence matches as a whole word, as it started from a caret.
+	cursors    []cursor
+	goal       int
+	goalSel    [2]int
+	column     *columnSel
+	added      *addRun
+	mdrag      *multiDrag
+	matchWhole string
+	// composing is whether an input method composed in the text area in
+	// the last frame; held is set while what was typed at sel waits for
+	// it, from heldSel, to be typed at the others.
+	composing     bool
+	held          bool
+	heldSel       [2]int
 	selecting     bool          // the pointer is dragging a text selection
 	reviewSource  *editorReview // source layout while writing an inline review
 	releaseReview func()        // keep a draft before any editor release path
@@ -154,6 +224,10 @@ type editor struct {
 	// quiet has the next frame make the pending selection without
 	// scrolling to it, as selecting all does.
 	quiet bool
+	// typedSel has the next frame make the pending selection as typing moves
+	// the caret, as closing a bracket typed does: the view follows it as
+	// it follows typing, not as it goes to a selection asked for.
+	typedSel bool
 	// areaInput is whether the text area took input since the frame read
 	// its selection, which may have moved it.
 	areaInput bool
@@ -209,6 +283,60 @@ type editor struct {
 	// preview shows a rendered document in the editor's place,
 	// nil while it shows the text.
 	preview *viewer
+	// live shows a Markdown document's text as Live Preview, styled as it
+	// reads, rather than as its source; liveHits are the tasks' boxes the
+	// last frame drew, by where they show in the text area, and liveAt
+	// where the area showed, and livePane the blocks it drew.
+	live     bool
+	liveHits []liveHit
+	liveAt   ui.Point
+	livePane livePane
+	// liveBox is the task's box the pointer is over, as its rune plus
+	// one, 0 for none.
+	liveBox int
+	// liveCell is the cell of a table Live Preview edits in place.
+	liveCell liveCell
+	// liveScroll is how far the next frame scrolls, as Live Preview's
+	// last asked.
+	liveScroll float32
+	// liveMenu is the table and its cell the menu of a cell opened on.
+	liveMenu liveTableTarget
+	// liveRanges and liveObjects are the ranges and the objects of Live
+	// Preview's last frame, kept for the next to fill again.
+	liveRanges  []ui.TextRange
+	liveObjects map[int]liveDrawn
+	// liveLines are the lines the caret's marks showed on in the last
+	// frame, liveLinesWas those before, and liveRevealAt when the caret
+	// came to them, from which the marks there fade in.
+	liveLines, liveLinesWas [2]int
+	liveRevealAt            time.Time
+	// liveTicked is the rune of the [ of the task whose box was checked
+	// or unchecked last, tickNow set until a frame notes when, liveTickAt.
+	liveTicked int
+	tickNow    bool
+	liveTickAt time.Time
+	// liveMarker is the bullet whose mark showed first in the last frame,
+	// as its rune plus one, 0 for none, liveMarkerWas the one before it,
+	// and liveMarkerAt when it changed, from which one fades into the
+	// other.
+	liveMarker, liveMarkerWas int
+	liveMarkerAt              time.Time
+	// liveHover is the link the pointer is over, as the rune its text
+	// starts at plus one, 0 for none, liveHoverWas the one before it, and
+	// liveHoverAt when it changed, from which the underline of one fills
+	// in and the other's fades.
+	liveHover, liveHoverWas int
+	liveHoverAt             time.Time
+	// liveLink is the runes of the whole link the pointer is over, its
+	// marks with its text, which a click opens while they are hidden, and
+	// liveLinkPress the one pressed, which opens as it is let go over it.
+	liveLink, liveLinkPress [2]int
+	// shownMode is how the editor showed its document in the last frame,
+	// as markdownMode says, and modeAt when that last changed, from which
+	// the view fades in; modeSeen is set once it showed.
+	shownMode string
+	modeSeen  bool
+	modeAt    time.Time
 	// gutterW is how wide the line numbers were in the last frame; peek
 	// the first line of the hunk whose box shows under it, -1 for none.
 	gutterW float32
@@ -217,9 +345,12 @@ type editor struct {
 	vim     vimState
 	// vimShown are the matches of vim's search the editor highlighted last.
 	vimShown vimShownMatches
-	// restoreTab is where a tab of the last session was, which a remote file
+	// restoreTab is where a tab of the last session was, which a file
 	// takes once it is read.
 	restoreTab *settings.Tab
+	// loadedTarget belongs to this view, never to whichever tab is active
+	// when the read finishes. A later navigation replaces the older target.
+	loadedTarget func(*editor)
 }
 
 // newEditor makes an editor of doc, its caret at the start.
@@ -247,6 +378,16 @@ func (d *editor) release() {
 	}
 }
 
+func (d *document) sourceViews() int {
+	count := 0
+	for _, ed := range d.views {
+		if !ed.bufferDiff {
+			count++
+		}
+	}
+	return count
+}
+
 // main returns the editor that edits of the document as a whole are
 // made in, as reloading it from the disk: the one typed in last.
 func (d *document) main() *editor {
@@ -265,11 +406,11 @@ func (d *document) name() string {
 
 func (d *document) dirty() bool { return d.buf.Version() != d.saved || d.crlf != d.diskCRLF }
 
-// unread reports whether the text of a remote document is not read yet,
+// unread reports whether the text of a document is not read yet,
 // or could not be.
 func (d *document) unread() bool { return d.sync == syncLoading || d.sync == syncLoadFailed }
 
-// locked reports whether the document cannot be edited: its remote file
+// locked reports whether the document cannot be edited: its file
 // is not read, or its host not connected.
 func (d *document) locked() bool { return d.unread() || d.offline }
 
@@ -286,11 +427,9 @@ func readDocument(id int, path string, notify func()) (*document, error) {
 	if err != nil {
 		return nil, err
 	}
-	if isBinary(data) {
-		return nil, errBinary
-	}
-	if hasLongLine(data) {
-		return nil, errLongLine
+	data, enc, err := decodeFile(data)
+	if err != nil {
+		return nil, err
 	}
 	crlf := bytes.Contains(data, []byte("\r\n"))
 	if crlf {
@@ -298,6 +437,7 @@ func readDocument(id int, path string, notify func()) (*document, error) {
 	}
 	d := newDocument(id, path, string(data), highlight.New(highlight.Lexer(path), notify))
 	d.crlf, d.diskCRLF = crlf, crlf
+	d.encoding = enc
 	return d, nil
 }
 
@@ -331,22 +471,31 @@ func isBinary(data []byte) bool {
 	return !utf8.Valid(head)
 }
 
-// hasLongLine reports whether a line of data is longer than maxLineBytes.
-func hasLongLine(data []byte) bool {
+// longLineOf returns the first line of data, from 1, longer than
+// maxLineBytes, 0 for none.
+func longLineOf(data []byte) int {
+	line := 1
 	for len(data) > maxLineBytes {
 		i := bytes.IndexByte(data[:maxLineBytes+1], '\n')
 		if i < 0 {
-			return true
+			return line
 		}
+		line++
 		data = data[i+1:]
 	}
-	return false
+	return 0
 }
+
+// hasLongLine reports whether a line of data is longer than maxLineBytes.
+func hasLongLine(data []byte) bool { return longLineOf(data) > 0 }
 
 // save writes the document to its path, beside it first and renamed, so
 // that a failure keeps the old file.
 func (d *document) save() error {
-	snap, data := d.encode()
+	snap, data, err := d.encode()
+	if err != nil {
+		return err
+	}
 	if _, err := vfs.WriteFile(d.path, data, 0o644); err != nil {
 		return err
 	}
@@ -355,8 +504,8 @@ func (d *document) save() error {
 }
 
 // encode returns the text to save and the bytes of it, with the line
-// endings of the document.
-func (d *document) encode() (ui.TextSnapshot, []byte) {
+// endings and in the encoding of the document.
+func (d *document) encode() (ui.TextSnapshot, []byte, error) {
 	snap := d.buf.Snapshot()
 	var b bytes.Buffer
 	b.Grow(snap.ByteLen())
@@ -365,7 +514,8 @@ func (d *document) encode() (ui.TextSnapshot, []byte) {
 	if d.crlf {
 		data = bytes.ReplaceAll(data, []byte("\n"), []byte("\r\n"))
 	}
-	return snap, data
+	data, err := encodeText(data, d.encoding)
+	return snap, data, err
 }
 
 // wrote marks the text snap, with line endings crlf, the file's.
@@ -396,7 +546,7 @@ func (w *widthCounter) Write(p []byte) (int, error) {
 			w.col = 0
 			i++
 		case c == '\t':
-			w.col += tabWidth - w.col%tabWidth
+			w.col += tabWidth() - w.col%tabWidth()
 			i++
 		case c < utf8.RuneSelf:
 			w.col++
@@ -415,7 +565,7 @@ func columns(s string) int {
 	col := 0
 	for _, r := range s {
 		if r == '\t' {
-			col += tabWidth - col%tabWidth
+			col += tabWidth() - col%tabWidth()
 		} else {
 			col++
 		}
@@ -426,7 +576,7 @@ func columns(s string) int {
 // areaShown reports whether the build before this one made the editor's
 // text area in col: its state lives on as this build makes it there again.
 func (d *editor) areaShown(a *app, col *column) bool {
-	return d.areaCol == col && d.areaBuild == a.builds-1
+	return d.areaCol == col && d.areaBuild == a.builds-1 && d.longLine == 0
 }
 
 // editedAt returns the line of the caret an edit asked for, if one did.
@@ -441,7 +591,7 @@ func (d *editor) editedAt(snap ui.TextSnapshot) (int, bool) {
 // scrolls the editor to show them, nearer its top than its bottom when
 // center is set or they are out of view.
 func (d *editor) selectRange(start, end int, center bool) {
-	d.pending, d.center = &[2]int{start, end}, center
+	d.pending, d.center, d.typedSel = &[2]int{start, end}, center, false
 }
 
 // landFor is how long the line a jump lands on stays lit.

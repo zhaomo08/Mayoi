@@ -24,6 +24,9 @@ type blameState struct {
 	since   time.Time
 	phase   blamePhase
 	text    string // "" for a line not committed, or none read yet
+	// tipped is whether the last frame offered the tip of a blame cut
+	// short, the pointer over it.
+	tipped bool
 }
 
 // blamePhase is how far the blame of the caret's line is.
@@ -84,6 +87,28 @@ func (a *app) blameLine(d *editor, line int, version uint64, focused bool) strin
 	return ""
 }
 
+// blameTip shows all of a blame the view cuts short, over the part it
+// shows, as the pointer rests there. It hangs from marker, which takes no
+// pointer; area, which takes it, keeps the I-beam, the clicks and the
+// drags the tip is for.
+func (a *app) blameTip(c *ui.Context, area, marker ui.Element, text string) {
+	t := c.Theme()
+	fill, fg := t.Inverse, t.InverseText
+	if fill == ui.Transparent {
+		fill = t.Text
+	}
+	if fg == ui.Transparent {
+		fg = t.Background
+	}
+	ui.TooltipBase(c, area, func(tip ui.Element) {
+		tip.MaxWidth(t.Space(80)).Padding(t.Space(1.25), t.Space(2)).Radius(t.Space(1.25)).
+			Background(fill).TextColor(fg).FontSize(t.FontSize - 1)
+		tip.Shadow(0, 2, 8, 0, ui.RGBA(0, 0, 0, 0.2))
+		tip.Children(func() { ui.Text(c, text) })
+		tip.AttachTo(marker, ui.AnchorTop, ui.AnchorBottom).Margin(0, 0, t.Space(1.5), 0)
+	})
+}
+
 // blameText is how a line's blame reads.
 func blameText(b git.Blame, now time.Time) string {
 	if b.Commit == "" {
@@ -132,7 +157,9 @@ func fitBlame(text string, room float32, width func(string) float32) string {
 	return strings.TrimRight(string(runes[:lo]), " ·,") + "…"
 }
 
-// ago says how long before now t was, roughly.
+// ago says how long before now t was, roughly, for a week; older, it
+// says the date, as "340 days ago" is a sum for the reader to do: the day
+// and month this year, with the year before.
 func ago(t, now time.Time) string {
 	d := now.Sub(t)
 	switch {
@@ -142,13 +169,18 @@ func ago(t, now time.Time) string {
 		return locales.AgoMinutes(int(d / time.Minute))
 	case d < 24*time.Hour:
 		return locales.AgoHours(int(d / time.Hour))
-	case d < 30*24*time.Hour:
+	case d < agoFor:
 		return locales.AgoDays(int(d / (24 * time.Hour)))
-	case d < 365*24*time.Hour:
-		return locales.AgoMonths(int(d / (30 * 24 * time.Hour)))
 	}
-	return locales.AgoYears(int(d / (365 * 24 * time.Hour)))
+	skeleton := "yMMMd"
+	if t.Year() == now.Year() {
+		skeleton = "MMMd"
+	}
+	return i18n.FormatDate(i18n.Locale(), t.Local(), i18n.DateOptions{Skeleton: skeleton})
 }
+
+// agoFor is how long ago says how long before: past it, it says the date.
+const agoFor = 7 * 24 * time.Hour
 
 // dateTime is a date and time to the minute, in the language shown, as
 // "Jan 2, 2006, 15:04" in English.

@@ -432,7 +432,7 @@ func TestTerminalMovesToLockedRightColumn(t *testing.T) {
 	right := a.cols[1]
 	tt.Type("echo locked-$((40+2))")
 	tt.Key(0, ui.KeyEnter)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(settleTimeout)
 	for !strings.Contains(s.term.Text(), "locked-42") && time.Now().Before(deadline) {
 		hs.settle()
 	}
@@ -460,9 +460,12 @@ func TestTerminalMovesToLockedRightColumn(t *testing.T) {
 	// A shell exiting takes its tab but leaves the locked column and action.
 	a.activate(right, 0, true)
 	hs.settle()
+	// One the user ends, not one that could not start, however fast the
+	// machine came to it.
+	a.terms[0].started = time.Now().Add(-exitedEarlyWithin)
 	tt.Type("exit")
 	tt.Key(0, ui.KeyEnter)
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(settleTimeout)
 	for len(a.terms) != 0 && time.Now().Before(deadline) {
 		hs.settle()
 	}

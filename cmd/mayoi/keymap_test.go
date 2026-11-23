@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -29,8 +31,11 @@ const testKeys = `// as Cursor's, with ctrl+. for the prefix
 func withKeys(t *testing.T, a *app, src string) {
 	t.Helper()
 	km, err := keymap.Parse([]byte(src))
-	if err != nil || len(km.Errors) > 0 {
-		t.Fatalf("%v %q", err, km.Errors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(km.Errors) > 0 {
+		t.Fatalf("%q", km.Errors)
 	}
 	a.keys, a.palette = km, nil
 }
@@ -192,6 +197,36 @@ func TestKeymapRunCommands(t *testing.T) {
 	hs.settle()
 	if a.activeTab().path() != hs.path("README.md") {
 		t.Errorf("vscode.open showed %q", a.activeTab().path())
+	}
+}
+
+func TestKeymapCommandArgs(t *testing.T) {
+	hs := newHarness(t, false)
+	a, tt := hs.a, hs.tt
+	a.settings.ProjectTabs = true
+	dir := t.TempDir()
+	// Windows paths have backslashes, which JSON must escape.
+	quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }
+	withKeys(t, a, `[
+	{ "key": "ctrl+. g n", "command": "file.openFolder", "args": `+quote(dir)+` },
+	{ "key": "ctrl+. g x", "command": "file.openFolder", "args": `+quote(filepath.Join(dir, "none"))+` },
+]`)
+	// file.openFolder opens the folder of its args, as mayoi run's.
+	tt.Key(ui.Ctrl, ui.KeyPeriod)
+	tt.Key(0, ui.KeyG)
+	tt.Key(0, ui.KeyN)
+	hs.settle()
+	if !slices.Equal(hs.h.windows, []string{dir}) || len(hs.h.asked) > 0 {
+		t.Errorf("opened %q, asked %q", hs.h.windows, hs.h.asked)
+	}
+
+	// A folder that isn't there says so.
+	tt.Key(ui.Ctrl, ui.KeyPeriod)
+	tt.Key(0, ui.KeyG)
+	tt.Key(0, ui.KeyX)
+	hs.settle()
+	if len(hs.h.windows) != 1 || !tt.HasText("is not a folder") {
+		t.Errorf("opened %q, texts %q", hs.h.windows, tt.Texts())
 	}
 }
 

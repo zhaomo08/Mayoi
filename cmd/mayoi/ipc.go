@@ -280,13 +280,15 @@ func (a *app) cliCommands(want []cli.Command, cwd string) ([]func(), error) {
 			return nil, fmt.Errorf("no command %s: mayoi commands lists them", c.ID)
 		}
 		arg, takes := commandArgs[c.ID]
+		if plugins != nil && plugins.reg.CommandPlugin(c.ID) != nil {
+			id, value := c.ID, c.Arg
+			origin := a.pluginContext("cli", nil)
+			runs = append(runs, func() { plugins.runCommandContext(a, id, value, origin) })
+			continue
+		}
 		switch {
 		case c.Arg == "":
 			runs = append(runs, cmds[i].run)
-		case plugins != nil && plugins.reg.CommandPlugin(c.ID) != nil:
-			// A plugin's command takes what it is given.
-			id, v := c.ID, c.Arg
-			runs = append(runs, func() { plugins.runCommand(a, id, v) })
 		case !takes:
 			return nil, fmt.Errorf("%s takes no argument", c.ID)
 		default:
@@ -308,66 +310,79 @@ type commandArg struct {
 	take func(a *app, arg, cwd string) (func(), error)
 }
 
-var commandArgs = map[string]commandArg{
-	"file.openFolder": {"<folder>", func(a *app, arg, cwd string) (func(), error) {
-		dir, err := folderArg(arg, cwd)
-		return func() { a.switchFolder(dir) }, err
-	}},
-	"file.openFolderWindow": {"<folder>", func(a *app, arg, cwd string) (func(), error) {
-		dir, err := folderArg(arg, cwd)
-		return func() { a.host.newWindow(dir) }, err
-	}},
-	"file.saveAs": {"<file>", func(a *app, arg, cwd string) (func(), error) {
-		ed := a.activeEditor()
-		if ed == nil {
-			return nil, fmt.Errorf("no file is shown")
-		}
-		d, to := ed.document, pathArg(arg, cwd)
-		// On an SSH host, a path there, from the folder.
-		if host, root, ok := remote.Split(a.root); ok {
-			if to = arg; !path.IsAbs(to) {
-				to = path.Join(root, to)
+// commandArgs is set in init, as a key binding runs them too and the
+// commands refer to the key bindings.
+var commandArgs map[string]commandArg
+
+func init() {
+	commandArgs = map[string]commandArg{
+		"file.openFolder": {"<folder>", func(a *app, arg, cwd string) (func(), error) {
+			dir, err := folderArg(arg, cwd)
+			return func() { a.switchFolder(dir) }, err
+		}},
+		"file.openFolderWindow": {"<folder>", func(a *app, arg, cwd string) (func(), error) {
+			dir, err := folderArg(arg, cwd)
+			return func() { a.host.newWindow(dir) }, err
+		}},
+		"file.saveAs": {"<file>", func(a *app, arg, cwd string) (func(), error) {
+			ed := a.activeEditor()
+			if ed == nil {
+				return nil, fmt.Errorf("no file is shown")
 			}
-			to = remote.Path(host, to)
-		}
-		return func() { a.saveDocAs(d, to) }, nil
-	}},
-	"go.line": {"<line[:column]>", func(a *app, arg, cwd string) (func(), error) {
-		l, c, _ := strings.Cut(arg, ":")
-		line, err := strconv.Atoi(l)
-		col := 0
-		if err == nil && c != "" {
-			col, err = strconv.Atoi(c)
-		}
-		if err != nil || line < 1 || col < 0 {
-			return nil, fmt.Errorf("%q is not a line[:column]", arg)
-		}
-		return func() { a.goToLine(line, col) }, nil
-	}},
-	"go.quickOpen": {"<text>", func(a *app, arg, cwd string) (func(), error) {
-		return func() { a.openQuick(arg) }, nil
-	}},
-	"view.selectTheme": {"<theme>", func(a *app, arg, cwd string) (func(), error) {
-		id := "view.theme." + strings.ToLower(strings.ReplaceAll(arg, " ", ""))
-		if !slices.ContainsFunc(a.commands(), func(cmd command) bool { return cmd.id == id }) {
-			return nil, fmt.Errorf("no theme %s: mayoi, matrix, claude, qoder, grokbot or cursor", arg)
-		}
-		return func() { a.run(id) }, nil
-	}},
-	"remote.forwardPort": {"<port>", func(a *app, arg, cwd string) (func(), error) {
-		port, err := strconv.Atoi(strings.TrimPrefix(arg, ":"))
-		switch {
-		case err != nil || port < 1 || port > 65535:
-			return nil, fmt.Errorf("%q is not a port", arg)
-		case a.conn == nil:
-			return nil, fmt.Errorf("the folder is not on an SSH host")
-		}
-		return func() {
-			if _, err := a.forwardPort(port); err != nil {
-				a.fail("%v", err)
+			d, to := ed.document, pathArg(arg, cwd)
+			// On a remote machine, a path there, from the folder.
+			if _, root, ok := remote.Split(a.root); ok {
+				if to = arg; !path.IsAbs(to) {
+					to = path.Join(root, to)
+				}
+				to = remote.On(a.root, to)
 			}
-		}, nil
-	}},
+			return func() { a.saveDocAs(d, to) }, nil
+		}},
+		"go.line": {"<line[:column]>", func(a *app, arg, cwd string) (func(), error) {
+			l, c, _ := strings.Cut(arg, ":")
+			line, err := strconv.Atoi(l)
+			col := 0
+			if err == nil && c != "" {
+				col, err = strconv.Atoi(c)
+			}
+			if err != nil || line < 1 || col < 0 {
+				return nil, fmt.Errorf("%q is not a line[:column]", arg)
+			}
+			return func() { a.goToLine(line, col) }, nil
+		}},
+		"go.quickOpen": {"<text>", func(a *app, arg, cwd string) (func(), error) {
+			return func() { a.openQuick(arg) }, nil
+		}},
+		"view.selectTheme": {"<theme>", func(a *app, arg, cwd string) (func(), error) {
+			id := "view.theme." + strings.ToLower(strings.ReplaceAll(arg, " ", ""))
+			if !slices.ContainsFunc(a.commands(), func(cmd command) bool { return cmd.id == id }) {
+				return nil, fmt.Errorf("no theme %s: mayoi, matrix, claude, qoder, grokbot or cursor", arg)
+			}
+			return func() { a.run(id) }, nil
+		}},
+		"view.attachHC": {"<addr>", func(a *app, arg, cwd string) (func(), error) {
+			addr, err := hcAddrArg(a.root, arg)
+			if err != nil {
+				return nil, err
+			}
+			return func() { a.attachHCTerminal(addr, addr) }, nil
+		}},
+		"remote.forwardPort": {"<port>", func(a *app, arg, cwd string) (func(), error) {
+			port, err := strconv.Atoi(strings.TrimPrefix(arg, ":"))
+			switch {
+			case err != nil || port < 1 || port > 65535:
+				return nil, fmt.Errorf("%q is not a port", arg)
+			case a.conn == nil:
+				return nil, fmt.Errorf("the folder is not on an SSH host")
+			}
+			return func() {
+				if _, err := a.forwardPort(port); err != nil {
+					a.fail("%v", err)
+				}
+			}, nil
+		}},
+	}
 }
 
 // pathArg is a path the mayoi command gave, absolute.
@@ -376,10 +391,13 @@ func pathArg(p, cwd string) string {
 		home, _ := os.UserHomeDir()
 		p = filepath.Join(home, rest)
 	}
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(cwd, p)
+	if remote.Is(p) {
+		return remote.Clean(p)
 	}
-	return filepath.Clean(p)
+	if !remote.IsAbs(p) {
+		p = remote.Join(cwd, p)
+	}
+	return remote.Clean(p)
 }
 
 // folderArg is a folder the mayoi command gave, absolute, which is there.
@@ -411,6 +429,13 @@ type docWait struct {
 // docClosed answers the waits for a document that closed, nil for every
 // one, as the project closes.
 func (a *app) docClosed(d *document) {
+	if d != nil {
+		d.readDone()
+	} else {
+		for _, doc := range a.docs {
+			doc.readDone()
+		}
+	}
 	a.waits = slices.DeleteFunc(a.waits, func(w docWait) bool {
 		if d == nil || w.doc == d {
 			w.done()

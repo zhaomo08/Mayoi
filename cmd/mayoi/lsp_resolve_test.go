@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 
 	"mayoi/internal/lsp"
 	"mayoi/internal/plugin"
+	"mayoi/internal/remote"
 )
 
 func init() {
@@ -34,6 +36,9 @@ func init() {
 		case "exit":
 			fmt.Fprint(os.Stderr, "resolver setup failed")
 			os.Exit(3)
+		case "options":
+			fmt.Fprint(os.Stdout, `{"command":"server","initializationOptions":{"resolved":{"a":1},"token":"t","keep":true}}`)
+			os.Exit(0)
 		case "no-command":
 			fmt.Fprint(os.Stdout, `{"args":["server"]}`)
 			os.Exit(0)
@@ -48,7 +53,7 @@ func init() {
 		}
 		json.NewEncoder(os.Stdout).Encode(serverLaunch{
 			Command: os.Args[0], Args: []string{"-test.run=^$"},
-			Configuration:    map[string]any{"root": request.Root, "token": json.Number("9007199254740993")},
+			Configuration:    map[string]any{"root": request.Root, "token": json.Number("9007199254740993"), "argv": os.Args[1:]},
 			WorkspaceFolders: []lsp.WorkspaceFolder{{URI: lsp.URI(request.Root), Name: "test"}},
 			Env:              map[string]string{"RESOLVED": "yes", "MAYOI_FAKE_LSP": "1"},
 			UnsetEnv:         []string{"MAYOI_TEST_RESOLVER"},
@@ -81,6 +86,42 @@ func TestResolveLanguageServer(t *testing.T) {
 	launch, err = s.resolve(ctx)
 	if err != nil || launch.Command != "static" {
 		t.Fatalf("static: %+v %v", launch, err)
+	}
+	// A static command takes the plugin's settings, as a resolver does.
+	s.plugin = &plugin.Plugin{Manifest: plugin.Manifest{Contributes: plugin.Contributes{Settings: map[string]plugin.SettingContrib{
+		"path": {Type: "string", Default: json.RawMessage(`"/opt/gopls"`)},
+	}}}}
+	s.contrib = plugin.ServerContrib{Command: "${settings.path}", Args: []string{"-remote=${settings.path}"}}
+	launch, err = s.resolve(ctx)
+	if err != nil || launch.Command != "/opt/gopls" || launch.Args[0] != "-remote=/opt/gopls" {
+		t.Fatalf("static with settings: %+v %v", launch, err)
+	}
+	if got := serverProgram(s.plugin, &s.contrib); got != "/opt/gopls" {
+		t.Fatalf("serverProgram = %q", got)
+	}
+}
+
+func TestLocalResolverUsesInstalledScript(t *testing.T) {
+	t.Setenv("MAYOI_TEST_RESOLVER", "1")
+	dir := filepath.Join(t.TempDir(), "installed plugin ${settings.literal}")
+	s := &lspServer{root: t.TempDir(), plugin: &plugin.Plugin{Dir: dir}, contrib: plugin.ServerContrib{
+		Command: "external-server",
+		Args:    []string{"--stdio"},
+		LocalResolve: &plugin.LocalServerResolver{
+			Command: os.Args[0], Script: "runtime/resolve.mjs",
+		},
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := s.resolve(ctx)
+	args, ok := got.Configuration["argv"].([]any)
+	if err != nil || !ok || len(args) != 1 || args[0] != filepath.Join(dir, "runtime", "resolve.mjs") {
+		t.Fatalf("local resolver passed %+v, %v", got, err)
+	}
+	s.root = remote.Path("unreachable.invalid", "/project")
+	got, err = s.resolve(ctx)
+	if err != nil || got.Command != "external-server" || len(got.Args) != 1 || got.Args[0] != "--stdio" {
+		t.Fatalf("remote launch %+v, %v", got, err)
 	}
 }
 
@@ -180,7 +221,7 @@ func TestResolvedLanguageServerRetryOnOpen(t *testing.T) {
 		return path
 	}
 	open("a.fake")
-	hs.untilLong("the failed resolution", func() bool { return hs.a.fails == 1 })
+	hs.until("the failed resolution", func() bool { return hs.a.fails == 1 })
 	// Copy the test executable: Windows needs an .exe suffix and should not
 	// require symlink privileges just to exercise retry after installation.
 	binary, err := os.ReadFile(os.Args[0])
@@ -191,7 +232,7 @@ func TestResolvedLanguageServerRetryOnOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := open("b.fake")
-	hs.untilLong("the resolved server's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 1 })
+	hs.until("the resolved server's diagnostics", func() bool { return len(h.diagnosticsOf(path)) == 1 })
 	lspServers.Lock()
 	s := lspServers.m[hs.a.root+"\x00fake.server"]
 	lspServers.Unlock()
@@ -217,6 +258,128 @@ func TestResolverManifest(t *testing.T) {
 		data := fmt.Sprintf(`{"name":"test","contributes":{"languageServers":[{"id":"test.server",%s}]}}`, body)
 		if _, err := plugin.ParseManifest([]byte(data)); err == nil {
 			t.Fatal("accepted", body)
+		}
+	}
+}
+
+// An argument that is all of a setting that is a list is its words, as
+// many arguments; a string of initializationOptions that is all of a
+// setting is its value, and goes with its key when the setting is empty.
+func TestServerSettingLists(t *testing.T) {
+	settings := map[string]json.RawMessage{
+		"path": json.RawMessage(`"tsc"`), "args": json.RawMessage(`["--lsp", "--stdio"]`),
+		"none": json.RawMessage(`[]`), "tsserverPath": json.RawMessage(`""`), "log": json.RawMessage(`"verbose"`),
+	}
+	command, args, err := expandServerCommand("${settings.path}", []string{"${settings.args}", "-x=${settings.log}", "${settings.none}"}, settings)
+	if err != nil || command != "tsc" || strings.Join(args, " ") != "--lsp --stdio -x=verbose" {
+		t.Fatalf("%q %q %v", command, args, err)
+	}
+	got := expandServerOptions(json.RawMessage(`{"tsserver": {"path": "${settings.tsserverPath}", "logVerbosity": "${settings.log}"}, "keep": "${not a setting}"}`), settings)
+	var v map[string]any
+	json.Unmarshal(got, &v)
+	if ts := v["tsserver"].(map[string]any); len(ts) != 1 || ts["logVerbosity"] != "verbose" || v["keep"] != "${not a setting}" {
+		t.Fatalf("options %s", got)
+	}
+
+	// The bundled TypeScript plugin, with its defaults, runs as before.
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugins", "typescript-language-server", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m plugin.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	defaults := map[string]json.RawMessage{}
+	for key, s := range m.Contributes.Settings {
+		defaults[key] = s.Default
+	}
+	sc := m.Contributes.LanguageServers[0]
+	command, args, err = expandServerCommand(sc.Command, sc.Args, defaults)
+	if err != nil || command != "typescript-language-server" || strings.Join(args, " ") != "--stdio" {
+		t.Fatalf("defaults: %q %q %v", command, args, err)
+	}
+	if got := string(expandServerOptions(sc.Options, defaults)); got != `{"tsserver":{}}` {
+		t.Fatalf("default options %s", got)
+	}
+}
+
+// The program a server's path names may have arguments of its own, as tsc
+// serves with --lsp --stdio, while its args are left as they are.
+func TestServerProgramArgs(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugins", "typescript-language-server", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m plugin.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	sc := &m.Contributes.LanguageServers[0]
+	run := func(explicit map[string]json.RawMessage) string {
+		settings := map[string]json.RawMessage{}
+		for key, s := range m.Contributes.Settings {
+			settings[key] = s.Default
+		}
+		maps.Copy(settings, explicit)
+		command, args, err := serverCommand(sc, settings, explicit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(append([]string{command}, args...), " ")
+	}
+	for _, c := range []struct {
+		explicit map[string]json.RawMessage
+		want     string
+	}{
+		{nil, "typescript-language-server --stdio"},
+		{map[string]json.RawMessage{"path": json.RawMessage(`"tsc"`)}, "tsc --lsp --stdio"},
+		{map[string]json.RawMessage{"path": json.RawMessage(`"/opt/ts/bin/tsc.exe"`)}, "/opt/ts/bin/tsc.exe --lsp --stdio"},
+		{map[string]json.RawMessage{"path": json.RawMessage(`"tsc"`), "args": json.RawMessage(`["--lsp", "--stdio", "--pprofDir", "/tmp"]`)}, "tsc --lsp --stdio --pprofDir /tmp"},
+		{map[string]json.RawMessage{"path": json.RawMessage(`"tsrs"`)}, "tsrs --lsp --stdio"},
+		{map[string]json.RawMessage{"path": json.RawMessage(`"/opt/ts/bin/tsrs"`)}, "/opt/ts/bin/tsrs --lsp --stdio"},
+	} {
+		if got := run(c.explicit); got != c.want {
+			t.Errorf("%s: %q, want %q", c.explicit, got, c.want)
+		}
+	}
+}
+
+// Python's server is basedpyright, and ty when path names it, while args
+// are left as they are.
+func TestPythonServerProgramArgs(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugins", "basedpyright", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m plugin.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	sc := &m.Contributes.LanguageServers[0]
+	run := func(explicit map[string]json.RawMessage) string {
+		settings := map[string]json.RawMessage{}
+		for key, s := range m.Contributes.Settings {
+			settings[key] = s.Default
+		}
+		maps.Copy(settings, explicit)
+		command, args, err := serverCommand(sc, settings, explicit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(append([]string{command}, args...), " ")
+	}
+	for _, c := range []struct {
+		explicit map[string]json.RawMessage
+		want     string
+	}{
+		{nil, "basedpyright-langserver --stdio"},
+		{map[string]json.RawMessage{"path": json.RawMessage(`"ty"`)}, "ty server"},
+		{map[string]json.RawMessage{"path": json.RawMessage(`"/opt/ty/bin/ty"`)}, "/opt/ty/bin/ty server"},
+		{map[string]json.RawMessage{"path": json.RawMessage(`"ty"`), "args": json.RawMessage(`["server", "--help"]`)}, "ty server --help"},
+	} {
+		if got := run(c.explicit); got != c.want {
+			t.Errorf("%s: %q, want %q", c.explicit, got, c.want)
 		}
 	}
 }

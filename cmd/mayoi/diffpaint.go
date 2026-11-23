@@ -145,7 +145,7 @@ func (a *app) diffPaneUI(c *ui.Context, v *diffView) {
 	v.split = a.splits(v, v.viewW)
 	l := a.diffGeometry(v, v.split, v.viewW)
 	var card *commitCard
-	if v.commit != nil {
+	if v.commit != nil && v.commit.pr == nil {
 		card = a.layOutCommitCard(c, v, cardWidth(v.viewW))
 		v.commit.lines = card.lines
 	}
@@ -196,7 +196,7 @@ func (a *app) diffPaneUI(c *ui.Context, v *diffView) {
 			// is near, as an editor's going to a line does; revealing a
 			// row as the keys move along does not, nor does a long way.
 			if d := top - v.scroll.Y; v.glide && d != 0 && max(d, -d) < 3*view.H {
-				v.scroll.ScrollTo(v.scroll.X, top, ui.Animation{Duration: 220 * time.Millisecond, Ease: ui.EaseOut})
+				v.scroll.ScrollTo(v.scroll.X, top, ui.Animation{Duration: motionMove, Ease: ui.EaseOut})
 				v.glideY = top
 			} else {
 				v.scroll.Y = top
@@ -337,6 +337,11 @@ func (a *app) diffPaneUI(c *ui.Context, v *diffView) {
 					noteX, noteW := noteGeometry(l, v.split, n.oldSide)
 					card := a.noteCardBox(c, fmt.Sprintf("note:%p", n), v.scroll.X+noteX, y+noteInset, noteW, float32(rows[i].h)*lineH-2*noteInset)
 					card.Children(func() { a.noteCard(c, n, nil, noteTextW(noteW)) })
+				} else if th := v.threadAt(rows[i].n); th != nil {
+					y := editorPadY + float32(v.tops[i])*lineH
+					noteX, noteW := noteGeometry(l, v.split, th.OldSide)
+					card := a.noteCardBox(c, "thread:"+th.ID, v.scroll.X+noteX, y+noteInset, noteW, float32(rows[i].h)*lineH-2*noteInset)
+					card.Children(func() { a.threadCard(c, v, th, noteTextW(noteW)) })
 				}
 			}
 			// A button by the line under the pointer comments on it, unless
@@ -882,8 +887,11 @@ func (a *app) paintFileHeader(pt *ui.Painter, f *diffFile, r ui.Rect, hovered bo
 	pt.Icon(icon, ui.Rect{X: x, Y: mid - 7, W: 14, H: 14}, iconCol)
 	x += 20
 	rel := a.relOrPath(f.path)
+	if f.buffers != nil {
+		rel = f.buffers.label(0) + " ↔ " + f.buffers.label(1)
+	}
 	dir := ""
-	if k := strings.LastIndexAny(rel, `/\`); k >= 0 {
+	if k := strings.LastIndexAny(rel, `/\`); k >= 0 && f.buffers == nil {
 		dir, rel = rel[:k+1], rel[k+1:]
 	}
 	if (f.base == diffStaged || f.base == diffCommit) && f.entry.Orig != "" {
@@ -1074,9 +1082,7 @@ func (a *app) layOutCommitCard(c *ui.Context, v *diffView, w float32) *commitCar
 		return h
 	}
 	subject := info.Subject
-	if cm.pr != nil {
-		subject = cm.pr.name()
-	} else if cm.from != "" {
+	if cm.from != "" {
 		subject = locales.ChangesFromTo(a.diffContext(v).revisionLabel(cm.from), a.diffContext(v).revisionLabel(cm.hash))
 	}
 	k.subject = ui.Span{Text: subject, Size: 15, Weight: 600, Color: p.text}
@@ -1113,56 +1119,6 @@ func (a *app) layOutCommitCard(c *ui.Context, v *diffView, w float32) *commitCar
 		}}
 	}
 	var pieces []cardPiece
-	if pr := cm.pr; pr != nil {
-		button := func(key, s string, fn func()) cardPiece {
-			span := label(s, 500, p.accent)
-			return cardPiece{w: measure(span) + 12, dot: true, show: func() {
-				b := ui.ButtonBase(c.Key(key)).Height(18).Padding(0, 6).Radius(5).AlignItems(ui.Center).Shrink(0).Label(s)
-				if b.Hovered() {
-					b.Background(p.accent.Alpha(0.12))
-				}
-				if b.Clicked() {
-					a.post(fn)
-				}
-				b.Transition(hoverFade)
-				b.Children(func() { ui.RichText(c, span).SingleLine() })
-			}}
-		}
-		if in := pr.info; in != nil {
-			state, col := locales.PrOpen(), p.addedFg
-			switch {
-			case in.State == "MERGED":
-				state, col = locales.PrMerged(), p.accent
-			case in.State == "CLOSED":
-				state, col = locales.PrClosed(), p.dangerFg
-			case in.Draft:
-				state, col = locales.PrDraft(), p.muted
-			}
-			chip := label(state, 600, col)
-			pieces = append(pieces, cardPiece{w: measure(chip) + 12, show: func() {
-				ui.Row(c).Height(18).Padding(0, 6).Radius(5).AlignItems(ui.Center).Background(col.Alpha(0.14)).Shrink(0).Children(func() {
-					ui.RichText(c, chip).SingleLine()
-				})
-			}})
-			pieces = append(pieces, text(label(in.BaseRef+" ← "+in.HeadRef, 400, p.muted), true))
-		}
-		pieces = append(pieces, hashChip(cm.from, true), text(label("→", 400, p.muted), false), hashChip(cm.hash, false),
-			text(label(locales.CardFilesChanged(len(v.files)), 400, p.muted), true))
-		if pr.viewedOK && len(v.files) > 0 {
-			pieces = append(pieces, text(label(locales.PrViewedCount(fmt.Sprint(v.viewedCount()), fmt.Sprint(len(v.files))), 400, p.muted), true))
-		}
-		if pr.err != "" {
-			pieces = append(pieces, text(label(pr.err, 400, p.dangerFg), true))
-		}
-		if pr.newer {
-			pieces = append(pieces, text(label(locales.PrUpdated(), 500, p.modifiedFg), true), button("card-pr-reload", locales.PrReload(), func() { a.reloadPR(v) }))
-			pieces[len(pieces)-1].dot = false
-		}
-		if pr.info != nil && pr.info.URL != "" {
-			pieces = append(pieces, button("card-pr-open", locales.PrOpenOnGitHub(), func() { a.openPRInBrowser(v) }))
-		}
-		return a.finishCommitCard(c, v, k, w, pieces)
-	}
 	if cm.from != "" {
 		// A comparison: its two commits, and what changed between them.
 		pieces = append(pieces, hashChip(cm.from, false), text(label("→", 400, p.muted), false), hashChip(cm.hash, false),
@@ -1170,21 +1126,46 @@ func (a *app) layOutCommitCard(c *ui.Context, v *diffView, w float32) *commitCar
 		return a.finishCommitCard(c, v, k, w, pieces)
 	}
 	author := label(info.Author, 600, p.text)
-	col := avatarColor(p, info.Email+info.Author)
-	pieces = append(pieces, cardPiece{w: 18 + 6 + measure(author), show: func() {
+	aw := 18 + 6 + measure(author)
+	var with ui.Span
+	// The mark of an agent that helped stands out of the avatar: the
+	// name keeps clear of it.
+	var past float32
+	if len(info.CoAuthors) > 0 {
+		with = label(locales.CardCoAuthors(coAuthorNames(info.CoAuthors)), 400, p.muted)
+		aw += 6 + measure(with)
+		if _, ok := coAuthorAgent(info.CoAuthors); ok {
+			past = 6
+		}
+	}
+	aw += past
+	pieces = append(pieces, cardPiece{w: aw, show: func() {
 		ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(1).MinWidth(0).Children(func() {
-			ui.Box(c).Size(18, 18).Shrink(0).Draw(func(pt *ui.Painter, b ui.Rect) {
-				pt.Fill(b, col.Alpha(0.22), 9)
-				paintInitials(pt, b, info.Author, 8.5, col)
-			})
+			a.commitAvatar(c, info.Author, info.Email, info.CoAuthors, 18, p.editor)
+			if past > 0 {
+				ui.Box(c).Width(0).Shrink(0) // a gap more, past the mark
+			}
 			ui.RichText(c, author).SingleLine().Shrink(1).MinWidth(0)
+			if with.Text != "" {
+				ui.RichText(c, with).SingleLine().Shrink(1).MinWidth(0)
+			}
 		})
 	}})
 	if !info.Time.IsZero() {
-		when := locales.CardCommitted(ago(info.Time, time.Now())) + " · " + dateTime(info.Time)
+		// The date and time, after how long ago for a commit of this week.
+		when := locales.CardCommitted(dateTime(info.Time))
+		if now := time.Now(); now.Sub(info.Time) < agoFor {
+			when = locales.CardCommitted(ago(info.Time, now)) + " · " + dateTime(info.Time)
+		}
 		pieces = append(pieces, text(label(when, 400, p.muted), false))
 	}
 	pieces = append(pieces, hashChip(cm.hash, true))
+	if ctx := a.diffContext(v); ctx.git.repo != nil && !ctx.git.unpushed[cm.hash] {
+		ctx.wantChecks(cm.hash)
+		if st, ok := ctx.checksOf(cm.hash); ok {
+			pieces = append(pieces, a.checksPiece(c, ctx, cm.hash, st, label, measure))
+		}
+	}
 	for i, b := range refBadges(info.Refs) {
 		fg, bg := p.accent, p.accent.Alpha(0.14)
 		switch b.Kind {
@@ -1213,6 +1194,29 @@ func (a *app) layOutCommitCard(c *ui.Context, v *diffView, w float32) *commitCar
 	}
 	pieces = append(pieces, text(label(locales.CardFilesChanged(len(v.files)), 400, p.muted), true))
 	return a.finishCommitCard(c, v, k, w, pieces)
+}
+
+// checksPiece is the piece of a commit's card that says how its checks
+// went, which a click lists.
+func (a *app) checksPiece(c *ui.Context, ctx *gitContext, hash string, st git.CommitStatus, label func(string, int, ui.Color) ui.Span, measure func(ui.Span) float32) cardPiece {
+	p := a.pal
+	icon, col := prChecksIcon(p, st.Checks)
+	span := label(checksSummary(st), 500, p.muted)
+	return cardPiece{w: measure(span) + 11 + 5 + 12, dot: true, show: func() {
+		b := ui.ButtonBase(c.Key("card-checks:"+hash)).Height(18).Padding(0, 6).Gap(5).Radius(5).AlignItems(ui.Center).Shrink(1).MinWidth(0).
+			Label(locales.PrShowChecks()).Tooltip(locales.PrShowChecks())
+		if b.Hovered() {
+			b.Background(p.hover)
+		}
+		if b.Clicked() {
+			a.post(func() { ctx.openCommitChecks(hash) })
+		}
+		b.Transition(hoverFade)
+		b.Children(func() {
+			ui.Icon(c, icon).FontSize(11).TextColor(col).Shrink(0)
+			ui.RichText(c, span).SingleLine().Shrink(1).MinWidth(0)
+		})
+	}}
 }
 
 // finishCommitCard wraps the pieces of a card's lines to its width w,
@@ -1247,7 +1251,12 @@ func (a *app) finishCommitCard(c *ui.Context, v *diffView, k *commitCard, w floa
 	k.meta = append(k.meta, line)
 	h := 2*cardPadY + k.subjectH + cardGap + float32(len(k.meta))*cardMetaH
 	// The rest of the message, folded past its first lines.
-	if body := strings.TrimRight(info.Body, "\n"); body != "" {
+	body := info.Body
+	if len(info.CoAuthors) > 0 {
+		// Who helped shows by the author: their lines would say it again.
+		body = withoutCoAuthorLines(body)
+	}
+	if body = strings.TrimRight(body, "\n"); body != "" {
 		k.body = ui.Span{Text: body, Font: a.font.family, Size: a.font.size - 1, Color: p.muted}
 		_, k.bodyH = c.MeasureText(w, k.body)
 		if one := lineOf(k.body); k.bodyH > maxCardBody*one+0.5 {
@@ -1820,7 +1829,18 @@ func (a *app) fileButtons(c *ui.Context, v *diffView, f *diffFile, right, y floa
 		fn    func()
 	}
 	var bs []button
-	if f.base == diffLocal {
+	if f.buffers != nil {
+		for side, id := range f.buffers.ids {
+			if f.buffers.closed[side] {
+				continue
+			}
+			label := locales.DiffOpenLeft()
+			if side == 1 {
+				label = locales.DiffOpenRight()
+			}
+			bs = append(bs, button{iconOpenFile, label, func() { a.openBufferSource(id, 0) }})
+		}
+	} else if f.base == diffLocal {
 		bs = append(bs,
 			button{iconOpenFile, locales.DiffOpenLeft(), func() { a.openFileAt(f.path, 0, true) }},
 			button{iconOpenFile, locales.DiffOpenRight(), func() { a.openFileAt(f.peerPath, 0, true) }},
@@ -1829,7 +1849,7 @@ func (a *app) fileButtons(c *ui.Context, v *diffView, f *diffFile, right, y floa
 		bs = append(bs, button{iconOpenFile, openLabel(e), func() { a.openFileAt(f.path, 0, true) }})
 	}
 	switch {
-	case f.base == diffLocal:
+	case f.base == diffLocal || f.base == diffBuffers:
 	case f.base == diffCommit:
 	case f.base == diffStaged:
 		bs = append(bs, button{iconMinus, locales.UnstageChanges(), func() { ctx.unstage(entryPaths(e, true)...) }})

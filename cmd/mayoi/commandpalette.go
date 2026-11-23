@@ -37,16 +37,24 @@ func commandGroup(t locales.Messages, id string) string {
 		return t.MenuEdit()
 	case "sel":
 		return t.MenuSelection()
+	case "markdown":
+		return t.MenuMarkdown()
 	case "go":
 		return t.MenuGo()
-	case "view", "editor", "image":
+	case "view", "editor", "image", "mermaid":
 		return t.MenuView()
+	case "remote":
+		return t.MenuRemoteSSH()
+	case "wsl":
+		return t.MenuWSL()
 	case "git":
 		return t.MenuGit()
 	case "review":
 		return t.MenuReview()
 	case "account":
 		return t.MenuAccount()
+	case "help":
+		return t.MenuHelp()
 	case "plugins":
 		return t.MenuPlugins()
 	case "script":
@@ -60,13 +68,24 @@ func commandGroup(t locales.Messages, id string) string {
 	return ""
 }
 
+// groupTitle is a command's title in the palette: its group, then its
+// label; the label alone for a command of no group.
+func groupTitle(group, label string) string {
+	if group == "" {
+		return label
+	}
+	return group + ": " + label
+}
+
 // viewKeys are the keys of the commands that the editor or the view
 // takes itself, which their menu items leave out, for the palette to show.
 var viewKeys = map[string]string{
 	"edit.undo": "CmdOrCtrl+Z", "edit.redo": "Shift+CmdOrCtrl+Z",
 	"sel.moveUp": "Alt+Up", "sel.moveDown": "Alt+Down",
 	"sel.copyUp": "Shift+Alt+Up", "sel.copyDown": "Shift+Alt+Down",
-	"sel.lineBelow": "CmdOrCtrl+Enter", "sel.lineAbove": "Shift+CmdOrCtrl+Enter",
+	"sel.lineAbove":       "Shift+CmdOrCtrl+Enter",
+	"markdown.toggleTask": "CmdOrCtrl+Enter",
+	"markdown.moveItemUp": "Shift+CmdOrCtrl+Up", "markdown.moveItemDown": "Shift+CmdOrCtrl+Down",
 	"file.openRecent": "Ctrl+R",
 	"sel.complete":    "Ctrl+Space",
 }
@@ -81,15 +100,15 @@ func (a *app) paletteEntries() []paletteEntry {
 	shown, en := locales.In(i18n.Locale()), locales.In("en")
 	english := map[string]string{}
 	for _, cmd := range a.commandsIn(en) {
-		english[cmd.id] = commandGroup(en, cmd.id) + ": " + cmd.label
+		english[cmd.id] = groupTitle(commandGroup(en, cmd.id), cmd.label)
 	}
 	for _, cmd := range a.commandsIn(shown) {
 		if cmd.id == "go.commands" {
 			continue
 		}
 		group := commandGroup(shown, cmd.id)
-		title := group + ": " + cmd.label
-		e := paletteEntry{id: cmd.id, title: title, group: len(group) + 2, caps: a.commandCaps(cmd)}
+		title := groupTitle(group, cmd.label)
+		e := paletteEntry{id: cmd.id, title: title, group: len(title) - len(cmd.label), caps: a.commandCaps(cmd)}
 		if english[cmd.id] != title {
 			e.en = english[cmd.id]
 		}
@@ -239,7 +258,7 @@ func (a *app) quickCommands(c *ui.Context, query string) {
 			})
 			q.results = append(first, rest...)
 		}
-		q.shown, q.stale, q.sel = key, false, 0
+		q.resetResults(key)
 	}
 	choose := func(i int) {
 		if i < 0 || i >= len(q.results) {

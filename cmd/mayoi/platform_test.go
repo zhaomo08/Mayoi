@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,7 +14,10 @@ import (
 	"github.com/egoist/mygo/i18n"
 	"github.com/egoist/mygo/ui"
 
+	"mayoi/internal/git"
 	"mayoi/internal/keymap"
+	"mayoi/internal/plugin"
+	"mayoi/internal/remote"
 	"mayoi/internal/settings"
 )
 
@@ -23,6 +29,13 @@ import (
 // it again for every message, which the frame benchmarks would measure.
 // Many tests run in worker processes beside each other: see splitTests.
 func TestMain(m *testing.M) {
+	// The Windows pool re-execs this binary as the bridge. main is not
+	// called from tests, so the bridge has to be recognized here, before
+	// the test flags, which would otherwise reject it.
+	remote.HandleBridge(os.Args)
+	// A copy of this binary is the program of terminalShell some tests
+	// start: see shellFixture.
+	runShellFixture()
 	hostOS = "darwin"
 	keepLineEndings()
 	if os.Getenv("MYGO_LOCALE") == "" {
@@ -33,6 +46,14 @@ func TestMain(m *testing.M) {
 	// The previews' pictures of the web are not fetched, but by the tests
 	// of them, from servers of their own.
 	markdownRemote.get = func(string) ([]byte, error) { return nil, errors.New("offline") }
+	// Nor the index of plugins, for the language servers to offer.
+	fetchServerIndex = func(context.Context, *http.Client) ([]plugin.IndexEntry, error) { return nil, errors.New("offline") }
+	// Nor is GitHub asked, by the gh of the machine, of the repositories
+	// whose remotes the tests make up: it answers as to one not signed in,
+	// at once, as on CI.
+	git.GH = func(...string) ([]byte, error) {
+		return nil, fmt.Errorf("%w: To get started with GitHub CLI, please run:  gh auth login", git.ErrNoGH)
+	}
 	code, split := splitTests()
 	if !split {
 		code = m.Run()
@@ -66,7 +87,8 @@ func onOS(t *testing.T, goos string) {
 }
 
 // No two commands share a key on any system, and none takes Control and
-// Alt off macOS, which are AltGr there and type text.
+// Alt off macOS, which are AltGr there and type text, but with an arrow,
+// which types none.
 func TestShortcutsDoNotCollide(t *testing.T) {
 	for _, goos := range []string{"darwin", "windows", "linux"} {
 		t.Run(goos, func(t *testing.T) {
@@ -97,12 +119,34 @@ func TestShortcutsDoNotCollide(t *testing.T) {
 					t.Errorf("%s and %s both take %s", cmd.id, other, accel)
 				}
 				taken[st] = cmd.id
-				if goos != "darwin" && st.Mods&(ui.Ctrl|ui.Alt) == ui.Ctrl|ui.Alt {
+				if goos != "darwin" && st.Mods&(ui.Ctrl|ui.Alt) == ui.Ctrl|ui.Alt && !arrowKey(st.Key) {
 					t.Errorf("%s takes %s, which is AltGr", cmd.id, accel)
 				}
 			}
+			// Mayoi's chords start with no command's key, and are each
+			// their own.
+			chords := map[string]string{}
+			for id := range builtinChords {
+				keys := chordKeys(id)
+				if len(keys) < 2 {
+					t.Errorf("%s: its chord %q does not parse", id, builtinChords[id])
+					continue
+				}
+				if other, ok := taken[keys[0]]; ok {
+					t.Errorf("the chord of %s starts with the key of %s", id, other)
+				}
+				s := fmt.Sprint(keys)
+				if other, ok := chords[s]; ok {
+					t.Errorf("%s and %s both take %s", id, other, builtinChords[id])
+				}
+				chords[s] = id
+			}
 		})
 	}
+}
+
+func arrowKey(k ui.Key) bool {
+	return k == ui.KeyUp || k == ui.KeyDown || k == ui.KeyLeft || k == ui.KeyRight
 }
 
 // Off macOS the commands take VS Code's keys of the system, which their

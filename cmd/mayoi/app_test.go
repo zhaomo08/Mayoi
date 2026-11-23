@@ -9,6 +9,7 @@ import (
 	"mayoi/internal/settings"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -21,6 +22,19 @@ import (
 // fakeHost answers the app's dialogs as a test says.
 type fakeHost struct {
 	folder string
+	// visible is what shown says: false keeps the polls of GitHub off,
+	// but in the tests that fake GitHub.
+	visible bool
+	// projects are what everyProject says, and showed the project
+	// showApp showed last.
+	projects []*app
+	showed   *app
+	// native is what nativeDrags says: true drags as on macOS, a native
+	// transfer.
+	native bool
+	// notified are the notifications of the system shown, as their
+	// titles and bodies.
+	notified []string
 	// signedIn is the name settings sync syncs for, and signIns, syncs
 	// and signOuts count the commands of settings sync.
 	signedIn                 string
@@ -68,6 +82,8 @@ type fakeHost struct {
 	// settingsShown are the sections and keys the settings window opened
 	// at, as "section:key".
 	settingsShown []string
+	// quits counts the times Cmd+Q was pressed.
+	quits int
 }
 
 func (h *fakeHost) openFolder(done func(string)) { done(h.folder) }
@@ -125,13 +141,16 @@ func (h *fakeHost) menuChanged()              {}
 func (h *fakeHost) showSettings(section, key string) {
 	h.settingsShown = append(h.settingsShown, section+":"+key)
 }
-func (h *fakeHost) redrawWindows()  {}
-func (h *fakeHost) installCLI()     {}
-func (h *fakeHost) uninstallCLI()   {}
-func (h *fakeHost) account() string { return h.signedIn }
-func (h *fakeHost) signIn()         { h.signIns++ }
-func (h *fakeHost) signOut()        { h.signOuts++ }
-func (h *fakeHost) syncNow()        { h.syncs++ }
+func (h *fakeHost) redrawWindows()     {}
+func (h *fakeHost) quitApp()           { h.quits++ }
+func (h *fakeHost) installCLI()        {}
+func (h *fakeHost) uninstallCLI()      {}
+func (h *fakeHost) addContextMenu()    {}
+func (h *fakeHost) removeContextMenu() {}
+func (h *fakeHost) account() string    { return h.signedIn }
+func (h *fakeHost) signIn()            { h.signIns++ }
+func (h *fakeHost) signOut()           { h.signOuts++ }
+func (h *fakeHost) syncNow()           { h.syncs++ }
 func (h *fakeHost) syncInfo() syncInfo {
 	if h.signedIn == "" {
 		return syncInfo{}
@@ -150,13 +169,20 @@ func (h *fakeHost) stepProject(int)              {}
 func (h *fakeHost) showProject(int)              {}
 func (h *fakeHost) closeProject()                {}
 func (h *fakeHost) projectTabsChanged()          {}
-func (h *fakeHost) nativeDrags() bool            { return false }
+func (h *fakeHost) nativeDrags() bool            { return h.native }
 func (h *fakeHost) otherProjects() []*app        { return nil }
 func (h *fakeHost) projectOf(*colTab) *app       { return nil }
 func (h *fakeHost) carryTab(*colTab, *app, bool) {}
+func (h *fakeHost) everyProject() []*app         { return h.projects }
+func (h *fakeHost) showApp(to *app)              { h.showed = to }
+
+func (h *fakeHost) focused() bool { return true }
+func (h *fakeHost) notify(title, body string, onClick func()) {
+	h.notified = append(h.notified, title+": "+body)
+}
 
 // Off screen, the pull request of the branch is not asked of gh.
-func (h *fakeHost) shown() bool { return false }
+func (h *fakeHost) shown() bool { return h.visible }
 
 // workspaceFixture makes a folder of a few files.
 // fixtureFiles are the files of a test's folder, by their paths in it.
@@ -205,18 +231,68 @@ func newHarness(t testing.TB, dark bool) *harness {
 	root := workspaceFixture(t)
 	s := settings.Default()
 	// The tests open Markdown as text, the editor they drive, in case
-	// markdownPreview's default changes.
-	s.MarkdownPreview = false
+	// markdownMode's default changes.
+	s.MarkdownMode = ""
 	w := s.NewWindow()
 	w.Folder = root
 	h := &fakeHost{folder: root}
 	a := newApp(h, s, w)
-	t.Cleanup(a.shutdown)
 	tt := ui.NewTester(a.view, 1200, 760)
 	tt.SetDark(dark)
 	hs := &harness{t: t, a: a, h: h, tt: tt, root: root}
+	t.Cleanup(hs.close)
 	hs.settle()
 	return hs
+}
+
+// close shuts the app, and waits a while for its shells and its work in
+// the background to end: until then, Windows keeps the folder they are in
+// from being removed, which fails the test.
+func (hs *harness) close() {
+	// Sessions a test makes up have no shell.
+	var terms []*session
+	for _, s := range hs.a.terms {
+		if s.term != nil {
+			terms = append(terms, s)
+		}
+	}
+	// A shell closed while it starts is only hung up on, not killed after
+	// a moment as one running is, and its Done comes before it exits:
+	// Windows' pwsh lives on in the folder. Each local shell gets to start
+	// first, as it has once it wrote something.
+	started := time.Now().Add(10 * time.Second)
+	for _, s := range terms {
+		local := s.attach == "" && s.hc == "" && !s.hcStarting
+		for local && strings.TrimSpace(s.term.Text()) == "" && !exited(s) && time.Now().Before(started) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		s.term.Close()
+	}
+	hs.a.shutdown()
+	deadline := time.Now().Add(5 * time.Second)
+	for _, s := range terms {
+		select {
+		case <-s.term.Done():
+		case <-time.After(time.Until(deadline)):
+		}
+	}
+	for bg.Running() > hs.held && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	// Windows can keep the folder a moment after a shell exits.
+	for len(terms) > 0 && os.RemoveAll(hs.root) != nil && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// exited reports whether the program of a terminal ended.
+func exited(s *session) bool {
+	select {
+	case <-s.term.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 // step draws a frame of a test a frame's time, 16 ms, after the last:
@@ -236,10 +312,30 @@ const settleTimeout = 30 * time.Second
 // posted, which on a busy machine is longer than on an idle one. While
 // work only runs, no frame is drawn, to leave the machine to it. Idle
 // counts for two frames in a row, as a frame can start work that one
-// finished asks for.
+// finished asks for. Work that lands during the wait, as a read does on a
+// slow machine, gets the frames of its own it would have had sooner, as a
+// scroll the file's caret pins for the frame after, but not more of the
+// clock: the tests count on half a second, as a double click's second.
 func (hs *harness) settle() {
 	hs.t.Helper()
 	hs.a.gitClock = hs.tt.Now
+	deadline := time.Now().Add(settleTimeout)
+	// A poll that posts on every pass would keep it going: past a few,
+	// the frames have had their time.
+	for round := range settleRounds {
+		if !hs.settleRound(deadline, round == 0) {
+			return
+		}
+	}
+}
+
+const settleRounds = 8
+
+// settleRound draws a few frames, advances half a second on the first
+// round, and waits for the work running, and reports whether some landed
+// while it waited.
+func (hs *harness) settleRound(deadline time.Time, first bool) (late bool) {
+	hs.t.Helper()
 	// Advance before waiting: a final frame after the wait can start work.
 	// The first frames see what the test changed, and start what moves of
 	// it, as a fade, a frame's time apart, as the app counts its frames;
@@ -249,16 +345,18 @@ func (hs *harness) settle() {
 	for range seen {
 		step(hs.tt)
 	}
-	hs.tt.Advance((31 - seen) * 16 * time.Millisecond)
-	hs.tt.Frame()
-	for idle, deadline := 0, time.Now().Add(settleTimeout); idle < 2; {
+	if first {
+		hs.tt.Advance((31 - seen) * 16 * time.Millisecond)
+		hs.tt.Frame()
+	}
+	for idle := 0; idle < 2; {
 		running, queued := hs.busy()
 		if time.Now().After(deadline) {
 			hs.t.Fatalf("settle: %d background jobs still run after %s (queued: %v)\n%s", bg.Running()-hs.held, settleTimeout, queued, backgroundStacks())
 		}
 		switch {
 		case queued:
-			idle = 0
+			idle, late = 0, true
 			hs.tt.Frame()
 		case running:
 			idle = 0
@@ -272,6 +370,7 @@ func (hs *harness) settle() {
 			}
 		}
 	}
+	return late
 }
 
 // backgroundStacks returns the stacks of the goroutines bg started, to
@@ -294,6 +393,14 @@ func backgroundStacks() string {
 func (hs *harness) busy() (running, queued bool) {
 	// A job posts before it stops counting: sample the work before its queue.
 	running = bg.Running() > hs.held
+	// A parse of Live Preview waits on a timer of the wall clock for the
+	// edits to pause, which the tester's clock does not count: it is work
+	// to come, as the parse it starts.
+	for _, doc := range hs.a.docs {
+		if l := doc.live; l != nil && (l.pending || l.running) {
+			running = true
+		}
+	}
 	hs.a.mu.Lock()
 	n := len(hs.a.queue)
 	hs.a.mu.Unlock()
@@ -304,6 +411,52 @@ func (hs *harness) busy() (running, queued bool) {
 func (hs *harness) idle() bool {
 	running, queued := hs.busy()
 	return !running && !queued
+}
+
+// findIn is tt.Find within box in: the box of the first element showing
+// text s, or labeled s, that lies in it, as a heading of a preview whose
+// name the breadcrumbs above it show too. The Tester finds only the
+// first in the window, so its labels are read by reflection.
+func findIn(t testing.TB, tt *ui.Tester, s string, in ui.Rect) (ui.Rect, bool) {
+	t.Helper()
+	first, ok := tt.Find(s)
+	if !ok {
+		return ui.Rect{}, false
+	}
+	rt := reflect.ValueOf(tt).Elem().FieldByName("rt")
+	if !rt.IsValid() || rt.Kind() != reflect.Pointer {
+		t.Fatal("findIn: the Tester has no engine to read its labels from")
+	}
+	labels := rt.Elem().FieldByName("labels")
+	if !labels.IsValid() || labels.Kind() != reflect.Slice {
+		t.Fatal("findIn: the Tester's engine has no labels")
+	}
+	box := func(l reflect.Value) ui.Rect {
+		r := l.FieldByName("r")
+		return ui.Rect{X: float32(r.FieldByName("X").Float()), Y: float32(r.FieldByName("Y").Float()),
+			W: float32(r.FieldByName("W").Float()), H: float32(r.FieldByName("H").Float())}
+	}
+	// The labels' boxes are the content's; Find's, zoomed. The first
+	// match gives the zoom.
+	z := float32(0)
+	for i := range labels.Len() {
+		l := labels.Index(i)
+		if l.FieldByName("text").String() != s {
+			continue
+		}
+		r := box(l)
+		if z == 0 {
+			z = 1
+			if r.W > 0 {
+				z = first.W / r.W
+			}
+		}
+		r = ui.Rect{X: r.X * z, Y: r.Y * z, W: r.W * z, H: r.H * z}
+		if r.X < in.X+in.W && r.X+r.W > in.X && r.Y < in.Y+in.H && r.Y+r.H > in.Y {
+			return r, true
+		}
+	}
+	return ui.Rect{}, false
 }
 
 func (hs *harness) shot(name string) {
@@ -474,7 +627,7 @@ func TestExternalChangeReloadsCleanDocument(t *testing.T) {
 	a.openFile(hs.path("go.mod"), true)
 	hs.settle()
 	os.WriteFile(hs.path("go.mod"), []byte("module changed\n"), 0o644)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(settleTimeout)
 	for a.activeEditor().buf.String() != "module changed\n" && time.Now().Before(deadline) {
 		hs.settle()
 	}
@@ -507,7 +660,7 @@ func TestReloadKeepsTheViewAndTheCaret(t *testing.T) {
 		}
 		data, _ := os.ReadFile(p)
 		os.WriteFile(p, []byte("// a\n// b\n// c\n"+string(data)), 0o644)
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(settleTimeout)
 		for !strings.HasPrefix(d.buf.String(), "// a") && time.Now().Before(deadline) {
 			hs.settle()
 		}
@@ -548,7 +701,7 @@ func TestQuickOpenAndGoToLine(t *testing.T) {
 	hs := newHarness(t, true)
 	a, tt := hs.a, hs.tt
 	a.run("go.quickOpen")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(settleTimeout)
 	for a.index == nil && time.Now().Before(deadline) {
 		hs.settle()
 	}
@@ -596,7 +749,7 @@ func TestQuickOpenToSide(t *testing.T) {
 		t.Helper()
 		a.run("go.quickOpen")
 		hs.settle()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(settleTimeout)
 		for a.index == nil && time.Now().Before(deadline) {
 			hs.settle()
 		}
@@ -627,6 +780,89 @@ func TestQuickOpenToSide(t *testing.T) {
 	if a.col != 0 || filepath.Base(a.activeEditor().path) != "go.mod" {
 		t.Errorf("column %d shows %s, want go.mod in column 0", a.col, a.activeEditor().path)
 	}
+}
+
+// Beside a locked column, Quick Open's side key opens in a column there is,
+// beside the one with the keyboard, and adds none.
+func TestQuickOpenToSideLocked(t *testing.T) {
+	quick := func(hs *harness, query string, side bool) {
+		t.Helper()
+		a := hs.a
+		a.run("go.quickOpen")
+		hs.settle()
+		deadline := time.Now().Add(settleTimeout)
+		for a.index == nil && time.Now().Before(deadline) {
+			hs.settle()
+		}
+		hs.tt.Type(query)
+		hs.settle()
+		if side {
+			hs.key(ui.Cmd, ui.KeyEnter)
+		} else {
+			hs.key(0, ui.KeyEnter)
+		}
+		hs.settle()
+		if a.quick.open {
+			t.Fatal("quick open stayed open")
+		}
+	}
+	shows := func(t *testing.T, a *app, want *column, name string, cols int) {
+		t.Helper()
+		if len(a.cols) != cols {
+			t.Fatalf("%d columns, want %d", len(a.cols), cols)
+		}
+		if a.column() != want {
+			t.Fatalf("column %d has the keyboard, want %d", a.col, slices.Index(a.cols, want))
+		}
+		if d := a.activeEditor(); d == nil || filepath.Base(d.path) != name {
+			t.Fatalf("column %d does not show %s", a.col, name)
+		}
+	}
+
+	t.Run("from unlocked to locked neighbor", func(t *testing.T) {
+		hs, left, right := lockedHarness(t)
+		a := hs.a
+		a.col = slices.Index(a.cols, left)
+		quick(hs, "bts", true)
+		shows(t, a, right, "b.ts", 2)
+		if !right.locked || len(left.tabs) != 1 {
+			t.Errorf("locked %v, %d tabs left, want locked and 1", right.locked, len(left.tabs))
+		}
+		// Return from the locked column still opens in the file column.
+		quick(hs, "gomod", false)
+		shows(t, a, left, "go.mod", 2)
+		if len(right.tabs) != 1 {
+			t.Errorf("%d tabs in the locked column, want 1", len(right.tabs))
+		}
+	})
+
+	t.Run("from active locked column", func(t *testing.T) {
+		hs, left, right := lockedHarness(t)
+		a := hs.a
+		a.openFileIn(right, 0, hs.path("README.md"), true)
+		hs.settle()
+		quick(hs, "bts", true)
+		shows(t, a, left, "b.ts", 2)
+		if len(right.tabs) != 1 {
+			t.Errorf("%d tabs in the locked column, want 1", len(right.tabs))
+		}
+	})
+
+	t.Run("relative to the active column", func(t *testing.T) {
+		hs, left, middle := lockedHarness(t)
+		a := hs.a
+		right := a.splitColumn(middle, true)
+		// The right column has the keyboard last of the unlocked ones.
+		a.openFileIn(right, 0, hs.path("go.mod"), true)
+		hs.settle()
+		a.openFileIn(middle, 0, hs.path("README.md"), true)
+		hs.settle()
+		quick(hs, "bts", true)
+		shows(t, a, right, "b.ts", 3)
+		if len(left.tabs) != 1 || len(middle.tabs) != 1 {
+			t.Errorf("%d tabs left, %d in the locked column, want 1 each", len(left.tabs), len(middle.tabs))
+		}
+	})
 }
 
 func TestFindAndReplace(t *testing.T) {
@@ -671,7 +907,7 @@ func TestNewFileAndRenameFromTheTree(t *testing.T) {
 		t.Run(fmt.Sprintf("markdownPreview=%v", preview), func(t *testing.T) {
 			hs := newHarness(t, false)
 			a, tt := hs.a, hs.tt
-			a.settings.MarkdownPreview = preview
+			a.settings.MarkdownMode = map[bool]string{true: "reading"}[preview]
 			a.askNewEntry(hs.root, false)
 			hs.settle()
 			tt.Type("notes/todo.md")
@@ -757,7 +993,7 @@ func TestOpenTextRestoresState(t *testing.T) {
 		t.Fatal("a failed open left openingText set")
 	}
 	// The flag, not the file, decides: source under it, preview after.
-	a.settings.MarkdownPreview = true
+	a.settings.MarkdownMode = "reading"
 	a.openText(func() { a.openFile(hs.path("README.md"), true) })
 	hs.settle()
 	if d := a.activeEditor(); d == nil || d.preview != nil {

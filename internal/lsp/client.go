@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -102,7 +103,10 @@ type Client struct {
 	in   io.WriteCloser
 	h    Handlers
 	caps struct {
-		Hover, Definition, Completion, Formatting bool
+		Hover, Definition, Completion, Formatting  bool
+		TypeDefinition, Implementation, References bool
+		Commands                                   []string
+		Experimental                               map[string]json.RawMessage
 		// Sync is the text document sync kind: 1 full, 2 incremental.
 		Sync int
 	}
@@ -147,12 +151,19 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 			return nil, err
 		}
 	}
-	out, err := opts.Cmd.StdoutPipe()
+	// A pipe of its own, not StdoutPipe, which Wait closes as the command
+	// ends: what the server wrote as it quit, as its answer to initialize,
+	// is read all the same.
+	out, w, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
+	opts.Cmd.Stdout = w
 	stderr, _ := opts.Cmd.StderrPipe()
-	if err := opts.Cmd.Start(); err != nil {
+	err = opts.Cmd.Start()
+	w.Close()
+	if err != nil {
+		out.Close()
 		return nil, err
 	}
 	c := &Client{cmd: opts.Cmd, in: in, h: opts.Handlers, waiting: map[int]chan response{}, done: make(chan struct{}),
@@ -164,12 +175,23 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 	if stderr != nil {
 		go c.logLines(stderr)
 	}
-	go c.read(bufio.NewReader(out))
+	read := make(chan struct{})
+	go func() {
+		c.read(bufio.NewReader(out))
+		close(read)
+	}()
 	go func() {
 		err := opts.Cmd.Wait()
+		// The answers it wrote before it ended come first, for so long: a
+		// child of its, which holds the pipe, need not end with it.
+		select {
+		case <-read:
+		case <-time.After(time.Second):
+		}
+		out.Close()
 		c.mu.Lock()
 		if c.err == nil {
-			c.err = fmt.Errorf("the server stopped: %v", err)
+			c.err = &StoppedError{err}
 		}
 		for id, ch := range c.waiting {
 			ch <- response{nil, c.err}
@@ -193,6 +215,9 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 				"synchronization":    map[string]any{"didSave": true},
 				"hover":              map[string]any{"contentFormat": []string{"markdown", "plaintext"}},
 				"definition":         map[string]any{"linkSupport": false},
+				"typeDefinition":     map[string]any{"linkSupport": true},
+				"implementation":     map[string]any{"linkSupport": true},
+				"references":         map[string]any{},
 				"completion":         map[string]any{"completionItem": map[string]any{"snippetSupport": true}},
 				"formatting":         map[string]any{},
 				"publishDiagnostics": map[string]any{"relatedInformation": false},
@@ -204,15 +229,30 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 	res, err := c.Call(ctx, "initialize", params)
 	if err != nil {
 		c.Close()
+		// One that quit says how, rather than that its pipe broke; one that
+		// answered why it would not start, and quit, says why.
+		var answered *ResponseError
+		c.mu.Lock()
+		if ctx.Err() == nil && c.err != nil && !errors.As(err, &answered) {
+			err = c.err
+		}
+		c.mu.Unlock()
 		return nil, err
 	}
 	var init struct {
 		Capabilities struct {
-			HoverProvider              json.RawMessage `json:"hoverProvider"`
-			DefinitionProvider         json.RawMessage `json:"definitionProvider"`
+			HoverProvider          json.RawMessage `json:"hoverProvider"`
+			DefinitionProvider     json.RawMessage `json:"definitionProvider"`
+			TypeDefinitionProvider json.RawMessage `json:"typeDefinitionProvider"`
+			ImplementationProvider json.RawMessage `json:"implementationProvider"`
+			ReferencesProvider     json.RawMessage `json:"referencesProvider"`
+			ExecuteCommandProvider struct {
+				Commands []string `json:"commands"`
+			} `json:"executeCommandProvider"`
 			CompletionProvider         json.RawMessage `json:"completionProvider"`
 			DocumentFormattingProvider json.RawMessage `json:"documentFormattingProvider"`
 			TextDocumentSync           json.RawMessage `json:"textDocumentSync"`
+			Experimental               json.RawMessage `json:"experimental"`
 		} `json:"capabilities"`
 	}
 	json.Unmarshal(res, &init)
@@ -220,6 +260,11 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 	cp := init.Capabilities
 	c.caps.Hover, c.caps.Definition, c.caps.Completion, c.caps.Formatting =
 		on(cp.HoverProvider), on(cp.DefinitionProvider), on(cp.CompletionProvider), on(cp.DocumentFormattingProvider)
+	c.caps.TypeDefinition = on(cp.TypeDefinitionProvider)
+	c.caps.Implementation = on(cp.ImplementationProvider)
+	c.caps.References = on(cp.ReferencesProvider)
+	c.caps.Commands = cp.ExecuteCommandProvider.Commands
+	_ = json.Unmarshal(cp.Experimental, &c.caps.Experimental)
 	c.caps.Sync = 1
 	var kind int
 	if json.Unmarshal(cp.TextDocumentSync, &kind) != nil {
@@ -244,7 +289,30 @@ func (c *Client) Formatting() bool { return c.caps.Formatting }
 // Done is closed once the server stopped.
 func (c *Client) Done() <-chan struct{} { return c.done }
 
-// Close asks the server to shut down, and stops it after a moment.
+// ResponseError is a server's answer to a request that failed, as its
+// message says.
+type ResponseError struct {
+	Code    int
+	Message string
+}
+
+func (e *ResponseError) Error() string { return e.Message }
+
+// StoppedError is what a client whose server stopped answers with: Err is
+// how its command ended, an *exec.ExitError when it exited, nil when it
+// exited with 0.
+type StoppedError struct{ Err error }
+
+func (e *StoppedError) Error() string {
+	if e.Err == nil {
+		return "the server stopped"
+	}
+	return fmt.Sprintf("the server stopped: %v", e.Err)
+}
+func (e *StoppedError) Unwrap() error { return e.Err }
+
+// Close asks the server to shut down, and stops it after a moment; it
+// returns once its process is gone.
 func (c *Client) Close() {
 	select {
 	case <-c.done:
@@ -263,6 +331,7 @@ func (c *Client) Close() {
 		if c.cmd.Process != nil {
 			c.cmd.Process.Kill()
 		}
+		<-c.done
 	}
 }
 
@@ -403,7 +472,7 @@ func (c *Client) read(r *bufio.Reader) {
 			c.mu.Unlock()
 			if ch != nil {
 				if m.Error != nil {
-					ch <- response{nil, errors.New(m.Error.Message)}
+					ch <- response{nil, &ResponseError{m.Error.Code, m.Error.Message}}
 				} else {
 					ch <- response{m.Result, nil}
 				}
@@ -484,6 +553,25 @@ func (c *Client) notified(method string, params json.RawMessage) {
 	}
 }
 
+// LanguageID is the protocol's identifier of a language Mayoi names, as
+// the highlighter does, for the document at uri: "c++" is "cpp", and JSX
+// and TSX are their own, which servers parse by it.
+func LanguageID(language, uri string) string {
+	switch strings.ToLower(filepath.Ext(uri)) {
+	case ".jsx":
+		return "javascriptreact"
+	case ".tsx":
+		return "typescriptreact"
+	}
+	switch language {
+	case "c++":
+		return "cpp"
+	case "react":
+		return "javascriptreact"
+	}
+	return language
+}
+
 // Open tells the server of a document open, or of its new text: the whole
 // text each time, which every server takes.
 func (c *Client) Open(uri, language, text string) {
@@ -494,7 +582,7 @@ func (c *Client) Open(uri, language, text string) {
 	c.mu.Unlock()
 	if !open {
 		c.Notify("textDocument/didOpen", map[string]any{"textDocument": map[string]any{
-			"uri": uri, "languageId": language, "version": v, "text": text,
+			"uri": uri, "languageId": LanguageID(language, uri), "version": v, "text": text,
 		}})
 		return
 	}
@@ -534,21 +622,30 @@ func docPos(uri string, pos Position) map[string]any {
 	return map[string]any{"textDocument": map[string]any{"uri": uri}, "position": pos}
 }
 
-// HoverAt is the hover of a place, as Markdown, "" for none.
-func (c *Client) HoverAt(ctx context.Context, uri string, pos Position) (string, error) {
+// Hover is what a server says of a place: Markdown, and the range of the
+// text it is of, nil when it names none.
+type Hover struct {
+	Markdown string
+	Range    *Range
+}
+
+// HoverAt is the hover of a place, its Markdown "" for none.
+func (c *Client) HoverAt(ctx context.Context, uri string, pos Position) (Hover, error) {
 	res, err := c.Call(ctx, "textDocument/hover", docPos(uri, pos))
 	if err != nil || len(res) == 0 || string(res) == "null" {
-		return "", err
+		return Hover{}, err
 	}
 	var h struct {
 		Contents json.RawMessage `json:"contents"`
+		Range    *Range          `json:"range"`
 	}
 	json.Unmarshal(res, &h)
-	return markupText(h.Contents), nil
+	return Hover{Markdown: markupText(h.Contents), Range: h.Range}, nil
 }
 
-// markupText reads hover contents: MarkupContent, a MarkedString, or a
-// list of them.
+// markupText reads hover contents as Markdown: MarkupContent, its
+// plaintext escaped; a MarkedString, a string of Markdown or code in a
+// language; or a list of them.
 func markupText(raw json.RawMessage) string {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
@@ -560,8 +657,11 @@ func markupText(raw json.RawMessage) string {
 		Language string `json:"language"`
 	}
 	if json.Unmarshal(raw, &mc) == nil && mc.Value != "" {
-		if mc.Language != "" {
+		switch {
+		case mc.Language != "":
 			return "```" + mc.Language + "\n" + mc.Value + "\n```"
+		case mc.Kind == "plaintext":
+			return PlainMarkdown(mc.Value)
 		}
 		return mc.Value
 	}
@@ -578,31 +678,36 @@ func markupText(raw json.RawMessage) string {
 	return ""
 }
 
-// DefinitionAt is where what is at a place is defined.
-func (c *Client) DefinitionAt(ctx context.Context, uri string, pos Position) ([]Location, error) {
-	res, err := c.Call(ctx, "textDocument/definition", docPos(uri, pos))
-	if err != nil || len(res) == 0 || string(res) == "null" {
-		return nil, err
+// PlainMarkdown is Markdown that reads as plain text does: its marks
+// escaped, each of its lines a line and its indents kept.
+func PlainMarkdown(text string) string {
+	var b strings.Builder
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
 	}
-	var one Location
-	if json.Unmarshal(res, &one) == nil && one.URI != "" {
-		return []Location{one}, nil
-	}
-	var many []struct {
-		Location
-		TargetURI   string `json:"targetUri"`
-		TargetRange Range  `json:"targetSelectionRange"`
-	}
-	json.Unmarshal(res, &many)
-	var out []Location
-	for _, l := range many {
-		if l.TargetURI != "" {
-			out = append(out, Location{URI: l.TargetURI, Range: l.TargetRange})
-		} else if l.URI != "" {
-			out = append(out, l.Location)
+	for i, line := range lines {
+		if i > 0 {
+			if line != "" && lines[i-1] != "" {
+				b.WriteString("\\")
+			}
+			b.WriteString("\n")
+		}
+		rest := strings.TrimLeft(line, " ")
+		b.WriteString(strings.Repeat("\u00a0", len(line)-len(rest)))
+		for _, r := range rest {
+			if r < 0x80 && strings.ContainsRune("\\`*_{}[]()<>#+-.!|~&\"'=", r) {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
 		}
 	}
-	return out, nil
+	return b.String()
+}
+
+// DefinitionAt is where what is at a place is defined.
+func (c *Client) DefinitionAt(ctx context.Context, uri string, pos Position) ([]Location, error) {
+	return c.NavigateAt(ctx, Definition, uri, pos)
 }
 
 // CompletionAt are the completions at a place.

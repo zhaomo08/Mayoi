@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -505,7 +504,7 @@ func (a *app) openMergeIn(col *column, at int, path string, focus bool) {
 		op = st.Op
 	}
 	v := &mergeView{path: path, entry: e, op: op, chosen: -1, current: -1}
-	a.addTab(col, at, &colTab{merge: v})
+	at = a.addTab(col, at, &colTab{merge: v})
 	a.activate(col, at, focus)
 	a.rememberTabs()
 	a.refreshMerge(v)
@@ -593,7 +592,7 @@ func (a *app) makeMergeResult(v *mergeView, data []byte, diskErr error) {
 		// The file open already, as the raw text of the conflict: it
 		// becomes the result, as a step of undo.
 		v.doc = a.docs[i]
-		v.doc.takeText([]byte(text))
+		v.doc.takeText([]byte(text), v.doc.encoding)
 	} else {
 		a.nextID++
 		v.doc = newDocument(a.nextID, v.path, text, highlight.New(highlight.Lexer(v.path), a.invalidate))
@@ -1004,7 +1003,7 @@ func (a *app) revealMergeRegion(v *mergeView, i int) {
 	}
 	y := max(0, editorPadY+a.mergeGeometry(v, 1).top(at[1])-room/3)
 	if d := y - v.panes[1].scroll.Y; d != 0 && max(d, -d) < 3*v.viewH {
-		v.panes[1].scroll.ScrollTo(v.panes[1].scroll.X, y, ui.Animation{Duration: 220 * time.Millisecond, Ease: ui.EaseOut})
+		v.panes[1].scroll.ScrollTo(v.panes[1].scroll.X, y, ui.Animation{Duration: motionMove, Ease: ui.EaseOut})
 		return
 	}
 	for k, line := range at {

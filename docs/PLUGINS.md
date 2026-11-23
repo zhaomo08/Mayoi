@@ -11,12 +11,12 @@ The API is new and may still change before 1.0. A plugin says which versions of 
 ### Installing
 
 ```sh
-mayoi plugin install mayoi-editor/plugin-prettier         # owner/repo of GitHub
+mayoi plugin install me/word-stats                         # owner/repo of GitHub
 mayoi plugin install https://git.example.com/me/tool.git@v1.2.0
-mayoi plugin install prettier                              # a name of the index
+mayoi plugin install word-stats                            # a name of the index
 mayoi plugin list
 mayoi plugin update                                        # all, or name...
-mayoi plugin remove prettier
+mayoi plugin remove word-stats
 ```
 
 Or choose **Plugins → Manage Plugins…**, or the **Plugins** page of the settings window: install from a Git URL or
@@ -39,15 +39,33 @@ plugins you know.
 
 On Windows, `~` is `%USERPROFILE%`. With `MAYOI_DATA_DIR` set, these folders are in that folder instead.
 
-Mayoi comes with two plugins of its own, **Word Count** (the words and reading time of a Markdown or text file, in the
-status bar) and **TODOs** (the folder's TODO, FIXME and HACK comments, in the sidebar). They start off; turn them on
-on the **Plugins** page of the settings window, or with `"enabled": true` in their settings.
+Mayoi comes with plugins of its own: **Word Count** (the words and reading time of a Markdown or text file, in the
+status bar), **TODOs** (the folder's TODO, FIXME and HACK comments, in the sidebar), and the language servers of
+**Go** (`gopls`), **TypeScript** (`typescript-language-server`, for JavaScript too), **Python** (`basedpyright`),
+**Rust** (`rust-analyzer`) and **C/C++** (`clangd`). They start off; turn them on on the **Plugins** page of the
+settings window, or with `"enabled": true` in their settings. A file of a language whose server is off offers
+**Turn On**, once, when its program is installed, and says how to install it when it is not. Each server's `path`
+setting names its program, by name or path, when it is not on the path.
+
+TypeScript's server needs a TypeScript 5 or 6 in the folder's `node_modules`, or its `tsserverPath` setting naming a
+`tsserver.js`. TypeScript 7 has no `tsserver.js` but a server of its own: set `path` to `tsc` or `tsrs`, which then run with
+`--lsp --stdio` while `args` is left as it is. Mayoi says which applies when the server finds no TypeScript.
+Python's server is basedpyright. Set `path` to `ty` to run `ty server` while `args` is left as it is.
+
+A plugin you install under the name of one Mayoi comes with takes its place; removing it brings Mayoi's back.
+`mayoi --disable-plugins` runs Mayoi's own.
 
 ### Settings sync
 
 Signed in, the plugins installed from Git follow you to your other machines: Mayoi installs them there at the same
 commits, and a plugin removed on one machine is removed on the others. A plugin copied in by hand, or linked with
 `mayoi plugin dev`, stays on its machine.
+
+A plugin runs as you do, so whoever can write your synced settings could run code on each of your machines. Mayoi asks
+before it installs a plugin that sync brings, listing each name and URL. **Cancel** leaves it uninstalled on that
+machine and is not asked again until the plugin changes; an update from the URL a plugin came from installs without
+asking. Sync installs only from `https://`, `ssh://` and `git@` URLs. To keep plugins off sync altogether, add
+`"pluginSources"` and `"plugins"` to `syncIgnored`.
 
 ### When something goes wrong
 
@@ -147,7 +165,7 @@ languages plugins declare.
 | `commands`        | Commands in the command palette, the shortcuts editor and `mayoi run`. `arg` names what `mayoi run id=arg` gives. |
 | `keybindings`     | Shortcuts in keybindings.json's format. A plugin only gets keys that are free; see below.      |
 | `menus`           | `plugins` (the Plugins menu), `explorer/context` and `tab/context`, whose commands get the path |
-| `settings`        | Settings under `plugins.<name>` in settings.json, edited on the Plugins page: `type` is `boolean`, `number` or `string`, with `enum` for a choice |
+| `settings`        | Settings under `plugins.<name>` in settings.json, edited on the Plugins page: `type` is `boolean`, `number`, `string` or `array` (of strings, typed as words apart), with `enum` for a choice |
 | `statusItems`     | Items of the status bar, `align` `left` or `right`, which the plugin fills                     |
 | `views`           | Views in the sidebar, beside Explorer, Search and Source Control, which the plugin renders     |
 | `previews`        | Previews beside the source of the files a `pattern` matches, `output` `svg`, `markdown` or `view` |
@@ -158,6 +176,7 @@ languages plugins declare.
 | `snippets`        | Snippets in VS Code's format, for a `language` or `*`                                          |
 | `terminalLinks`   | A `pattern` of links clicked in a terminal (URLs and paths), which runs `command` with the match |
 | `languageServers` | Language servers: a `command`, its `args` and `initializationOptions`, for `languages`         |
+| `agents`          | Coding agents whose sessions the **Sessions** view lists and resumes; see below                 |
 
 #### Keyboard shortcuts
 
@@ -218,6 +237,7 @@ Every call that reaches the editor returns a promise.
 | `views`                  | `render(id, tree)`, `onShow(id, fn)`, `reveal(id)`                                        |
 | `previews`               | `register(id, fn)`, `refresh(id)`                                                         |
 | `webview`                | `open(id)`, then the panel's `post(message)`, `onMessage(fn)`, `close()`                  |
+| `agents`                 | `register(id, fn)`, the function that lists the sessions of an agent                      |
 | `ai`                     | `complete(prompt, {system})`, with Mon's AI gateway while you are signed in               |
 | `log`                    | `info`, `warn`, `error`, `debug`                                                          |
 
@@ -238,6 +258,45 @@ meanwhile, `edit` returns `false` and changes nothing. An edit that applies is o
 | `theme.changed`     | The theme or the appearance changed               |
 
 A document event has the document's `path`, `language`, `version`, and the `document` itself.
+
+### Document identity and command context
+
+Every document has a `ref`, `{windowId, documentId}`, valid while that document remains open.
+Paths and names are display information: several untitled documents have the empty path.
+Document and editor methods keep targeting their source window even after you switch windows.
+`document.snapshot()` reads its current `text`, `version`, `ref`, `path`, `name` and `language`
+together. `workspace.document(ref)` returns its current document, or `null` once it or its window closed.
+Reopening the same path, or moving its tab to another project, gives a new reference.
+
+`await document.setLanguage("json", {version: snapshot.version})` changes the document's
+language and highlighting without editing its text, undo history or saved state. It resolves
+`false` for a closed document, a stale text version, or an expired plugin runtime. The version
+defaults to that of the `Document` object. A closed explicit window rejects. The language can
+be one declared by the calling plugin or a Chroma name/alias; unknown names use plain text.
+An `editor.metadata` event reports the new language. Saving under a new path selects its
+language from the new filename.
+
+`editor.active`, `editor.visible`, `workspace.documents` and `window.pick` accept an optional
+`{windowId}` to keep an operation in its source window. Without it they use the front window.
+Closed explicit windows fail rather than redirecting calls to another window.
+`editor.close` includes `ref`; `editor.metadata` reports changes to a document's path, name or language.
+
+Commands may receive a second argument, their invocation context:
+
+```ts
+commands.register("example.inspect", async (arg, context) => {
+  if (!context?.document) return;
+  const doc = await workspace.document(context.document);
+  if (!doc) return;
+  const snapshot = await doc.snapshot();
+  console.log(snapshot.name, snapshot.version);
+});
+```
+
+The context includes `source`, `windowId` and, when known, `document`, `version` and `position`.
+Sources are `command`, `tab/context`, `explorer/context`, `api` and `cli`.
+A tab action gets the tab right-clicked, which need not be the active tab. Existing string arguments,
+including paths from context menus and values from `mayoi run`, remain the first argument.
 
 ### Files and programs on SSH hosts
 
@@ -366,7 +425,23 @@ palette.
 "snippets": [{ "language": "d2", "path": "snippets.json" }]
 ```
 
-`lexer` is a [Chroma](https://github.com/alecthomas/chroma) lexer's name. Snippets are VS Code's format, with tab stops,
+`lexer` is a [Chroma](https://github.com/alecthomas/chroma) lexer's name.
+A language may instead provide `lexerFile`, a Chroma XML grammar inside the plugin:
+
+```json
+{"id":"example","extensions":[".example"],"lexerFile":"syntax/example.xml"}
+```
+
+Mayoi compiles and caches the grammar when loading the plugin. XML and regex errors appear
+on the Plugins page and keep that plugin from loading. Grammar changes use the normal plugin
+reload mechanism; open source and output tabs update their highlighting. Disabling the plugin
+removes its grammar from those tabs. The XML's `using` emitters can reuse built-in lexers,
+such as JSON; its names and aliases do not replace globally registered lexers.
+`window.openText(text, {language:"example"})` and `document.setLanguage("example")` resolve
+the calling plugin's language declaration before looking up built-in languages. Old manifests
+that only specify `lexer` retain their behavior.
+
+Snippets are VS Code's format, with tab stops,
 placeholders, choices and variables as `TM_FILENAME` and `CURRENT_YEAR`; **Selection → Insert Snippet…** inserts one.
 
 ### Language servers
@@ -377,8 +452,42 @@ placeholders, choices and variables as `TM_FILENAME` and `CURRENT_YEAR`; **Selec
 
 A plugin of a few lines brings a language: Mayoi starts the server as a document of its languages opens, on the
 folder's machine, so it runs on the SSH host of a remote folder. Mayoi shows the server's diagnostics, and asks it for
-**Go → Go to Definition** (F12), **Go → Show Hover**, **Selection → Complete Word** (⌃Space in the editor), and
-**Format Document** when no plugin formats the language.
+**Go → Go to Definition** (F12, or ⌘-click a name, Ctrl-click on Windows and Linux), **Go → Show Hover**,
+**Selection → Complete Word** (⌃Space in the editor), and **Format Document** when no plugin formats the language.
+A definition in several places offers them in a list. **Go → Back** (⌃-, Alt+← on Windows and Linux) and
+**Go → Forward** (⌃⇧-, Alt+→), or the mouse's back and forward buttons, go between the places jumps left.
+
+A server that stops, or cannot start, is started again a few times as documents of its languages open. One that cannot
+start says why (its program is not installed, it quit, or it did not answer) and offers **Restart**. On an SSH host, a
+server that ends with status 127 is looked for there, in the folder and with the server's environment, before Mayoi
+says it is not installed: a program that is there quit by itself, and when the host cannot tell within 10 seconds, Mayoi
+says it could not check. How to install the program is said only when it is missing and the server's `install`, or the
+index, names that command. **Plugins → Show
+Language Servers** lists the servers of the folder, how each is and where it runs, and restarts the one chosen, after
+the old one is gone; the documents open are told of again.
+
+`command` and `args` take `${settings.key}`, the plugin's setting or its default; an argument that is all of a setting
+of `type` `array` is its strings, as many arguments. A string of `initializationOptions` that is all of
+`${settings.key}` is the setting's value, left out with its key when the setting is empty. A person can lay their own
+`initializationOptions` over these by the server's `id`, with `languageServers` in settings.json: see
+[SETTINGS.md](SETTINGS.md#language-servers). Keep a server's `id` as it is between versions. A server that answers
+`initialize` with an error says it. `programArgs` are the arguments of a program by name, as
+`{"tsc": ["--lsp", "--stdio"]}`, in place of `args` when the command starts that program and no setting that `args` takes
+is set. `install` is the command that installs the program, said when it is missing:
+
+```jsonc
+"settings": { "path": { "type": "string", "default": "gopls" } },
+"languageServers": [{ "id": "gopls.server", "languages": ["go"], "command": "${settings.path}",
+  "install": "go install golang.org/x/tools/gopls@latest" }]
+```
+
+Servers are told a document's language by the protocol's name: `cpp` for C++, `javascriptreact` and
+`typescriptreact` for `.jsx` and `.tsx` files.
+
+Mayoi also asks for type definitions, implementations, and references when the server declares support for them.
+Set `sourceDefinitionCommand` to offer **Go → Go to Source Definition**. Mayoi sends the advertised command through
+`workspace/executeCommand` with arguments `[documentUri, position]` and expects an LSP location list or null.
+Mayoi applies path mappings to that command's URI and locations.
 
 For servers that need setup, use `resolve` instead of `command`:
 
@@ -398,6 +507,12 @@ fallback; substitution passes literal arguments and never invokes a shell.
 Keep resolution fast and offline; dependency installation belongs in a separate
 setup command. Resolution and initialization share a 30-second deadline.
 
+For a plugin that ships its own runtime, `localResolve` takes a `command` and a
+`script` relative to the plugin directory. In a local workspace, Mayoi passes
+the absolute script path as the first argument, runs it in the workspace, and
+uses the same resolver input and output. SSH and other remote workspaces use
+the contribution's ordinary `command` or `resolve`.
+
 The resolver must print one JSON object and exit successfully:
 
 ```ts
@@ -410,6 +525,7 @@ The resolver must print one JSON object and exit successfully:
   configuration?: Record<string, unknown>;
   workspaceFolders?: { uri: string; name: string }[];
   pathMappings?: { clientURI: string; serverURI: string }[];
+  sourceDefinition?: { method: string; capability: string };
 }
 ```
 
@@ -425,6 +541,52 @@ keys in workspace edits. Source/edit text, hover content, configuration,
 Plugins prepare server-specific paths inside their own configuration. This lets
 a server import canonical paths and the editor keep the workspace's symlink
 aliases for definitions and diagnostics. Standard declarations remain valid.
+
+`sourceDefinition` selects a document-position request for **Go to Source
+Definition** when the server sets the named `experimental` capability to
+`true`. The request and its location results use the same URI mappings as
+standard navigation. Otherwise Mayoi uses the declared
+`sourceDefinitionCommand` when that command is available.
+
+### Coding agents
+
+The **Sessions** view lists the sessions of Claude Code, Qoder, Codex, Grok and Pi. A plugin adds another agent, whose
+sessions show there with its icon and resume in a terminal tab as theirs do:
+
+```jsonc
+"agents": [{
+  "id": "pi.agent", "name": "Pi",
+  "icon": "sparkles",                      // one of the icons of views, or an SVG: "<path d=\"…\"/>" of a 24×24 view
+  "tint": ["#e0559b", "#b8326f"],          // optional: one hex color, or one for dark windows and one for light
+  "resume": "pi --resume {id}",            // run in the session's folder; {id}, {folder} and {title} are quoted
+  "sessions": {                            // optional: a session for each file the glob matches
+    "glob": "~/.pi/sessions/**/*.jsonl", "format": "jsonl",
+    "id": "sessionId", "title": "title", "folder": "cwd", "updated": "timestamp", "prompt": "message.content"
+  }
+}]
+```
+
+`sessions` reads each file the glob matches (`~` is the home folder, `**` any folders) as `json`, one object, or
+`jsonl`, an object a line. Each field is a path of keys by dots, as `meta.cwd` or `messages.0.content`; of a `jsonl`
+file each takes the first line that has it, but `title` and `updated` the last. A session's id is the file's name
+without its extension unless `id` names one, and its time the file's unless `updated` names one: milliseconds or
+seconds since 1970, or ISO 8601 text. A file is read again only once it changes.
+
+An agent without `sessions` lists them with a function, which starts the plugin as the view reads:
+
+```ts
+import { agents, workspace } from "mayoi";
+
+agents.register("pi.agent", async () => {
+  const index = JSON.parse(await workspace.readFile("/Users/me/.pi/index.json"));
+  return index.map((s) => ({ id: s.id, title: s.name, folder: s.cwd, updated: s.mtime, prompt: s.firstPrompt }));
+});
+```
+
+Mayoi calls it off its main thread each time it reads the sessions, every few seconds while the view shows, and waits
+1.5 seconds for it: what comes later shows a moment after, and a function that runs 10 seconds is given up. One that
+fails keeps the sessions it gave last, and its error goes to the plugin's log, once until it changes. A plugin turned
+off takes its agents and their sessions with it.
 
 ### User scripts
 
@@ -444,3 +606,63 @@ Push the folder to a Git repository: `mayoi plugin install owner/repo` installs 
 ```json
 { "name": "word-stats", "description": "Words of the selection", "author": "Ann", "repository": "https://github.com/me/word-stats", "tags": ["text"] }
 ```
+
+A plugin that brings a language server also lists its `languages`, the program to `detect` and the command that
+installs it. As a file of one of those languages opens with no server, Mayoi looks for the program on the folder's
+machine: found, it offers to install the plugin, once; not found, it says how to install the program, once, and looks
+again as a file of the language opens a minute or more later. A plugin that could not install can be tried again from
+the failure, and its server starts for the files open once it is installed.
+
+```json
+{ "name": "gopls", "displayName": "Go", "description": "Go with gopls", "repository": "https://github.com/me/mayoi-gopls",
+  "languages": ["go"], "detect": "gopls", "install": "go install golang.org/x/tools/gopls@latest" }
+```
+
+## Comparing open buffers
+
+`await window.showDiff(left.ref, right.ref, { layout: "auto" })` opens a native
+comparison of two different open documents in the same window. Live sources can
+be edited directly on either side, sharing text, undo history and saving with
+the ordinary source tabs. Buffer comparisons initially show full text. Layout
+can also be `"split"` or `"inline"`; omitting it uses the user's Diff setting.
+The comparison follows in-memory edits, including unsaved text, without writing
+temporary files or requiring a folder or Git repository. Closing the last view
+of a source keeps its final snapshot, marks that side closed and makes it
+read-only. A new document at the same path does not replace it. Buffer
+comparisons are not restored next session. Closed references and cross-window
+sources reject the promise.
+
+## Source-line actions and text output
+
+Use `languages.setCodeLenses(doc.ref, items, { version: snapshot.version })`
+to replace your plugin's actions above source lines. Each item has a stable
+`id`, zero-based `line`, `title`, your own registered `command`, and optional
+string `arg`. The promise returns `false` if the version, document, or publishing
+runtime has expired. Invalid items reject without replacing the previous batch.
+`languages.clearCodeLenses(ref)` removes this plugin's actions in that document.
+Actions are shared between views of a document, hidden inside code folds, and
+removed on text changes or plugin stop, disable, reload, removal, or crash.
+They appear in the source editor; Markdown Live Preview does not display them.
+Clicking delivers the original argument and a second `CommandContext` with
+`source: "codeLens"`, source document, version and line. Commands can await asynchronous
+work while another command cancels it. Recheck the snapshot version before acting
+on text captured by a source-line action. Actions do not edit or save source text.
+
+`window.openText(text, { title, language: "json", windowId: doc.ref.windowId })`
+opens an untitled output tab in the source window, even after focus moves.
+A closed target window rejects; it does not redirect to another window.
+Language accepts Chroma names/aliases or `"plaintext"`. Unknown names fall back to
+plain text.
+Saving the output chooses the language from its new file name. Omitting language
+keeps the existing plain-text behavior, and omitting windowId uses the front window.
+
+`window.openText` also accepts `beside: source.ref`, which opens output in the
+next unlocked column to that source in its own window, creating a column when
+needed. `windowId`, when provided too, must match the source. Closing the source
+rejects the output instead of placing it elsewhere.
+
+An optional `key` reuses that plugin's untitled output with the same key in the
+window, including after plugin reload. Other plugins cannot replace it. A saved
+output becomes an ordinary file; a later call opens a new untitled output.
+Unsaved edits in an output reject replacement, so the plugin cannot silently
+lose user changes. Omitting `beside` and `key` keeps the existing new-tab behavior.

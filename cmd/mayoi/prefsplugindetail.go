@@ -81,7 +81,7 @@ func slideIn(c *ui.Context, e ui.Element, dx float32) ui.Element {
 	if c.Direction() == ui.RightToLeft {
 		dx = -dx
 	}
-	k := e.Keyframes("show", []ui.Keyframe{{Value: 0}, {At: 180 * time.Millisecond, Value: 1, Ease: ui.EaseOut}})
+	k := e.Keyframes("show", []ui.Keyframe{{Value: 0}, {At: motionMove, Value: 1, Ease: ui.EaseOut}})
 	return e.Opacity(k).Translate(dx*(1-k), 0)
 }
 
@@ -337,7 +337,7 @@ func (w *prefsWindow) pluginDetail(c *ui.Context, it *pluginItem) {
 					w.contribGroup(c, &d.groups[i], i > 0)
 				}
 			})
-			if len(d.settings) > 0 {
+			if len(d.settings) > 0 || len(pl.Contributes.LanguageServers) > 0 {
 				w.sectionLabel(c, "plugin-settings-head", locales.PluginsSettings(), 0)
 				w.card(c, "plugin-settings", func() { w.detailSettings(c, pl, d.settings) })
 			}
@@ -567,6 +567,21 @@ func (w *prefsWindow) detailSettings(c *ui.Context, pl *plugin.Plugin, keys []st
 				}
 			})
 			ui.Row(c).Shrink(0).Children(func() { w.pluginSettingControl(c, pl.Name, k, def, values[k]) })
+		})
+	}
+	// Each server's initializationOptions, which settings.json sets by
+	// the server's id.
+	for i, sc := range pl.Contributes.LanguageServers {
+		row := ui.Row(c.Key("init-"+sc.ID)).Padding(12, 16).Gap(12).AlignItems(ui.Center)
+		w.rowHover(row, len(keys)+i > 0)
+		row.Children(func() {
+			ui.Column(c).Gap(3).Grow(1).Shrink(1).MinWidth(0).Children(func() {
+				ui.Text(c, "initializationOptions").Font(w.monoFont()).FontSize(12).TextColor(p.text)
+				ui.Text(c, locales.PluginsInitOptions(sc.ID)).FontSize(12).LineHeight(1.4).TextColor(p.muted)
+			})
+			if ui.Button(c.Key("init-edit"), locales.PrefsEditInJSON()).FontSize(12).Padding(3, 10).Shrink(0).Clicked() {
+				w.inFront(func(a *app) { a.openSettings() })
+			}
 		})
 	}
 }

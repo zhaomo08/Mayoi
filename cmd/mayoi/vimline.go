@@ -3,7 +3,6 @@ package main
 import (
 	"mayoi/internal/remote"
 	"mayoi/locales"
-	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -588,7 +587,7 @@ func (a *app) vimLineView(c *ui.Context, d *editor) {
 	f := a.font
 	bar := a.floating(c, ui.Row(c.Key("vim-line")).Absolute().Bottom(12).Left(16).Right(16).MaxWidth(640).Height(34).
 		Padding(0, 6, 0, 6).Gap(8).AlignItems(ui.Center).Radius(8), false).
-		Transition(ui.ElementTransition{Duration: 130 * time.Millisecond, Colors: true, Enter: &ui.Motion{Y: 8}, Exit: &ui.Motion{Y: 6}})
+		Transition(ui.ElementTransition{Duration: motionShow, Colors: true, Enter: &ui.Motion{Y: 8}, Exit: &ui.Motion{Y: 6}})
 	shake(c, bar, l.shook)
 	bar.Role(ui.RoleToolbar).Label(locales.VimCommandLine())
 	bar.Children(func() {
@@ -846,7 +845,9 @@ func (a *app) vimEx(d *editor, text string) {
 		vimSort(d, l1, l2, arg, bang)
 	case is("e", "edit") && arg != "":
 		a.openFile(a.resolvePath(arg), true)
-	case is("sp", "split", "vs", "vsp", "vsplit"):
+	case is("sp", "split"):
+		a.splitDown()
+	case is("vs", "vsp", "vsplit"):
 		a.splitRight()
 	case is("bn", "bnext", "tabn", "tabnext"):
 		a.cycleTab(1)
@@ -876,7 +877,7 @@ func (a *app) resolvePath(p string) string {
 	if strings.HasPrefix(p, "~/") && !remote.Is(a.root) {
 		return inDir(homeDir(), p[2:])
 	}
-	if path.IsAbs(filepath.ToSlash(p)) || filepath.IsAbs(p) || a.root == "" {
+	if remote.IsAbs(p) || a.root == "" {
 		return p
 	}
 	return inDir(a.root, filepath.ToSlash(p))

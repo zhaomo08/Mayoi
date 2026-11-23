@@ -1,0 +1,117 @@
+# Design
+
+How Mayoi should feel, and the tests that hold it there. A rule here that no test checks is a rule for review; add
+the test when you can. The website has its own, in `website/DESIGN.md`.
+
+The order: it works, then it is easy, then it looks good. Polish never covers a broken interaction.
+
+## Motion
+
+- Every animation takes its length from a token in `cmd/mayoi/motion.go`: `motionTap` (100 ms), `motionLeave`
+  (110), `motionHover` (120), `motionShow` (150), `motionMove` (200) and `motionEnter` (240); a ring that turns while something runs, once each `motionSpin`
+  (1200), and the shapes of what loads the first time pulse at that pace too (`spinRing`, `pulseShape`). `TestMotionUsesTokens` fails on a length
+  written out anywhere else.
+- What a person does a hundred times a day does not move. A dialog opened by a key (the command palette, Quick Open,
+  a picker) shows at once (`keyedOpen`); opened with the pointer, it fades in over `motionShow`. The chosen row of a
+  list moves with the keys: where it glides, as in Sessions, it starts at once and a key that repeats puts it there.
+- Motion says where something came from, or that a state changed. Looking nice is not a reason.
+- Coming in and going out ease out; moving across the screen eases in and out. Nothing eases in.
+- Going out is shorter and smaller than coming in.
+- With Reduce Motion on, nothing moves: colors fade at most (`shake` and `Keyframes` already stop). In Live Preview,
+  blocks and pictures take their new room at once and a task's check fades in without growing.
+- Something visible changes within a frame of the key or click, even when the work takes longer.
+- What refreshes on its own does so quietly; work a person asked for says so, after `readingShows` (300 ms), so that
+  what answers sooner shows nothing that flickers.
+
+## Stability
+
+- A state that changes moves nothing else. A tab's title, its neighbours and its close button stay put when the
+  pointer comes over it, its file gets unsaved changes, or it becomes the chosen tab (`TestTabTitlesHoldStill`). The
+  chosen tab is marked by color, not weight, as a heavier weight widens it.
+- Numbers that change in place use tabular digits (`FontFeatures("tnum")`), as the caret's position in the status
+  bar and find's count (`TestStatusPositionHoldsItsWidth`).
+- Hover never moves what is clicked.
+- A card the pointer asks for waits for it to rest `hoverDwell`, and stays quiet when there is nothing or the server
+  fails: a pointer only passing never asks, and what went on from a name, a key, a press, a scroll or an edit, asks
+  again only once the pointer moves (`TestRestHoverDwell`, `TestRestHoverGestures`).
+- In Live Preview, the marks of what the caret touches show, and a block it goes into shows its source: only the
+  caret's lines change, and a mark shows at the size of its text, so a heading's line keeps its height. A heading
+  has room above it wherever the caret is, so its line never moves as the caret comes (`TestLiveHeadingGaps`). The marks of
+  the lines the caret comes to fade in over `motionHover`, a block it leaves over `motionShow`; their room shows at
+  once. The indent of a nested list keeps its width wherever the caret is, and so do a bullet and a task's box: the
+  caret at them shows their source in the same room, an ordered task's box too. A block whose source is higher than
+  its drawing, as a short formula's, keeps its source's room. The room a block's drawing gives up as the caret goes
+  in, and takes as it leaves, glides over `motionMove`, so the text below moves over, with or without a blank line
+  after it, and turns back from where it is when the caret does (`TestLiveMarkersHoldStill`, `TestLiveBlockGlides`,
+  `TestLiveGlideTurnsBack`, `TestLiveGlideWithoutBlank`, `TestLiveMathHoldsStill`). A callout folded or opened by its
+  chevron glides the same way, its chevron turning over `motionHover` (`TestLiveCalloutFolds`). A link's underline
+  fills in under the pointer over `motionHover`, and nothing else about it changes (`TestLiveLinkHover`). Over a
+  link whose source is hidden the pointer is a hand, and a click opens it as it is let go, as in Obsidian, the caret
+  and the text staying still (`TestLiveLinkClick`); one whose source shows takes the caret, and is a hand with ⌘
+  held. Over a task's box the pointer is a hand too, and its edge darkens. A footnote's label drawn as its number
+  keeps the room of its source. A click on a table's cell edits it in place: its source in an input ringed in the
+  accent, inside the cell's borders, the table drawn around it and its column as wide as the source needs, held so
+  while it is typed in; nothing else moves, and the caret, the cell and the table stay put as the note is parsed
+  again (`TestLiveTableCellEdit`). Tab and Shift-Tab move across cells, Return and the arrows between rows, and
+  Escape, or a move past the table, gives the editor the keyboard, its caret before or after the table
+  (`TestLiveTableCellLeaves`). Tab after the last cell adds a row and edits its first cell, Return in the last row adds
+  one in the same column, and Return in an empty last row takes it away and leaves the table, as in a list
+  (`TestLiveTableAppendRows`, `TestLiveTableHeaderOnly`). The menu of a cell inserts and deletes rows and columns, each
+  one step of undo, the new cell or the one beside the one taken away edited after it; the header stays first and the
+  last column stays, their items off (`TestLiveTableMenu`). A change chosen for a table that changed since is not
+  made, and the cell follows its table as lines come above it (`TestLiveTableStale`). A long table is as high as all
+  of its rows and its columns as wide wherever it is scrolled, the cell a key moves to or a row added scrolls into view
+  as little as shows it, and what the cell writes to the note leaves the view where it is (`TestLiveTableLong`). The
+  wheel over a table, its cells, their links and the cell edited, scrolls the editor as over its text, once for each
+  event, sideways over the cell edited its input (`TestLiveTableWheel`).
+- What loads keeps a place: a picture of the web on its way in Live Preview is a card where it goes, which the
+  picture fades in over as its room glides to its own (`TestLivePictureArrives`); a rendered block shows once it is
+  measured, fading in over `motionShow`.
+
+## States
+
+- Each surface shows each of its states: empty, loading, error, offline or reconnecting, and with no permission.
+- The state gallery renders surfaces in their states across every theme, light and dark, and every language, into
+  one page: `GALLERY=<dir> go test -run TestGallery ./cmd/mayoi`, then open `<dir>/index.html`. Add a state to
+  `galleryStates` when you add a surface.
+
+## Speed
+
+- `TestBudgets` (`cmd/mayoi/budget_test.go`) holds the cost of a frame to a budget: idle, scrolling, typing, typing
+  with find open, Quick Open, the palette, 2,000 sessions scrolled, hovered and filtered, the GitHub view's 500 issues
+  and pull requests scrolled, hovered and filtered, the Table view of 100,000 lines of JSON Lines scrolled, moved
+  through and filtered, a Live Preview table of 1,000 rows idle, scrolled and typed in, an editor scrolled under a
+  hover, and a terminal printing as fast as it can. CI runs it on macOS.
+  A change that needs more raises a budget in the same commit and says why.
+- The figures on the website and in `docs/ARCHITECTURE.md` come from these tests.
+
+## Failure
+
+- A failure says what happened, keeps what the person needs to understand it, and offers the next step.
+- Nothing that failed vanishes: a terminal whose shell exits as it starts stays open with its output and offers
+  **Report…** (`TestTerminalExitedEarlyStays`).
+- **Help → Report a Problem…** opens a new issue with the version and system filled in (`reportURL`). Offer it
+  wherever a failure has no next step of its own.
+
+## Words
+
+`TestCopyRules` checks the catalogs in `locales/`:
+
+- Every language has every message, with the same arguments.
+- A count before a noun uses `{n, plural, …}`, never `{n} files`.
+- An ellipsis is `…`, one character.
+- No "please", "successfully", "click here", "are you sure" or "(s)": say what happens.
+
+And, for review:
+
+- Let the layout explain the screen. Drop a subtitle or helper text that restates a label; if a screen needs one,
+  change the layout. Keep labels of fields and the accessible names of icon buttons.
+- One verb for one action across the app.
+- Confirm only what cannot be undone.
+- A time within a week reads as how long ago ("3 days ago"); older, as a date ("Mar 4", "Mar 4, 2024").
+
+## Look
+
+- The page is flat: shadows only for what floats (`floating`), no box in a box.
+- An inner radius is the outer one less the padding between them.
+- The accent is for the one thing that matters on a screen.

@@ -127,7 +127,7 @@ func repoName(url string) string {
 
 // pluginRowMotion is how a row of a plugin comes and goes, as one is
 // installed or removed: it opens and closes rather than jumps.
-var pluginRowMotion = ui.ElementTransition{Duration: 160 * time.Millisecond, Colors: true,
+var pluginRowMotion = ui.ElementTransition{Duration: motionShow, Colors: true,
 	Enter: &ui.Motion{Collapse: true}, Exit: &ui.Motion{Collapse: true}}
 
 // pluginsPane is the Plugins page: the plugins installed, bundled and
@@ -696,7 +696,14 @@ func (w *prefsWindow) pluginSettingControl(c *ui.Context, name, key string, def 
 	default:
 		id := "plugin:" + name + "." + key
 		var s string
-		if json.Unmarshal(raw, &s) != nil {
+		var words []string
+		switch {
+		case json.Unmarshal(raw, &s) == nil:
+		case def.Type == "array" && json.Unmarshal(raw, &words) == nil:
+			// A list of words, as a server's arguments, edits as they are
+			// typed, apart.
+			s = strings.Join(words, " ")
+		default:
 			s = strings.TrimSpace(string(raw))
 		}
 		buf := w.textBuffer(id, s)
@@ -704,11 +711,14 @@ func (w *prefsWindow) pluginSettingControl(c *ui.Context, name, key string, def 
 		w.draft(id, s, buf, in.Focused(), in.Submitted(), func(v any) {
 			text, _ := v.(string)
 			var out any = text
-			if def.Type == "number" {
+			switch def.Type {
+			case "number":
 				var f float64
 				if _, err := fmt.Sscan(text, &f); err == nil {
 					out = f
 				}
+			case "array":
+				out = strings.Fields(text)
 			}
 			w.setPluginSetting(name, key, out, nil)
 		})

@@ -24,6 +24,7 @@ All of Mayoi's files are in one data folder:
 | `sync.json`         | Mayoi         | [Settings sync](#settings-sync): the account, and the settings as last synced     |
 | `crash.log`         | Mayoi         | Mayoi's version and system, then what ended it if it crashed, with every stack    |
 | `crashes/`          | Mayoi         | The last 10 crash logs, by time; `.sent` or `.unsent` once asked about            |
+| `usage.json`        | Mayoi         | [`usageStats`](#the-rest): the day and version of the last count sent             |
 
 Plugins, user scripts and what plugins store are in `~/.mayoi` instead: see [PLUGINS.md](PLUGINS.md#where-they-are).
 
@@ -68,28 +69,36 @@ takes its default.
 | `terminalFontFamily`    | `""`          | Font names, separated by commas                             |                                                |
 | `terminalFontSize`      | `0`           | 0, or 9 to 28                                               |                                                |
 | `terminalCopyOnSelect`  | `true`        | `true`, `false`                                             |                                                |
-| `theme`                 | `""`          | `""` (Mayoi), `"matrix"`, `"claude"`, `"qoder"`, `"grokbot"`, `"cursor"`, `"purplegold"`, `"pumpkin"`, `"witchsbrew"`, `"bloodmoon"` | **View → Theme**, **Color Theme…**             |
+| `theme`                 | `""`          | `""` (Mayoi), `"matrix"`, `"claude"`, `"qoder"`, `"grokbot"`, `"cursor"`, `"purplegold"`, `"pumpkin"`, `"witchsbrew"`, `"bloodmoon"`, `"gtavi"` | **View → Theme**, **Color Theme…**             |
 | `appearance`            | `""`          | `""` (follow the system), `"light"`, `"dark"`               | **View → Theme**                               |
 | `sidebarRight`          | `false`       | `true`, `false`                                             | **View → Sidebar on Right**                    |
 | `panelPosition`         | `""`          | `""` (bottom), `"left"`, `"right"`                          | **View → Panel Position**                      |
 | `terminalLocation`      | `""`          | `""` (the panel), `"editor"`                                | **View → New Terminals in Editor Area**        |
+| `terminalShell`         | `""`          | `""` (your usual shell), a path to a program, or a name on `PATH` |                                          |
+| `terminalShellArgs`     | none          | A list of arguments for `terminalShell`                     |                                                |
 | `terminalBackend`       | `""`          | `""` (Mayoi), `"hc"` (herdr-core)                           |                                                |
 | `terminalBackendHcPath` | `""`          | A path to `hc`, a folder that has it, or a name on `PATH`   |                                                |
 | `terminalBackendHcEnv`  | none          | A list of `KEY=value` environment variables for `hc`        |                                                |
 | `terminalBackendHcShowInHerdr` | `true` | `true`, `false`                                      |                                                |
+| `agentSessionsClaudeDirs` | none        | A list of more Claude Code config folders                   |                                                |
 | `projectTabs`           | `false`       | `true`, `false`                                             | **View → Project Tabs**                        |
 | `projectTabStyle`       | none          | A label, color and icon for each folder                     | A square's context menu on the rail            |
 | `locale`                | `""`          | `""` (follow the system), `"en"`, `"zh-Hans"`, `"ja"`       | **View → Language**                            |
 | `autoSave`              | `true`        | `true`, `false`                                             | **File → Auto Save**                           |
 | `wordWrap`              | `false`       | `true`, `false`                                             | **View → Word Wrap**                           |
+| `trimTrailingWhitespace` | `false`      | `true`, `false`                                             |                                                |
+| `tabSize`               | `4`           | `1` to `8`                                                  |                                                |
+| `jsonlMode`             | `""`          | `""` (table), `"source"`                                    | **View → Open JSON Lines As**                  |
 | `editorAgentContext`    | `false`       | `true`, `false`                                             | Only this file                                 |
+| `editorHover`           | `true`        | `true`, `false`                                             | Only this file                                 |
 | `previewMermaid`        | `true`        | `true`, `false`                                             | Only this file                                 |
 | `previewMath`           | `true`        | `true`, `false`                                             | Only this file                                 |
-| `markdownPreview`       | `false`       | `true`, `false`                                             | **View → Preview Markdown on Open**            |
+| `markdownMode`          | `""`          | `""` (source), `"live"`, `"reading"`                        | **View → Open Markdown As**                    |
 | `vim`                   | `false`       | `true`, `false`                                             | **View → Vim Mode**                            |
 | `vimCtrlKeys`           | `false`       | `true`, `false`                                             | Only this file                                 |
 | `blame`                 | `true`        | `true`, `false`                                             | **Git → Inline Blame**                         |
 | `diffLayout`            | `""`          | `""` (side by side when wide enough), `"split"`, `"inline"` | A diff's **Layout** button                     |
+| `diffFiles`             | `""`          | `""` (every file in one scroll), `"one"` (one file at a time, not in a commit's changes) | A diff's **Layout** menu                   |
 | `diffCrossFiles`        | `""`          | `""` (say it, and cross on one more step), `"always"`, `"never"` | Only this file                            |
 | `diffHighlight`         | `""`          | `""` (changed words), `"line"`, `"char"`                       | A diff's **Highlight** menu                |
 | `diffWhitespace`        | `""`          | `""` (exact), `"eol"`, `"all"`, `"blank"`                      | A diff's **Whitespace** menu               |
@@ -100,13 +109,17 @@ takes its default.
 | `explorerCompactFolders` | `false`     | `true`, `false`                                                | **View → Compact Folders**                 |
 | `scmTree`               | `false`       | `true`, `false`                                             | **View as Tree** in Source Control's menu      |
 | `scmAllBranches`        | `false`       | `true`, `false`                                             | **Show All Branches** in Source Control's menu |
+| `prDeleteBranch`        | `false`       | `true`, `false`                                             | **Merge** in a pull request's tab             |
 | `syncIgnored`           | none          | Keys, `"settings.json"`, `"keybindings.json"`               | The [settings sync](#settings-sync) panel      |
 | `aiModel`               | `""`          | `""` (`deepseek-flash`), or a model of the AI gateway       | Only this file                                 |
 | `aiSecretFiles`         | none          | Patterns of files AI commit messages send by name only      | Only this file                                 |
 | `crashReports`          | `""`          | `""` (ask), `"always"`, `"never"`                           | **Don't ask again** when Mayoi asks           |
+| `usageStats`            | `true`        | `true`, `false`                                             | Only this file                                 |
+| `confirmBeforeQuit`     | `true`        | `true`, `false`                                             | **Don't ask again** when Mayoi asks to quit   |
 | `plugins`               | none          | Each plugin's own settings, and `"enabled": false` to turn it off | The **Plugins** page of the settings window |
 | `formatOnSave`          | none          | `true` for each language to format as it saves, or `"*"` for all | Only this file                          |
 | `formatters`            | none          | The formatter of each language, where plugins offer several | Only this file                                 |
+| `languageServers`       | none          | Each language server's `initializationOptions`, by its id   | Only this file                                 |
 
 ### Language
 
@@ -153,9 +166,9 @@ differ in width lines them up only roughly.
 
 ### The rest
 
-- **`theme`** is Mayoi's own theme, The Matrix, Claude, Qoder, Grok Bot, Cursor, Purple Gold, or a Halloween theme:
-  `"pumpkin"` for Jack-o'-Lantern, `"witchsbrew"` for Witch's Brew and `"bloodmoon"` for Blood Moon. The Matrix, Purple
-  Gold and the Halloween themes are always dark, so they ignore `appearance`.
+- **`theme`** is Mayoi's own theme, The Matrix, Claude, Qoder, Grok Bot, Cursor, Purple Gold, a Halloween theme:
+  `"pumpkin"` for Jack-o'-Lantern, `"witchsbrew"` for Witch's Brew and `"bloodmoon"` for Blood Moon, or `"gtavi"` for
+  GTA VI. The Matrix, Purple Gold, the Halloween themes and GTA VI are always dark, so they ignore `appearance`.
 - **`panelPosition`** is where the terminal panel is: `""` or `"bottom"` below the editors, `"left"` or `"right"` at a
   side of the window. At a side it sits past the sidebar, so with the sidebar on the same side the panel is the outer
   of the two.
@@ -163,6 +176,37 @@ differ in width lines them up only roughly.
   in the column files open in, as **New Terminal in Editor Area** does. It applies to New Terminal (⌃⇧`) and the
   Explorer's **Open in Terminal**. Toggle Terminal (⌃`), the title bar's terminal button and the panel's **+** still
   open the panel.
+- **`terminalShell`** is the program a new local terminal runs, as **Shell** in **Settings → Terminal**: a path to
+  it, which may have spaces, or a name found on `PATH`. Empty runs the shell Mayoi picks: `$SHELL` as a login shell,
+  and on Windows `pwsh.exe`, then `powershell.exe`, then the command prompt. It applies to terminals opened after
+  the change, in the panel or a tab of the editor area, without a restart; those already running keep their program.
+  Terminals of a remote folder run their host's shell, and with `terminalBackend` `"hc"` herdr-core starts its own,
+  so neither uses it. A program that can't start shows why, as a path that isn't there. Mayoi doesn't install the
+  program: it runs the one you have. Elsewhere than Windows, add `-l` to `terminalShellArgs` for a login shell.
+- **`terminalShellArgs`** are the arguments `terminalShell` gets, as **Shell Arguments**, one per entry. Each one
+  reaches the program as it is written, never split, quoted or expanded by a shell, so `"a b"` is one argument. The
+  settings window adds an entry on Enter or a comma, and trims spaces and repeats: write an argument with a comma or
+  one given twice in `settings.json`.
+
+  PowerShell 7 Preview, at the path its installer uses, in `settings.json`:
+
+  ```json
+  "terminalShell": "C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe",
+  "terminalShellArgs": ["-NoLogo"]
+  ```
+
+  or in **Settings → Terminal**, **Shell** `C:\Program Files\PowerShell\7-preview\pwsh.exe` and **Shell Arguments**
+  `-NoLogo`. A name such as `pwsh.exe` works too, and runs the first one found on `PATH`.
+
+  Git Bash from Git for Windows, as an interactive login shell, so that it reads `~/.bash_profile`:
+
+  ```json
+  "terminalShell": "C:\\Program Files\\Git\\bin\\bash.exe",
+  "terminalShellArgs": ["--login", "-i"]
+  ```
+
+  or **Shell** `C:\Program Files\Git\bin\bash.exe` and **Shell Arguments** `--login` and `-i`. Use the path Git
+  for Windows has on your machine.
 - **`terminalBackend`** is what runs a terminal's shell: `""` Mayoi, or `"hc"` a terminal of
   [herdr-core](https://herdr.dev/core/), which `hc attach` shows. Its shell keeps running as the window closes or Mayoi
   quits, where `hc ls` and the Herdr app see it, and the next start attaches to it again, in its tab or the panel,
@@ -186,6 +230,9 @@ differ in width lines them up only roughly.
   space for each folder, a tab for each terminal. Terminals already running there show up as Mayoi attaches them again.
   Turned off, new terminals stay out of Herdr, and those already there stay until closed. Closing one in either app
   ends its shell, which closes it in the other. Terminals of a remote folder stay out of Herdr.
+- **`agentSessionsClaudeDirs`** lists more Claude Code config folders whose sessions the **Sessions** view shows, as
+  `["~/work/claude"]`. Without it the view already reads `~/.claude`, each `~/.claude-*` folder and the folder
+  `CLAUDE_CONFIG_DIR` names. It stays on each machine.
 - **`projectTabs`** keeps every folder open in one window, as project tabs on a rail on its left, rather than a
   window for each. Changing it gathers the windows into one, or parts them, at once.
 - **`projectTabStyle`** gives a project's square on the rail its own label, up to two characters, in place of its
@@ -199,18 +246,34 @@ differ in width lines them up only roughly.
 - **`autoSave`** saves a changed file a moment after you stop typing, and when you leave it.
 - **`wordWrap`** wraps long lines at the edge of the editor. **⌥Z** wraps or unwraps one tab only, until this
   setting changes.
+- **`trimTrailingWhitespace`** removes the spaces and tabs at the ends of lines as you save a file, after any
+  formatting, in one step that **Undo** takes back. In Markdown, two or more spaces ending a line of text stay, as
+  they make a line break. Auto Save leaves the line the caret is on. **Trim Trailing Whitespace** in the command
+  palette trims the file now.
+- **`tabSize`** is how many columns a tab takes in the editor, the same on every system. It doesn't change
+  what a key inserts: a file indented with spaces keeps its own indent size.
+- **`jsonlMode`** is how JSON Lines files, .jsonl and .ndjson, open: as a table, a row per line and a column per
+  key, with the chosen row whole below it, or as their source. The buttons at the right of a tab's path and **⇧⌘V**
+  switch a tab between them. The table reads the text as it is, edits made in the source included.
 - **`editorAgentContext`** shows a **+** beside the line under the pointer in ordinary files. Click it
   to comment on that line or the selected lines in an inline review card; an empty comment collects the
   code alone. Collect snippets across files and send them together from the editor toolbar. It is off
   by default; changes apply immediately and do not discard pending items. Closing the draft’s tab,
   starting another comment, or jumping to code keeps its text in the Review queue. **Send** saves the
   current draft before sending the batch.
-- **`previewMermaid`** draws the `mermaid` code blocks of a Markdown preview as diagrams. Turn it off to show
-  them as code. A `.mmd` or `.mermaid` file's own preview draws its diagram either way.
-- **`previewMath`** draws the LaTeX math of a Markdown preview, between `$` and `$`, `$$` and `$$`, or in a
-  `math` code block, as formulas. Turn it off to show the source.
-- **`markdownPreview`** opens Markdown files, .mdx included, rendered rather than as text. **⇧⌘V** still shows
-  the text, and the choice of a tab is remembered for the session.
+- **`editorHover`** shows a name's hover card, from its language server or a plugin, once the pointer rests on it
+  in the editor for half a second, as **Go → Show Hover** does at the caret. Move into the card to read or scroll
+  it; it closes as the pointer leaves, on **Esc**, a click or a key. Turn it off to see hover cards only when asked.
+- **`previewMermaid`** draws the `mermaid` code blocks of Markdown as diagrams, in Live Preview and the Reading
+  view. Turn it off to show them as code. A `.mmd` or `.mermaid` file's own preview draws its diagram either way.
+- **`previewMath`** draws the LaTeX math of Markdown, between `$` and `$`, `$$` and `$$`, or in a `math` code
+  block, as formulas: in the Reading view, and in Live Preview but for `math` code blocks, which show as code. Turn
+  it off to show the source.
+- **`markdownMode`** is how Markdown files, .mdx included, open: as their source, as Live Preview, which you edit
+  as it reads, its marks showing only where the caret is, a click on a table's cell editing it in place and its menu adding rows and columns, or rendered
+  in the Reading view. The buttons at the right
+  of a tab's path, **⌥⌘V** and **⇧⌘V** switch a tab between them, and the choice of a tab is remembered for the
+  session. `markdownPreview: true`, which older versions wrote, reads as `"reading"`.
 - **`diffHighlight`** chooses whether changed lines show word-level, character-level or line-level tinting. The
   highlighting changes how a diff looks; block actions still use whole line hunks.
 - **`diffContext`** keeps that many unchanged lines around each diff hunk visible and folds the rest.
@@ -230,6 +293,8 @@ differ in width lines them up only roughly.
   `.venv` and `target` stay separate and are read only when expanded.
 - **`scmTree`** lists Source Control's changes in a tree of their folders, rather than by path.
 - **`scmAllBranches`** shows the commits of every branch and tag, not only those of the branch checked out.
+- **`prDeleteBranch`** has **Merge** in a pull request's tab delete its branch on GitHub once it merged, when the
+  branch is of the same repository. The branch of the work tree stays.
 - **`aiModel`** is the model of Mon's AI gateway that writes commit messages, `deepseek-flash` when empty. The models
   your account can use are listed at `https://mon.sorrycc.dev/api/v1/ai/v1/models`.
 - **`crashReports`** is what Mayoi does at launch with the crash logs of the last runs: `""` asks whether to send them
@@ -237,6 +302,14 @@ differ in width lines them up only roughly.
   and has your home folder taken out, but not other paths, such as `/Volumes/...` or `/opt/...`. **Show Report** in
   the question opens the logs as they would be sent. Only releases send reports, and builds started with
   `MAYOI_MON_URL`. Enter answers **Don't Send**.
+- **`usageStats`** sends an anonymous count of Mayoi's use to Umami at `umami.sorrycc.dev`: an `active` event once a
+  day while Mayoi is open, and an `update` event on the first launch of a new version. Each holds only Mayoi's
+  version (and the one before, for `update`), the system and its architecture, and the language of the menus; never a
+  path, a file, a name or your account. Turn it off to send nothing. `DO_NOT_TRACK=1` in Mayoi's environment turns
+  it off too. Only releases send, and builds started with `MAYOI_UMAMI_URL`. See [PRIVACY.md](PRIVACY.md).
+- **`confirmBeforeQuit`** asks before `Cmd+Q` and **Mayoi → Quit Mayoi** quit, on macOS. Quitting from the Dock, to
+  update, to log out or shut down, and closing the last window never ask. **Don't ask again** turns it off once you
+  choose **Quit**; **Settings → General → Confirm Before Quit** turns it back on.
 - **`aiSecretFiles`** adds patterns of files whose lines **Write Commit Message with AI** never sends, after
   Mayoi's own list of `.env` files, keys and credentials. A name matches in any folder, a path such as
   `config/prod.yml` matches the end of a file's path, and `/config/prod.yml` its start. `**` is any run of folders,
@@ -261,6 +334,43 @@ differ in width lines them up only roughly.
   "formatters": { "typescript": "biome" }
 }
 ```
+
+### Language servers
+
+**`languageServers`** gives a language server `initializationOptions` of your own, by the server's id, without changing
+its plugin. The ids of the bundled servers are `rust-analyzer.server`, `gopls.server`, `clangd.server`,
+`basedpyright.server` and `typescript-language-server.server`. **Plugins → Show Language Servers** and a plugin's
+details in the settings window show the id of every server.
+
+```json
+{
+  "languageServers": {
+    "rust-analyzer.server": {
+      "initializationOptions": { "check": { "command": "clippy" }, "cargo": { "features": "all" } }
+    },
+    "gopls.server": { "initializationOptions": { "staticcheck": true, "gofumpt": true } },
+    "clangd.server": { "initializationOptions": { "fallbackFlags": ["-std=c++20"] } },
+    "typescript-language-server.server": {
+      "initializationOptions": { "preferences": { "includeInlayParameterNameHints": "all" } }
+    }
+  }
+}
+```
+
+- Your options go over the server's own, those its `plugin.json` gives, with its settings filled in, or its resolver
+  returns. An object adds to the object there key by key, at any depth, and keeps the keys you leave out.
+- Any other value takes the place of what was there: an array, a string, a number, `true` or `false`.
+- `null` takes a key away, as `{"tsserver": {"path": null}}` does `typescript-language-server`'s `tsserver.path`.
+  `"initializationOptions": null` sends none at all.
+- Values go as you write them: numbers keep every digit, and `${settings.path}` is only text.
+- Options that are not an object or `null` are left out, and the plugin's log says so. The log never shows the options.
+- An id no server has is ignored, until a plugin brings that server.
+- A server reads `initializationOptions` once, as it starts. Saving a change restarts the servers whose options
+  changed, in every folder, and no other. A server starts with its plugin's own again once you take yours away.
+- Options apply to folders on SSH hosts too, as they are sent with the server's start. A folder's
+  `.mayoi/settings.json` can't set them, as they can name programs a server runs.
+- Some servers, as basedpyright, read their settings from `workspace/configuration` rather than
+  `initializationOptions`; Mayoi doesn't set those yet. Which program a server runs is its plugin's `path` setting.
 
 ### Example
 
@@ -333,7 +443,7 @@ window. **File → Open Folder Settings (JSON)** opens the file, and creates it 
 window, choose the folder in the menu at the top right: it lists only the preferences a folder can set, and the arrow
 beside one returns it to your setting.
 
-A folder can set these: `autoSave`, `wordWrap`, `markdownPreview`, `previewMermaid`, `previewMath`,
+A folder can set these: `autoSave`, `wordWrap`, `trimTrailingWhitespace`, `jsonlMode`, `markdownMode`, `previewMermaid`, `previewMath`,
 `terminalCopyOnSelect`, `diffHighlight`, `diffWhitespace`, `diffContext`, `diffCrossFiles`, `mergeAutoApply`,
 `blame`, `aiModel`, `vim`, `vimCtrlKeys`, `formatOnSave` and `formatters`.
 
@@ -375,8 +485,9 @@ code and approve it. The dialog counts down until the code expires.
 What syncs:
 
 - **`settings.json`**: every preference, except `scmRepositoryOpen` and `scmRemotes`, which remember Source Control's
-  panels on each machine, `projectTabStyle`, kept by this machine's folders, `terminalBackendHcPath` and
-  `terminalBackendHcEnv`, which pick the program a terminal runs and may hold secrets, and `syncIgnored`. When two
+  panels on each machine, `projectTabStyle`, kept by this machine's folders, `terminalShell`,
+  `terminalShellArgs`, `terminalBackendHcPath` and `terminalBackendHcEnv`, which pick the program a terminal runs
+  and may hold secrets, and `syncIgnored`. When two
   machines change different preferences, both changes stay. When they change the same one, the machine that syncs last
   wins.
 - **`keybindings.json`**, as text, comments and all. When it changed on this machine and on another since they last
@@ -450,10 +561,12 @@ parse is left alone until it does, and a key or a condition Mayoi can't read is 
   `runCommands` runs its `commands` in order, each once the edits and the Git commands of the one before are done, and
   stops at an error. `vscode.open` opens the file of its `args`: an absolute path, one from `~`, or one in the folder.
   `type` types the `text` of its `args` in the editor or the terminal, and `workbench.action.terminal.sendSequence`
-  sends it to the terminal. Pressing the key of a command Mayoi doesn't have says so.
+  sends it to the terminal. A command that `mayoi run` gives an argument after `=` takes it as its `args`, as
+  `{ "key": "ctrl+. g n", "command": "file.openFolder", "args": "~/Projects/notes" }`. Pressing the key of a command
+  Mayoi doesn't have says so.
 - **`when`** is when it applies: `editorTextFocus`, `editorFocus`, `inputFocus`, `textInputFocus`,
   `filesExplorerFocus`, `terminalFocus`, `terminalHasBeenCreated`, `terminalIsOpen`, `sideBarVisible`,
-  `editorHasSelection`, `isMac`, `isLinux` and `isWindows`, with `!`, `&&`, `||` and parentheses. Other names don't hold.
+  `editorHasSelection`, `editorHasMultipleSelections`, `isMac`, `isLinux` and `isWindows`, with `!`, `&&`, `||` and parentheses. Other names don't hold.
 
 The keys of the file take the place of Mayoi's own: the menus drop a key the file binds, ⌘1 to ⌘9 and ⌃R let the file
 have theirs, and the command palette shows the file's keys. The shortcuts apply in the editor, the terminal, the
@@ -492,17 +605,24 @@ Mayoi's own, as VS Code writes them:
 
 The shortcuts are macOS's with Ctrl for ⌘, and the hints show them so, but for those VS Code has others for:
 
-| Command                                  | macOS    | Windows and Linux |
-| ---------------------------------------- | -------- | ----------------- |
-| Find Next, Find Previous                 | ⌘G, ⇧⌘G  | F3, Shift+F3      |
-| Replace                                  | ⌥⌘F      | Ctrl+H            |
-| Show the tab 1 to 8, the last            | ⌘1 to ⌘9 | Alt+1 to Alt+9    |
-| Save All, Open Folder in New Window      | ⌥⌘S, ⌥⌘O | none              |
-| Focus Next Column, Focus Previous Column | ⌥⌘→, ⌥⌘← | none              |
+| Command                                  | macOS      | Windows and Linux                                    |
+| ---------------------------------------- | ---------- | ---------------------------------------------------- |
+| Find Next, Find Previous                 | ⌘G, ⇧⌘G    | F3, Shift+F3                                         |
+| Replace                                  | ⌥⌘F        | Ctrl+H                                               |
+| Show the tab 1 to 8, the last            | ⌘1 to ⌘9   | Alt+1 to Alt+9                                       |
+| Save All, Open Folder in New Window      | ⌥⌘S, ⌥⌘O   | none                                                 |
+| Focus Next Column, Focus Previous Column | ⌥⌘→, ⌥⌘←   | none                                                 |
+| Split Right, Split Down                  | ⌘\, none   | Ctrl+\, Ctrl+Shift+D                                 |
+| New Column Right, New Column Below       | ⌘D, ⇧⌘D    | none                                                 |
+| Add Next Occurrence                      | ⌃⌘G        | Ctrl+D                                               |
+| Add Cursor Above, Add Cursor Below       | ⌥⌘↑, ⌥⌘↓   | Ctrl+Alt+Up, Ctrl+Alt+Down on Windows; none on Linux |
+| Column Select Up, Down, Left, Right      | ⇧⌥⌘ arrows | Ctrl+Shift+Alt arrows on Windows; none on Linux      |
 
 Ctrl with Alt is AltGr there, which types text, so no shortcut takes it: bind those commands in `keybindings.json`,
 as `{ "key": "ctrl+k s", "command": "workbench.action.files.saveAll" }`. A file can tell the systems apart with
-`isWindows`, `isLinux` and `isMac`.
+`isWindows`, `isLinux` and `isMac`. With the arrows, which AltGr types nothing with, Windows takes VS Code's Ctrl+Alt
+keys to add cursors and select a column. Linux has none for them, as Xfce and older GNOME switch workspaces with Ctrl+Alt
+and the arrows: bind your own, as `{ "key": "ctrl+shift+alt+down", "command": "cursorColumnSelectDown" }`.
 ### `diffWhitespace`
 
 Controls which whitespace participates in diff comparison: `""` for exact,

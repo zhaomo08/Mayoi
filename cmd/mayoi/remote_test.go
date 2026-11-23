@@ -10,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"mayoi/internal/cli"
 	"mayoi/internal/remote"
 	"mayoi/internal/settings"
+	"mayoi/locales"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -56,7 +59,7 @@ func TestRemoteMarkdownPreviewOfflineRestore(t *testing.T) {
 		t.Run(map[bool]string{false: "source", true: "preview"}[preview], func(t *testing.T) {
 			hs := newHarness(t, true)
 			s := settings.Default()
-			s.MarkdownPreview = !preview
+			s.MarkdownMode = map[bool]string{false: "reading"}[preview]
 			w := s.NewWindow()
 			w.Folder = hs.root
 			path := remote.Path("offline.invalid", "/srv/app/README.md")
@@ -86,7 +89,7 @@ func TestRemoteNewMarkdownFileOpensAsSource(t *testing.T) {
 	t.Setenv("MAYOI_SSH_TEST_HOST", "")
 	hs, c, dir := remoteHarness(t)
 	a, tt := hs.a, hs.tt
-	a.settings.MarkdownPreview = true
+	a.settings.MarkdownMode = "reading"
 	if _, err := c.Run(nil, `printf '# Readme\n\nRemote words.\n' > "$1/README.md"`, dir); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +97,7 @@ func TestRemoteNewMarkdownFileOpensAsSource(t *testing.T) {
 	hs.settle()
 	tt.Type("notes.md")
 	tt.Key(0, ui.KeyEnter)
-	hs.untilLong("the new remote file", func() bool {
+	hs.until("the new remote file", func() bool {
 		d := a.activeEditor()
 		return d != nil && d.path == hs.path("notes.md") && !d.unread()
 	})
@@ -108,12 +111,12 @@ func TestRemoteNewMarkdownFileOpensAsSource(t *testing.T) {
 		t.Fatalf("the new remote file holds %q", got)
 	}
 	a.saveDoc(d.document, nil)
-	hs.untilLong("the save", func() bool { return d.sync != syncSaving && !d.dirty() })
+	hs.until("the save", func() bool { return d.sync != syncSaving && !d.dirty() })
 	if got, err := c.ReadFile(dir+"/notes.md", 0); err != nil || string(got) != "# hello" {
 		t.Fatalf("on the host: %q, %v", got, err)
 	}
 	a.openFile(hs.path("README.md"), true)
-	hs.untilLong("the remote preview", func() bool {
+	hs.until("the remote preview", func() bool {
 		d := a.activeEditor()
 		return d != nil && d.path == hs.path("README.md") && d.sync != syncLoading && d.preview != nil && d.preview.loaded
 	})
@@ -254,18 +257,70 @@ git init -q && git -c user.email=t@t -c user.name=t add -A && git -c user.email=
 	t.Cleanup(a.shutdown)
 	tt := ui.NewTester(a.view, 1200, 760)
 	hs := &harness{t: t, a: a, h: h, tt: tt, root: root}
-	hs.untilLong("the remote tree", func() bool { return tt.HasText("main.go") && tt.HasText("src") })
+	hs.until("the remote tree", func() bool { return tt.HasText("main.go") && tt.HasText("src") })
 	t.Cleanup(a.shutdown)
 	return hs, c, dir
 }
 
-// remoteOnly skips a test of remote folders where Mayoi reaches none, as
-// on Windows, whose paths are not POSIX's and which has no shell for the
-// fake ssh.
+// remoteOnly skips a test whose fake ssh is a shell script. Windows
+// cannot run that script. Remote SSH itself is available there.
 func remoteOnly(t testing.TB) {
 	t.Helper()
-	if !remoteSupported {
-		t.Skip("no remote folders on " + runtime.GOOS)
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake ssh is a shell script")
+	}
+}
+
+// TestRemoteEntries: File → Remote SSH, the welcome page and the command
+// palette offer Remote SSH, and mayoi --remote does not refuse.
+func TestRemoteEntries(t *testing.T) {
+	s := settings.Default()
+	a := newApp(&fakeHost{}, s, s.NewWindow())
+	t.Cleanup(a.shutdown)
+	tt := ui.NewTester(a.view, 1200, 760)
+	for range 12 {
+		step(tt)
+	}
+	if !tt.HasText(locales.CmdRemoteConnect()) {
+		t.Fatalf("welcome has no Remote SSH: %q", tt.Texts())
+	}
+	var ssh *mygo.MenuItem
+	for _, menu := range a.menu(false, func(string, *mygo.Window) {}).Items() {
+		for _, sub := range menu.Submenu {
+			if sub.Label == locales.MenuRemoteSSH() {
+				ssh = sub
+			}
+		}
+	}
+	if ssh == nil {
+		t.Fatal("File menu has no Remote SSH")
+	}
+	if !slices.ContainsFunc(ssh.Submenu, func(it *mygo.MenuItem) bool {
+		return it != nil && it.Label == locales.CmdRemoteConnect()
+	}) {
+		t.Fatal("Remote SSH has no connect command")
+	}
+	found := false
+	for _, e := range a.paletteEntries() {
+		if e.id == "remote.connect" && strings.HasPrefix(e.title, locales.MenuRemoteSSH()) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("command palette has no remote.connect")
+	}
+	if !a.blank() {
+		t.Fatal("the window is not empty")
+	}
+	m := &mayoi{s: s}
+	f := &frame{m: m}
+	h := &desktop{m: m, a: a, f: f}
+	f.active = h
+	m.wins = []*desktop{h}
+	var reply cli.Reply
+	m.serve(cli.Request{Remote: "box:/srv/app"}, func(r cli.Reply) { reply = r })
+	if reply.Error != "" {
+		t.Fatalf("mayoi --remote: %s", reply.Error)
 	}
 }
 
@@ -279,19 +334,6 @@ func useFakeSSH(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// untilLong draws frames until ok, as until does, waiting longer, for a
-// host over the network.
-func (hs *harness) untilLong(what string, ok func() bool) {
-	hs.t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for !ok() {
-		if time.Now().After(deadline) {
-			hs.t.Fatalf("timed out waiting for %s: %q", what, hs.tt.Texts())
-		}
-		hs.settle()
-	}
-}
-
 // TestRemoteFolder works in a folder of a real host: the tree, a file
 // opened, edited and saved, a change made on the host, Git, search, and
 // the connection ended and made again.
@@ -303,7 +345,7 @@ func TestRemoteFolder(t *testing.T) {
 	}
 	main := hs.path("main.go")
 	a.openFile(main, true)
-	hs.untilLong("main.go to be read", func() bool {
+	hs.until("main.go to be read", func() bool {
 		d := a.activeEditor()
 		return d != nil && d.sync != syncLoading && strings.HasPrefix(d.buf.String(), "package main")
 	})
@@ -314,13 +356,13 @@ func TestRemoteFolder(t *testing.T) {
 	}
 	d.edit(d.sel, textEdit{0, 0, "// edited\n"})
 	a.saveDoc(d.document, nil)
-	hs.untilLong("the save", func() bool { return d.sync != syncSaving && !d.dirty() })
+	hs.until("the save", func() bool { return d.sync != syncSaving && !d.dirty() })
 	got, err := c.ReadFile(dir+"/main.go", 0)
 	if err != nil || !strings.HasPrefix(string(got), "// edited\npackage main") {
 		t.Fatalf("on the host: %q, %v", got, err)
 	}
 	// Git sees the change.
-	hs.untilLong("the status", func() bool {
+	hs.until("the status", func() bool {
 		e, ok := a.git.entries[main]
 		return ok && e.Letter() == 'M'
 	})
@@ -328,37 +370,37 @@ func TestRemoteFolder(t *testing.T) {
 	if _, err := c.Run(nil, `sleep 1; printf 'changed on the host\n' > "$1/main.go"; : > "$1/new.txt"`, dir); err != nil {
 		t.Fatal(err)
 	}
-	hs.untilLong("the change on the host", func() bool { return d.buf.String() == "changed on the host\n" })
-	hs.untilLong("the new file", func() bool { return hs.tt.HasText("new.txt") })
+	hs.until("the change on the host", func() bool { return d.buf.String() == "changed on the host\n" })
+	hs.until("the new file", func() bool { return hs.tt.HasText("new.txt") })
 	// Search finds the files on the host.
 	hs.searchFor("needle")
-	hs.untilLong("the search", func() bool {
+	hs.until("the search", func() bool {
 		return slices.Equal(resultFiles(&a.inFiles), []string{"src/a.txt"})
 	})
 	// Disconnected, the file is read-only and the banner says so.
 	a.disconnect()
-	hs.untilLong("the disconnection", func() bool { return a.link.kind == linkStopped })
+	hs.until("the disconnection", func() bool { return a.link.kind == linkStopped })
 	if !hs.tt.HasText("Reconnect") || !d.locked() {
 		t.Fatalf("offline: banner %v, locked %v", hs.tt.HasText("Reconnect"), d.locked())
 	}
 	hs.shot("remote-03-offline")
 	// The box of the folders of the host.
 	a.reconnect()
-	hs.untilLong("the connection", func() bool { return a.link.kind == linkOnline })
+	hs.until("the connection", func() bool { return a.link.kind == linkOnline })
 	a.openRemoteFolder()
-	hs.untilLong("the box of the folders", func() bool { return a.remotePick.stage == pickFolder })
+	hs.until("the box of the folders", func() bool { return a.remotePick.stage == pickFolder })
 	if a.remotePick.query != c.Info().Home+"/" {
 		t.Errorf("the box starts at %q", a.remotePick.query)
 	}
 	// The folder of the folder open, which has it.
 	a.remotePick.query = filepath.Dir(dir) + "/"
-	hs.untilLong("the folders of the host", func() bool { return slices.Contains(a.pickRows(), filepath.Base(dir)) })
+	hs.until("the folders of the host", func() bool { return slices.Contains(a.pickRows(), filepath.Base(dir)) })
 	hs.shot("remote-04-folders")
 	a.closeRemotePicker()
-	hs.untilLong("the connection again", func() bool { return a.link.kind == linkOnline && !d.locked() })
+	hs.until("the connection again", func() bool { return a.link.kind == linkOnline && !d.locked() })
 	// New files and folders go to the host.
 	a.newRemoteEntry(a.root, hs.path("made/by/mayoi.txt"), false)
-	hs.untilLong("the new file to open", func() bool {
+	hs.until("the new file to open", func() bool {
 		ed := a.activeEditor()
 		return ed != nil && ed.path == hs.path("made/by/mayoi.txt") && ed.sync != syncLoading
 	})
@@ -378,7 +420,7 @@ func TestRemoteFolder(t *testing.T) {
 	tt2 := ui.NewTester(a2.view, 1200, 760)
 	t.Cleanup(a2.shutdown)
 	hs2 := &harness{t: t, a: a2, h: &fakeHost{}, tt: tt2, root: hs.root}
-	hs2.untilLong("the tab of the last session", func() bool {
+	hs2.until("the tab of the last session", func() bool {
 		ed := a2.activeEditor()
 		return ed != nil && ed.path == main && ed.sync != syncLoading && ed.buf.Len() > 0
 	})

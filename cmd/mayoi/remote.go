@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
+	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -18,9 +20,32 @@ import (
 	"mayoi/locales"
 )
 
-// remoteSupported is whether Mayoi reaches folders over SSH here: the
-// paths of remote files are POSIX's, as on macOS and Linux.
-var remoteSupported = runtime.GOOS != "windows"
+// remoteSupported is Remote SSH. It is offered on macOS, Linux and
+// Windows. Windows reaches the host through the session pool.
+const remoteSupported = true
+
+// wslAvailable is opening a WSL folder. Windows shows it when wsl can be
+// run. A machine with no distribution still shows the action. The welcome
+// view asks every frame, so the lookup is kept until PATH changes.
+func wslAvailable() bool {
+	if hostOS != "windows" {
+		return false
+	}
+	path := os.Getenv("PATH")
+	wslLook.Lock()
+	defer wslLook.Unlock()
+	if !wslLook.done || wslLook.path != path {
+		_, err := exec.LookPath("wsl")
+		wslLook.ok, wslLook.path, wslLook.done = err == nil, path, true
+	}
+	return wslLook.ok
+}
+
+var wslLook struct {
+	sync.Mutex
+	path     string
+	ok, done bool
+}
 
 // fileStamp is what tells that a file changed: its size and the time of
 // its last change, and, for a remote file, both as its host printed
@@ -42,18 +67,18 @@ func stampOf(info fs.FileInfo) *fileStamp {
 	return st
 }
 
-// attachRemote follows the connection to the host of a remote folder,
-// and connects it; a folder of this machine lets go of the one followed.
+// attachRemote follows the connection of a remote folder, and connects
+// it; a folder of this machine lets go of the one followed. An SSH host
+// and a WSL distribution of the same name are different connections.
 func (a *app) attachRemote(dir string) {
-	host := remote.HostOf(dir)
-	if a.conn != nil && a.conn.Host == host {
+	c, _, ok := remote.Lookup(dir)
+	if a.conn == c {
 		return
 	}
 	a.detachRemote()
-	if host == "" {
+	if !ok {
 		return
 	}
-	c := remote.For(host)
 	c.Acquire()
 	a.conn = c
 	a.connUnsub = c.Subscribe(func() { a.post(a.connChanged) })
@@ -218,7 +243,7 @@ func (a *app) reconnected() {
 			a.tree.Load(a.root)
 		}
 		for _, dir := range a.window.Expanded {
-			if d := filepath.Join(a.root, filepath.FromSlash(dir)); !a.tree.Loaded(d) {
+			if d := remote.Join(a.root, dir); !a.tree.Loaded(d) {
 				a.tree.Load(d)
 			}
 		}
@@ -282,7 +307,7 @@ func (a *app) markOffline() {
 		switch host := remote.HostOf(d.path); {
 		case host == "":
 			d.offline = false
-		case a.conn != nil && host == a.conn.Host:
+		case a.conn != nil && host == a.conn.Host && sameTarget(d.path, a.conn):
 			d.offline = a.link.kind != linkOnline
 		default:
 			d.offline = !remote.IsConnected(d.path)
@@ -294,7 +319,7 @@ func (a *app) markOffline() {
 // document is empty and read-only until it is read, or says why it could
 // not be.
 func (a *app) loadRemote(d *document) {
-	d.sync, d.loadErr = syncLoading, nil
+	d.sync, d.loadErr, d.readingAt = syncLoading, nil, time.Time{}
 	path := d.path
 	if !remote.IsConnected(path) {
 		d.sync, d.loadErr = syncLoadFailed, remote.ErrOffline
@@ -307,20 +332,23 @@ func (a *app) loadRemote(d *document) {
 	}()
 }
 
-// remoteLoaded takes the text of a remote document read, or why it could
-// not be: a file that cannot be opened closes its tabs, as one of this
-// machine never opens; one that could not be reached says so.
+// remoteLoaded installs a file read in the background. Local failures
+// retain their tab; remote failures follow the host's existing policy.
 func (a *app) remoteLoaded(d *document, path string, info fs.FileInfo, data []byte, err error) {
 	if !slices.Contains(a.docs, d) || d.path != path {
 		return
 	}
-	if err == nil && isBinary(data) {
-		err = errBinary
-	} else if err == nil && hasLongLine(data) {
-		err = errLongLine
+	defer d.readDone()
+	var enc *textEncoding
+	long := 0
+	if err == nil {
+		data, enc, long, err = decodeDocument(path, data)
 	}
 	if err != nil {
 		d.sync, d.loadErr = syncLoadFailed, err
+		if !remote.Is(path) {
+			return // Keep local failures in their tabs with their context and retry.
+		}
 		if errors.Is(err, remote.ErrOffline) || !remote.IsConnected(path) {
 			d.loadErr = remote.ErrOffline
 			return
@@ -341,7 +369,7 @@ func (a *app) remoteLoaded(d *document, path string, info fs.FileInfo, data []by
 		a.dropDocTabs(d)
 		return
 	}
-	d.sync, d.loadErr = syncIdle, nil
+	d.sync, d.loadErr, d.longLine = syncIdle, nil, long
 	crlf := bytes.Contains(data, []byte("\r\n"))
 	if crlf {
 		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
@@ -350,6 +378,7 @@ func (a *app) remoteLoaded(d *document, path string, info fs.FileInfo, data []by
 	d.hist = history{}
 	d.markSaved()
 	d.crlf, d.diskCRLF = crlf, crlf
+	d.encoding = enc
 	d.indent = detectIndent(d.buf.Snapshot(), path)
 	d.measureWidest()
 	d.stamp = stampOf(info)
@@ -357,6 +386,10 @@ func (a *app) remoteLoaded(d *document, path string, info fs.FileInfo, data []by
 		if ts := ed.restoreTab; ts != nil {
 			ed.restoreTab = nil
 			a.restoreEditor(ed, *ts)
+		}
+		if target := ed.loadedTarget; target != nil {
+			ed.loadedTarget = nil
+			target(ed)
 		}
 	}
 	a.find.stale = true
@@ -399,7 +432,11 @@ func (a *app) reloadRemote(d *document) {
 			return
 		}
 		info, data, err := vfs.ReadFileInfo(path, maxOpenBytes)
-		if err != nil || isBinary(data) || hasLongLine(data) {
+		if err != nil {
+			return
+		}
+		data, enc, long, err := decodeDocument(path, data)
+		if err != nil {
 			return
 		}
 		a.post(func() {
@@ -407,7 +444,8 @@ func (a *app) reloadRemote(d *document) {
 			if !slices.Contains(a.docs, d) || d.path != path || d.sync != syncIdle && d.sync != syncConflict || d.dirty() || d.stamp != old {
 				return
 			}
-			d.takeText(data)
+			d.longLine = long
+			d.takeText(data, enc)
 			d.stamp = stampOf(info)
 			// The file's text, unchanged here, settles a conflict.
 			if d.sync == syncConflict {
@@ -433,7 +471,12 @@ func (a *app) writeRemote(d *document) {
 		return
 	}
 	d.sync = syncSaving
-	snap, data := d.encode()
+	snap, data, err := d.encode()
+	if err != nil {
+		d.sync = syncIdle
+		a.answerSaves(d, err)
+		return
+	}
 	crlf, path := d.crlf, d.path
 	// The file as it was read, unless it changed on the host since.
 	expect := ""
@@ -489,9 +532,37 @@ func (a *app) askSavePath(name string, done func(path string)) {
 		if !strings.HasPrefix(p, "/") {
 			return locales.EnterPathFromRoot()
 		}
-		done(remote.Path(host, p))
+		done(remote.On(a.root, p))
 		return ""
 	}, cancel: func() { done("") }}
+}
+
+// remoteTargetLabel is the status text of a connection: "SSH: host" or
+// "WSL: distro".
+func remoteTargetLabel(c *remote.Conn) string {
+	if c.Kind() == remote.KindWSL {
+		return "WSL: " + c.Host
+	}
+	return "SSH: " + c.Host
+}
+
+// folderTargetLabel is the bracketed label of a remote folder.
+func folderTargetLabel(root string) (string, bool) {
+	kind, ok := remote.KindOf(root)
+	if !ok {
+		return "", false
+	}
+	name := remote.HostOf(root)
+	if kind == remote.KindWSL {
+		return "WSL: " + name, true
+	}
+	return "SSH: " + name, true
+}
+
+// sameTarget reports whether path is on the connection's host or distribution.
+func sameTarget(path string, c *remote.Conn) bool {
+	kind, ok := remote.KindOf(path)
+	return ok && kind == c.Kind() && remote.HostOf(path) == c.Host
 }
 
 // hostPath is how a path is copied or shown as text: a remote one as its
@@ -629,7 +700,7 @@ func (a *app) remoteStatus(c *ui.Context, text func(string) ui.Element) {
 	}
 	p := a.pal
 	host := a.conn.Host
-	label, tip, tint := "SSH: "+host, locales.RemoteConnectedTo(host), p.accent
+	label, tip, tint := remoteTargetLabel(a.conn), locales.RemoteConnectedTo(host), p.accent
 	switch {
 	case a.link.kind == linkOnline:
 		if info := a.conn.Info(); info.OS != "" {
@@ -684,25 +755,51 @@ func (a *app) remoteStatus(c *ui.Context, text func(string) ui.Element) {
 	})
 }
 
-// loadingView shows in place of the editor of a remote file not read yet:
+// loadingView shows in place of the editor of a file not read yet:
 // that it is being read, or why it could not be, with a button to try
 // again.
 func (a *app) loadingView(c *ui.Context, d *editor) {
 	p := a.pal
 	ui.Column(c).Fill().Center().Gap(10).Background(p.editor).Padding(24).Children(func() {
 		if d.sync == syncLoading {
-			ui.Spinner(c).Size(16, 16)
+			if d.readingAt.IsZero() {
+				d.readingAt = c.Now()
+			}
+			if wait := readingShows - c.Now().Sub(d.readingAt); wait > 0 {
+				c.After(wait)
+				return
+			}
+			if !c.Preferences().ReduceMotion {
+				ui.Spinner(c).Size(16, 16)
+			} else {
+				ui.Icon(c, iconOpenFile).Size(16, 16)
+			}
 			ui.Text(c, locales.RemoteReading(d.name())).FontSize(13).TextColor(p.muted)
+			if d.loadErr != nil {
+				ui.Text(c, d.loadErr.Error()).FontSize(12).TextColor(p.muted).MaxWidth(420)
+			}
 			return
 		}
-		ui.Icon(c, iconServer).FontSize(20).TextColor(p.muted)
+		glyph := iconOpenFile
+		if remote.Is(d.path) {
+			glyph = iconServer
+		}
+		ui.Icon(c, glyph).FontSize(20).TextColor(p.muted)
 		msg := locales.RemoteCouldNotRead(d.name(), d.loadErr.Error())
 		if errors.Is(d.loadErr, remote.ErrOffline) {
 			msg = locales.RemoteShowsOnce(d.name(), remote.HostOf(d.path))
 		}
+		if errors.Is(d.loadErr, errBinary) {
+			msg = locales.FailBinary(d.name())
+		} else if errors.Is(d.loadErr, errLongLine) {
+			msg = locales.FailLongLine(d.name())
+		}
 		ui.Text(c, msg).FontSize(13).TextColor(p.muted).MaxWidth(420)
-		if !errors.Is(d.loadErr, remote.ErrOffline) && ui.Button(c.Key("retry:"+d.path), locales.RemoteTryAgain()).Clicked() {
-			a.loadRemote(d.document)
+		ui.Text(c, d.path).FontSize(12).TextColor(p.muted).MaxWidth(420)
+		// A binary file or one with a line too long fails again the same way.
+		retry := !errors.Is(d.loadErr, remote.ErrOffline) && !errors.Is(d.loadErr, errBinary) && !errors.Is(d.loadErr, errLongLine)
+		if retry && ui.Button(c.Key("retry:"+d.path), locales.RemoteTryAgain()).Clicked() {
+			a.loadFile(d.document)
 		}
 	})
 }
@@ -710,6 +807,8 @@ func (a *app) loadingView(c *ui.Context, d *editor) {
 // shutdown stops watching the folder and lets go of its connection, as
 // the project closes for good.
 func (a *app) shutdown() {
+	a.closePluginWindow()
+	a.loadsClosed = true
 	a.docClosed(nil)
 	if a.tree != nil {
 		a.tree.Close()
@@ -771,15 +870,17 @@ func (a *app) revertRemote(d *document) {
 				a.fail("%s", locales.RemoteCouldNotRead(d.name(), err.Error()))
 				return
 			}
-			if isBinary(data) {
+			data, enc, long, err := decodeDocument(path, data)
+			if errors.Is(err, errBinary) {
 				a.fail("%s", locales.FailBinaryNow(d.name()))
 				return
 			}
-			if hasLongLine(data) {
+			if err != nil {
 				a.fail("%s", locales.FailLongLine(d.name()))
 				return
 			}
-			d.takeText(data)
+			d.longLine = long
+			d.takeText(data, enc)
 			d.stamp = stampOf(info)
 		})
 	}()

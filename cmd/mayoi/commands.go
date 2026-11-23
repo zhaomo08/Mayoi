@@ -1,7 +1,6 @@
 package main
 
 import (
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"mayoi/internal/keymap"
+	"mayoi/internal/lsp"
 	"mayoi/internal/remote"
 	"mayoi/internal/settings"
 	"mayoi/locales"
@@ -43,6 +43,7 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"remote.reconnect", t.CmdRemoteReconnect(), "", a.reconnect},
 		{"remote.disconnect", t.CmdRemoteDisconnect(), "", a.disconnect},
 		{"remote.forwardPort", t.CmdRemoteForwardPort(), "", a.askForwardPort},
+		{"wsl.openFolder", t.CmdWSLOpenFolder(), "", a.openWSLPicker},
 		{"file.save", t.CmdFileSave(), "CmdOrCtrl+S", a.saveActive},
 		{"file.saveAs", t.CmdFileSaveAs(), "Shift+CmdOrCtrl+S", a.saveActiveAs},
 		{"file.saveAll", t.CmdFileSaveAll(), "Alt+CmdOrCtrl+S", a.saveAll},
@@ -65,14 +66,17 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"account.syncNow", t.CmdAccountSyncNow(), "", a.syncNow},
 		{"account.compareKeybindings", t.CmdAccountCompareKeybindings(), "", a.compareKeybindings},
 		{"account.manage", t.CmdAccountManage(), "", func() { a.services.OpenURL(monURL()) }},
+		{"help.reportProblem", t.CmdHelpReportProblem(), "", a.reportFromMenu},
 		{"account.signOut", t.CmdAccountSignOut(), "", a.confirmSignOut},
 		{"file.installCLI", t.CmdFileInstallCLI(), "", func() { a.host.installCLI() }},
 		{"file.uninstallCLI", t.CmdFileUninstallCLI(), "", func() { a.host.uninstallCLI() }},
+		{"file.addContextMenu", t.CmdFileAddContextMenu(), "", func() { a.host.addContextMenu() }},
+		{"file.removeContextMenu", t.CmdFileRemoveContextMenu(), "", func() { a.host.removeContextMenu() }},
 		// Undo and Redo take no keys in the menu: ⌘Z goes to the focused
 		// control, the editor's history or a text field's.
-		{"edit.undo", t.CmdEditUndo(), "", a.editActive(func(d *editor) { d.undo() })},
-		{"edit.redo", t.CmdEditRedo(), "", a.editActive(func(d *editor) { d.redo() })},
-		{"edit.cut", t.CmdEditCut(), "CmdOrCtrl+X", a.editActive(a.cut)},
+		{"edit.undo", t.CmdEditUndo(), "", a.editAll(func(d *editor) { d.undo() })},
+		{"edit.redo", t.CmdEditRedo(), "", a.editAll(func(d *editor) { d.redo() })},
+		{"edit.cut", t.CmdEditCut(), "CmdOrCtrl+X", a.editAll(a.cut)},
 		{"edit.selectAll", t.CmdEditSelectAll(), "CmdOrCtrl+A", a.editActive(selectAll)},
 		{"edit.find", t.CmdEditFind(), "CmdOrCtrl+F", func() { a.openFind(false) }},
 		{"edit.replace", t.CmdEditReplace(), "Alt+CmdOrCtrl+F", func() { a.openFind(true) }},
@@ -93,20 +97,61 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"sel.lineBelow", t.CmdSelLineBelow(), "", a.editActive(func(d *editor) { insertLine(d, false) })},
 		{"sel.lineAbove", t.CmdSelLineAbove(), "", a.editActive(func(d *editor) { insertLine(d, true) })},
 		{"sel.line", t.CmdSelLine(), "CmdOrCtrl+L", a.editActive(selectLines)},
+		// Several selections (multicursor.go): their keys, as VS Code's.
+		{"sel.addCursorAbove", t.CmdSelAddCursorAbove(), "Alt+CmdOrCtrl+Up", a.multiCmd(func(d *editor) { a.addCursor(d, -1) })},
+		{"sel.addCursorBelow", t.CmdSelAddCursorBelow(), "Alt+CmdOrCtrl+Down", a.multiCmd(func(d *editor) { a.addCursor(d, 1) })},
+		// ⌃⌘G on macOS, where ⌘D splits as in iTerm2; Ctrl+D elsewhere.
+		{"sel.addNextOccurrence", t.CmdSelAddNextOccurrence(), "Ctrl+CmdOrCtrl+G", a.multiCmd(a.addNextOccurrence)},
+		{"sel.selectAllOccurrences", t.CmdSelSelectAllOccurrences(), "Shift+CmdOrCtrl+L", a.multiCmd(a.selectAllOccurrences)},
+		{"sel.columnUp", t.CmdSelColumnUp(), "Shift+Alt+CmdOrCtrl+Up", a.multiCmd(func(d *editor) { a.columnSelect(d, -1, 0) })},
+		{"sel.columnDown", t.CmdSelColumnDown(), "Shift+Alt+CmdOrCtrl+Down", a.multiCmd(func(d *editor) { a.columnSelect(d, 1, 0) })},
+		{"sel.columnLeft", t.CmdSelColumnLeft(), "Shift+Alt+CmdOrCtrl+Left", a.multiCmd(func(d *editor) { a.columnSelect(d, 0, -1) })},
+		{"sel.columnRight", t.CmdSelColumnRight(), "Shift+Alt+CmdOrCtrl+Right", a.multiCmd(func(d *editor) { a.columnSelect(d, 0, 1) })},
+		{"sel.removeCursors", t.CmdSelRemoveCursors(), "", a.editActive(func(d *editor) { d.selectTyped(d.sel[0], d.sel[1]) })},
 		{"sel.indentTabs", t.CmdSelIndentTabs(), "", a.editActive(func(d *editor) { d.indent.tabs = true })},
 		{"sel.indent2", t.CmdSelIndentSpaces(2), "", a.editActive(func(d *editor) { d.indent = indentStyle{size: 2} })},
 		{"sel.indent4", t.CmdSelIndentSpaces(4), "", a.editActive(func(d *editor) { d.indent = indentStyle{size: 4} })},
 		{"sel.indent8", t.CmdSelIndentSpaces(8), "", a.editActive(func(d *editor) { d.indent = indentStyle{size: 8} })},
 		{"sel.camelCase", t.CmdSelCamelCase(), "", a.editActive(camelCase)},
+		{"sel.joinLines", t.CmdSelJoinLines(), "", a.editActive(joinSelLines)},
 		{"sel.sortAsc", t.CmdSelSortAsc(), "", a.editActive(func(d *editor) { sortLines(d, false) })},
 		{"sel.sortDesc", t.CmdSelSortDesc(), "", a.editActive(func(d *editor) { sortLines(d, true) })},
 		{"sel.format", t.CmdSelFormat(), "Shift+Alt+F", a.formatActive},
+		{"sel.trimWhitespace", t.CmdSelTrimWhitespace(), "", a.editActive(a.trimActive)},
 		{"sel.insertSnippet", t.CmdSelInsertSnippet(), "", a.insertSnippet},
 		// ⌃Space, which the editor takes itself, so that a terminal keeps it.
-		{"sel.complete", t.CmdSelComplete(), "", a.complete},
+		{"sel.complete", t.CmdSelComplete(), "", a.completeOne},
+		{"markdown.toggleTask", t.CmdMarkdownToggleTask(), "", a.editActive(toggleMdTask)},
+		{"markdown.moveItemUp", t.CmdMarkdownMoveItemUp(), "", a.editActive(func(d *editor) { mdMoveItem(d, false) })},
+		{"markdown.moveItemDown", t.CmdMarkdownMoveItemDown(), "", a.editActive(func(d *editor) { mdMoveItem(d, true) })},
+		{"markdown.toggleList", t.CmdMarkdownToggleList(), "", a.editActive(toggleMdList)},
+		{"markdown.toggleQuote", t.CmdMarkdownToggleQuote(), "", a.editActive(toggleMdQuote)},
+		{"markdown.heading1", t.CmdMarkdownHeading("1"), "Alt+CmdOrCtrl+1", a.editActive(func(d *editor) { toggleMdHeading(d, 1) })},
+		{"markdown.heading2", t.CmdMarkdownHeading("2"), "Alt+CmdOrCtrl+2", a.editActive(func(d *editor) { toggleMdHeading(d, 2) })},
+		{"markdown.heading3", t.CmdMarkdownHeading("3"), "Alt+CmdOrCtrl+3", a.editActive(func(d *editor) { toggleMdHeading(d, 3) })},
+		{"markdown.heading4", t.CmdMarkdownHeading("4"), "Alt+CmdOrCtrl+4", a.editActive(func(d *editor) { toggleMdHeading(d, 4) })},
+		{"markdown.heading5", t.CmdMarkdownHeading("5"), "Alt+CmdOrCtrl+5", a.editActive(func(d *editor) { toggleMdHeading(d, 5) })},
+		{"markdown.heading6", t.CmdMarkdownHeading("6"), "Alt+CmdOrCtrl+6", a.editActive(func(d *editor) { toggleMdHeading(d, 6) })},
+		{"markdown.clearFormatting", t.CmdMarkdownClearFormatting(), "", a.editActive(clearMdFormatting)},
+		{"markdown.toggleEmbed", t.CmdMarkdownToggleEmbed(), "", a.editActive(toggleMdEmbed)},
+		// ⌥⌘[ and ⌥⌘] fold and open the lines of an editor, and the files
+		// of a diff where one is shown.
+		{"edit.fold", t.CmdEditFold(), "Alt+CmdOrCtrl+[", func() { a.foldInContext(true) }},
+		{"edit.unfold", t.CmdEditUnfold(), "Alt+CmdOrCtrl+]", func() { a.foldInContext(false) }},
+		{"edit.toggleFold", t.CmdEditToggleFold(), "", a.editActive(a.toggleFoldCmd)},
+		{"edit.foldAll", t.CmdEditFoldAll(), "", a.editActive(a.foldAllCmd)},
+		{"edit.unfoldAll", t.CmdEditUnfoldAll(), "", a.editActive(a.unfoldAllCmd)},
 		{"go.bracket", t.CmdGoBracket(), "Shift+CmdOrCtrl+\\", a.editActive(goToBracket)},
 		{"go.definition", t.CmdGoDefinition(), "F12", a.goToDefinition},
+		{"go.typeDefinition", t.CmdGoTypeDefinition(), "", a.jumpCommand(lsp.TypeDefinition)},
+		{"go.sourceDefinition", t.CmdGoSourceDefinition(), "", a.jumpCommand(sourceDefinition)},
+		{"go.implementation", t.CmdGoImplementation(), "CmdOrCtrl+F12", a.jumpCommand(lsp.Implementation)},
+		{"go.references", t.CmdGoReferences(), "Shift+F12", a.jumpCommand(lsp.References)},
 		{"go.hover", t.CmdGoHover(), "", a.showHover},
+		// ⌃- and ⌃⇧- on macOS, as VS Code has them, where ⌥⌘← goes to the
+		// column on the left and ⌥← by words.
+		{"go.back", t.CmdGoBack(), "Ctrl+-", func() { a.navGo(-1) }},
+		{"go.forward", t.CmdGoForward(), "Ctrl+Shift+-", func() { a.navGo(1) }},
 		{"go.quickOpen", t.CmdGoQuickOpen(), "CmdOrCtrl+P", func() { a.openQuick("") }},
 		{"go.commands", t.CmdGoCommands(), "Shift+CmdOrCtrl+P", func() { a.openQuick(">") }},
 		{"go.line", t.CmdGoLine(), "Ctrl+G", func() { a.openQuick(":") }},
@@ -121,6 +166,9 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"view.compactFolders", t.CmdViewCompactFolders(), "", a.toggleCompactFolders},
 		{"view.search", t.CmdViewSearch(), "", func() { a.showSearch(false) }},
 		{"view.scm", t.CmdViewScm(), "Ctrl+Shift+G", a.showSourceControl},
+		{"view.sessions", t.CmdViewSessions(), "", a.showSessions},
+		{"view.archivedSessions", t.CmdViewArchivedSessions(), "", a.toggleArchivedSessions},
+		{"view.github", t.CmdViewGitHub(), "", a.showGitHub},
 		{"git.commit", t.CmdGitCommit(), "", func() { a.commit(false) }},
 		{"git.commitPush", t.CmdGitCommitPush(), "", func() { a.commit(true) }},
 		{"git.amend", t.CmdGitAmend(), "", func() { a.showSourceControl(); a.startAmend() }},
@@ -134,8 +182,8 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"git.prevChange", t.CmdGitPrevChange(), "Shift+Alt+F5", func() { a.stepChange(-1) }},
 		{"git.nextFile", t.CmdGitNextFile(), "", func() { a.stepDiffFile(1) }},
 		{"git.prevFile", t.CmdGitPrevFile(), "", func() { a.stepDiffFile(-1) }},
-		{"git.collapseAllFiles", t.CmdGitCollapseAllFiles(), "Alt+CmdOrCtrl+[", func() { a.foldDiffFiles(true) }},
-		{"git.expandAllFiles", t.CmdGitExpandAllFiles(), "Alt+CmdOrCtrl+]", func() { a.foldDiffFiles(false) }},
+		{"git.collapseAllFiles", t.CmdGitCollapseAllFiles(), "", func() { a.foldDiffFiles(true) }},
+		{"git.expandAllFiles", t.CmdGitExpandAllFiles(), "", func() { a.foldDiffFiles(false) }},
 		{"git.toggleCommitFiles", t.CmdGitToggleCommitFiles(), "", a.toggleCommitFiles},
 		{"git.appendChange", t.CmdGitAppendChange(), "", a.appendAtCursor},
 		{"git.showChange", t.CmdGitShowChange(), "", a.editActive(func(d *editor) { d.peekHunk(caretLine(d)) })},
@@ -163,6 +211,7 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"git.stashes", t.CmdGitStashes(), "", a.openStashPicker},
 		{"git.openPullRequest", t.CmdGitOpenPullRequest(), "", a.openPRPicker},
 		{"git.showPullRequestChecks", t.CmdGitShowPullRequestChecks(), "", a.openChecks},
+		{"git.newIssue", t.CmdGitNewIssue(), "", func() { a.newIssue(a.repository()) }},
 		{"git.blame", t.CmdGitBlame(), "", a.toggleBlame},
 		{"git.openFileOnRemote", t.CmdGitOpenFileOnRemote(), "", func() { a.activeFileOnRemote(false) }},
 		{"git.copyPermalink", t.CmdGitCopyPermalink(), "", func() { a.activeFileOnRemote(true) }},
@@ -182,24 +231,36 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"view.terminalMove", t.CmdViewTerminalMove(), "", a.moveTerminal},
 		{"view.terminalRename", t.CmdViewTerminalRename(), "", a.renameTerminal},
 		{"view.installHC", t.CmdViewInstallHC(), "", a.installHC},
+		{"view.attachHC", t.CmdViewAttachHC(), "", a.pickHCAttach},
 		{"view.terminalLocation", t.CmdViewTerminalLocation(), "", a.toggleTerminalLocation},
 		{"view.terminalLockRight", t.CmdViewTerminalLockRight(), "", a.moveTerminalToLockedRight},
 		{"view.panelPosition.bottom", t.CmdViewPanelBottom(), "", func() { a.setPanelPosition("") }},
 		{"view.panelPosition.left", t.CmdViewPanelLeft(), "", func() { a.setPanelPosition("left") }},
 		{"view.panelPosition.right", t.CmdViewPanelRight(), "", func() { a.setPanelPosition("right") }},
 		{"view.lockColumn", t.CmdViewLockColumn(), "", func() { a.toggleColumnLock(a.column()) }},
+		// Split Down has Ctrl+Shift+D off macOS, none there: ⌘D and ⇧⌘D open
+		// an empty column instead, as iTerm2's split an empty pane.
 		{"view.splitRight", t.CmdViewSplitRight(), "CmdOrCtrl+\\", a.splitRight},
+		{"view.splitDown", t.CmdViewSplitDown(), "", a.splitDown},
+		{"view.newColumnRight", t.CmdViewNewColumnRight(), "CmdOrCtrl+D", func() { a.newEmptyColumn(false) }},
+		{"view.newColumnDown", t.CmdViewNewColumnDown(), "Shift+CmdOrCtrl+D", func() { a.newEmptyColumn(true) }},
 		{"view.nextColumn", t.CmdViewNextColumn(), "Alt+CmdOrCtrl+Right", func() { a.focusColumnBy(1) }},
 		{"view.prevColumn", t.CmdViewPrevColumn(), "Alt+CmdOrCtrl+Left", func() { a.focusColumnBy(-1) }},
 		{"view.moveTabNext", t.CmdViewMoveTabNext(), "", func() { a.moveTabBy(1) }},
 		{"view.moveTabPrev", t.CmdViewMoveTabPrev(), "", func() { a.moveTabBy(-1) }},
+		{"view.togglePinTab", t.CmdViewTogglePinTab(), "", a.togglePinTab},
 		{"view.wordWrap", t.CmdViewWordWrap(), "", a.toggleWordWrap},
 		{"view.vim", t.CmdViewVim(), "", a.toggleVim},
 		{"view.projectTabs", t.CmdViewProjectTabs(), "", a.toggleProjectTabs},
 		{"view.wordWrapTab", t.CmdViewWordWrapTab(), "Alt+Z", a.toggleTabWrap},
 		{"view.togglePreview", t.CmdViewTogglePreview(), "Shift+CmdOrCtrl+V", a.togglePreview},
 		{"view.previewToSide", t.CmdViewPreviewToSide(), "", a.previewToSide},
-		{"view.markdownPreview", t.CmdViewMarkdownPreview(), "", a.toggleMarkdownPreview},
+		{"view.toggleLivePreview", t.CmdViewToggleLivePreview(), "Alt+CmdOrCtrl+V", a.toggleLivePreview},
+		{"view.markdownOpen.source", t.CmdViewMarkdownOpenSource(), "", func() { a.setMarkdownOpen("") }},
+		{"view.markdownOpen.live", t.CmdViewMarkdownOpenLive(), "", func() { a.setMarkdownOpen("live") }},
+		{"view.markdownOpen.reading", t.CmdViewMarkdownOpenReading(), "", func() { a.setMarkdownOpen("reading") }},
+		{"view.jsonlOpen.table", t.CmdViewJsonlOpenTable(), "", func() { a.setJSONLOpen("") }},
+		{"view.jsonlOpen.source", t.CmdViewJsonlOpenSource(), "", func() { a.setJSONLOpen("source") }},
 		// The whole window, independent of the focused pane.
 		{"view.zoomIn", t.CmdViewZoomIn(), "CmdOrCtrl+=", func() { a.zoom(1) }},
 		{"view.zoomOut", t.CmdViewZoomOut(), "CmdOrCtrl+-", func() { a.zoom(-1) }},
@@ -227,12 +288,15 @@ func (a *app) commandsIn(t locales.Messages) []command {
 		{"view.theme.pumpkin", t.CmdViewThemePumpkin(), "", func() { a.setTheme(themePumpkin) }},
 		{"view.theme.witchsbrew", t.CmdViewThemeWitchsBrew(), "", func() { a.setTheme(themeWitchsBrew) }},
 		{"view.theme.bloodmoon", t.CmdViewThemeBloodMoon(), "", func() { a.setTheme(themeBloodMoon) }},
+		{"view.theme.gtavi", "GTA VI", "", func() { a.setTheme(themeGTAVI) }},
 		{localeCommand + "system", t.CmdViewLocaleSystem(), "", func() { a.setLocale("") }},
 	}
 	// The languages, each named in itself.
 	for _, tag := range mygo.App.Languages() {
 		cmds = append(cmds, command{localeCommand + tag, i18n.Autonym(tag), "", func() { a.setLocale(tag) }})
 	}
+	// Quitting as Cmd+Q does, which asks first (quitApp).
+	cmds = append(cmds, command{"file.quit", t.CmdFileQuit(), "CmdOrCtrl+Q", func() { a.host.quitApp() }})
 	cmds = append(cmds, command{"plugins.problems", t.CmdPluginsProblems(), "", a.showProblems})
 	cmds = append(cmds, a.pluginCommands(t, cmds)...)
 	for i := range cmds {
@@ -241,8 +305,23 @@ func (a *app) commandsIn(t locales.Messages) []command {
 	if !remoteSupported {
 		cmds = slices.DeleteFunc(cmds, func(c command) bool { return strings.HasPrefix(c.id, "remote.") })
 	}
+	if !wslAvailable() {
+		cmds = slices.DeleteFunc(cmds, func(c command) bool { return strings.HasPrefix(c.id, "wsl.") })
+	}
 	if !hcInstallable() {
 		cmds = slices.DeleteFunc(cmds, func(c command) bool { return c.id == "view.installHC" })
+	}
+	// Explorer's right-click menu is of Windows.
+	if runtime.GOOS != "windows" {
+		cmds = slices.DeleteFunc(cmds, func(c command) bool { return strings.HasSuffix(c.id, "ContextMenu") })
+	}
+	if hcPath() == "" {
+		cmds = slices.DeleteFunc(cmds, func(c command) bool { return c.id == "view.attachHC" })
+	}
+	// Only macOS's app menu has Quit; elsewhere, closing the last window
+	// quits.
+	if runtime.GOOS != "darwin" {
+		cmds = slices.DeleteFunc(cmds, func(c command) bool { return c.id == "file.quit" })
 	}
 	return cmds
 }
@@ -295,8 +374,9 @@ func (a *app) clearRecent() {
 // tabs, a window with a folder keeps it, and dir opens in a tab of its
 // own.
 func (a *app) switchFolder(dir string) {
+	dir = remote.Clean(dir)
 	switch {
-	case a.host.showFolder(filepath.Clean(dir)):
+	case a.host.showFolder(dir):
 	case a.settings.ProjectTabs && a.folder() != "":
 		a.host.newWindow(dir)
 	default:
@@ -473,7 +553,8 @@ func (a *app) updateItem() *mygo.MenuItem {
 
 // menu is the menu bar, which the windows share: its items run the
 // command of the window they are chosen in, by run. cli adds the items
-// that install the mayoi command; builds that can update themselves get
+// that install the mayoi command, and on Windows those of Explorer's
+// right-click menu; builds that can update themselves get
 // "Check for Updates…", in the app menu on macOS and the Help menu
 // elsewhere.
 func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
@@ -533,11 +614,15 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 	if remoteSupported {
 		// Reconnecting and disconnecting are of a remote folder's window.
 		reconnect, disconnect, forward := item("remote.reconnect"), item("remote.disconnect"), item("remote.forwardPort")
-		reconnect.Disabled, disconnect.Disabled, forward.Disabled = a.conn == nil, a.conn == nil, a.conn == nil
+		reconnect.Disabled, disconnect.Disabled = a.conn == nil, a.conn == nil
+		forward.Disabled = a.conn == nil || a.conn.Kind() == remote.KindWSL
 		file = append(file, &mygo.MenuItem{Label: locales.MenuRemoteSSH(), Submenu: []*mygo.MenuItem{
 			item("remote.connect"), item("remote.openFolder"), item("remote.openConfig"),
 			mygo.Separator(), reconnect, disconnect, mygo.Separator(), forward,
 		}})
+	}
+	if wslAvailable() {
+		file = append(file, item("wsl.openFolder"))
 	}
 	file = append(file, mygo.Separator(),
 		item("file.save"), item("file.saveAs"), item("file.saveAll"), checkbox("file.autoSave", a.prefs().AutoSave), mygo.Separator(),
@@ -545,6 +630,13 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 	if runtime.GOOS != "darwin" {
 		file = append(file, item("file.settings"))
 	}
+	// The sessions listed are of this machine, as a folder's own settings.
+	sessions := item("view.sessions")
+	sessions.Disabled = !a.hasSessions()
+	archived := checkbox("view.archivedSessions", a.sessions.archived && a.window.SidebarView == "sessions" && !a.window.SidebarClosed)
+	archived.Disabled = !a.hasSessions()
+	github := item("view.github")
+	github.Disabled = !a.hasGitHub()
 	// A folder's own settings are of a folder on this machine.
 	folderSettings := item("file.folderSettings")
 	folderSettings.Disabled = a.root == "" || remote.Is(a.root)
@@ -553,6 +645,9 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 	)
 	if cli {
 		file = append(file, mygo.Separator(), item("file.installCLI"), item("file.uninstallCLI"))
+		if runtime.GOOS == "windows" {
+			file = append(file, item("file.addContextMenu"), item("file.removeContextMenu"))
+		}
 	}
 	// Settings sync: who it syncs for, or signing in.
 	var account []*mygo.MenuItem
@@ -573,14 +668,20 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 		help = append(help, a.updateItem(), mygo.Separator())
 	}
 	help = append(help, account...)
+	report := item("help.reportProblem")
+	help = append(help, mygo.Separator(), report)
 	appMenu := &mygo.MenuItem{Role: mygo.RoleAppMenu}
 	if runtime.GOOS == "darwin" {
-		help = nil
+		// Help keeps only the report: the rest is in the app menu.
+		help = []*mygo.MenuItem{report}
 		appMenu = &mygo.MenuItem{Label: mygo.App.Name(), Submenu: slices.Concat(about, []*mygo.MenuItem{mygo.Separator(), item("file.settings"), mygo.Separator()}, account, []*mygo.MenuItem{
 			mygo.Separator(),
 			{Role: mygo.RoleServices}, mygo.Separator(),
 			{Role: mygo.RoleHide}, {Role: mygo.RoleHideOthers}, {Role: mygo.RoleUnhide}, mygo.Separator(),
-			{Role: mygo.RoleQuit},
+			// Mayoi's own, rather than the Quit role's, so that it asks
+			// first while quitting otherwise, as to update or log out,
+			// does not.
+			item("file.quit"),
 		})}
 	}
 	// The items of the review comments, off while there are none.
@@ -597,36 +698,67 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 		return it
 	}
 	cut, selectAll := &mygo.MenuItem{Role: mygo.RoleCut}, &mygo.MenuItem{Role: mygo.RoleSelectAll}
+	copyItem := &mygo.MenuItem{Role: mygo.RoleCopy}
 	if a.keyFocus == placeEditor {
 		cut, selectAll = item("edit.cut"), item("edit.selectAll")
+		// With several selections, Copy takes them all, which the text
+		// area's own Copy would not.
+		if a.copyAll {
+			copyItem = &mygo.MenuItem{Label: locales.CmdEditCopy(), Accelerator: "CmdOrCtrl+C", Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.editAll(a.copySpans)()
+			}}
+		}
 	}
 	installHC := item("view.installHC")
+	// Attach to Terminal in herdr-core… is not a command while hc is
+	// missing, which would leave an item with no label.
+	attachHC := item("view.attachHC")
+	_, hasHC := byID["view.attachHC"]
+	attachHC.Hidden = !hasHC
 	menus := []*mygo.MenuItem{
 		appMenu,
 		{Label: locales.MenuFile(), Submenu: file},
 		{Label: locales.MenuEdit(), Submenu: []*mygo.MenuItem{
 			item("edit.undo"), item("edit.redo"), mygo.Separator(),
-			cut, {Role: mygo.RoleCopy}, {Role: mygo.RolePaste}, selectAll, mygo.Separator(),
+			cut, copyItem, {Role: mygo.RolePaste}, selectAll, mygo.Separator(),
 			item("edit.find"), item("edit.replace"), item("edit.findNext"), item("edit.findPrev"), mygo.Separator(),
-			item("edit.findInFiles"), item("edit.replaceInFiles"),
+			item("edit.findInFiles"), item("edit.replaceInFiles"), mygo.Separator(),
+			item("edit.fold"), item("edit.unfold"), item("edit.toggleFold"), item("edit.foldAll"), item("edit.unfoldAll"), mygo.Separator(),
+			{Label: locales.MenuMarkdown(), Submenu: []*mygo.MenuItem{
+				item("markdown.toggleTask"), item("markdown.toggleList"), item("markdown.toggleQuote"), mygo.Separator(),
+				item("markdown.moveItemUp"), item("markdown.moveItemDown"), mygo.Separator(),
+				item("markdown.heading1"), item("markdown.heading2"), item("markdown.heading3"),
+				item("markdown.heading4"), item("markdown.heading5"), item("markdown.heading6"), mygo.Separator(),
+				item("markdown.clearFormatting"), item("markdown.toggleEmbed"),
+			}},
 		}},
 		{Label: locales.MenuSelection(), Submenu: []*mygo.MenuItem{
 			item("sel.line"), mygo.Separator(),
+			item("sel.addCursorAbove"), item("sel.addCursorBelow"), item("sel.addNextOccurrence"), item("sel.selectAllOccurrences"), mygo.Separator(),
 			item("sel.comment"), item("sel.indent"), item("sel.outdent"), mygo.Separator(),
 			item("sel.moveUp"), item("sel.moveDown"), item("sel.copyUp"), item("sel.copyDown"), mygo.Separator(),
-			item("sel.lineBelow"), item("sel.lineAbove"), item("sel.deleteLine"), mygo.Separator(),
+			item("sel.lineBelow"), item("sel.lineAbove"), item("sel.deleteLine"), item("sel.joinLines"), mygo.Separator(),
 			item("sel.sortAsc"), item("sel.sortDesc"), item("sel.camelCase"), mygo.Separator(),
 			item("sel.format"), item("sel.insertSnippet"), item("sel.complete"),
 		}},
 		{Label: locales.MenuView(), Submenu: []*mygo.MenuItem{
-			item("view.sidebar"), checkbox("view.sidebarRight", a.settings.SidebarRight), item("view.explorer"), item("view.search"), item("view.scm"), mygo.Separator(),
+			item("view.sidebar"), checkbox("view.sidebarRight", a.settings.SidebarRight), item("view.explorer"), item("view.search"), item("view.scm"), github, sessions, archived, mygo.Separator(),
 			checkbox("view.compactFolders", a.settings.ExplorerCompactFolders), mygo.Separator(),
-			checkbox("view.wordWrap", a.prefs().WordWrap), item("view.wordWrapTab"), item("view.togglePreview"), item("view.previewToSide"),
-			checkbox("view.markdownPreview", a.prefs().MarkdownPreview), mygo.Separator(),
+			checkbox("view.wordWrap", a.prefs().WordWrap), item("view.wordWrapTab"), item("view.togglePreview"), item("view.toggleLivePreview"), item("view.previewToSide"),
+			{Label: locales.MenuOpenMarkdownAs(), Submenu: []*mygo.MenuItem{
+				radio("view.markdownOpen.source", a.prefs().MarkdownMode == ""),
+				radio("view.markdownOpen.live", a.prefs().MarkdownMode == "live"),
+				radio("view.markdownOpen.reading", a.prefs().MarkdownMode == "reading"),
+			}},
+			{Label: locales.MenuOpenJsonlAs(), Submenu: []*mygo.MenuItem{
+				radio("view.jsonlOpen.table", a.prefs().JSONLMode == ""),
+				radio("view.jsonlOpen.source", a.prefs().JSONLMode == "source"),
+			}}, mygo.Separator(),
 			checkbox("view.vim", a.prefs().Vim), checkbox("view.projectTabs", a.settings.ProjectTabs), mygo.Separator(),
-			item("view.splitRight"), item("view.nextColumn"), item("view.prevColumn"),
+			item("view.splitRight"), item("view.splitDown"), item("view.newColumnRight"), item("view.newColumnDown"),
+			item("view.nextColumn"), item("view.prevColumn"),
 			item("view.moveTabNext"), item("view.moveTabPrev"), mygo.Separator(),
-			item("view.terminal"), item("view.newTerminal"), item("view.terminalTab"), item("view.terminalMove"), installHC,
+			item("view.terminal"), item("view.newTerminal"), item("view.terminalTab"), item("view.terminalMove"), attachHC, installHC,
 			checkbox("view.terminalLocation", a.settings.TerminalLocation == "editor"),
 			{Label: locales.MenuPanelPosition(), Submenu: []*mygo.MenuItem{
 				radio("view.panelPosition.bottom", a.panelSide() == "bottom"),
@@ -641,13 +773,16 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 				theme("view.theme.qoder", themeQoder), theme("view.theme.grokbot", themeGrokBot), theme("view.theme.cursor", themeCursor),
 				theme("view.theme.purplegold", themePurpleGold), theme("view.theme.pumpkin", themePumpkin),
 				theme("view.theme.witchsbrew", themeWitchsBrew), theme("view.theme.bloodmoon", themeBloodMoon),
+				theme("view.theme.gtavi", themeGTAVI),
 			}},
 			{Label: locales.MenuLanguage(), Submenu: languages}, mygo.Separator(),
 			{Role: mygo.RoleToggleFullScreen}, {Role: mygo.RoleToggleDevTools},
 		}},
 		{Label: locales.MenuGo(), Submenu: []*mygo.MenuItem{
 			item("go.quickOpen"), item("go.commands"), item("go.symbol"), item("go.line"), item("go.bracket"), mygo.Separator(),
-			item("go.definition"), item("go.hover"), mygo.Separator(),
+			item("go.definition"), item("go.typeDefinition"), item("go.sourceDefinition"),
+			item("go.implementation"), item("go.references"), item("go.hover"), mygo.Separator(),
+			item("go.back"), item("go.forward"), mygo.Separator(),
 			item("go.nextTab"), item("go.prevTab"), mygo.Separator(),
 			item("go.nextProject"), item("go.prevProject"),
 		}},
@@ -659,7 +794,7 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 			item("git.stageFile"), item("git.unstageFile"), item("git.stageAll"), mygo.Separator(),
 			item("git.switchBranch"), item("git.switchWorktree"), item("git.createBranch"), item("git.fetch"), item("git.pull"), item("git.push"), mygo.Separator(),
 			item("git.stash"), item("git.stashUntracked"), item("git.stashes"), mygo.Separator(),
-			prItem("git.openPullRequest"), prItem("git.showPullRequestChecks"), mygo.Separator(),
+			prItem("git.openPullRequest"), prItem("git.showPullRequestChecks"), prItem("git.newIssue"), mygo.Separator(),
 			checkbox("git.blame", a.prefs().Blame), item("git.openFileOnRemote"), item("git.copyPermalink"), item("git.refresh"), mygo.Separator(),
 			item("review.comment"), reviewItem("review.next"), reviewItem("review.previous"),
 			reviewItem("review.copy"), reviewItem("review.send"), reviewItem("review.clear"),
@@ -681,9 +816,10 @@ func (a *app) menu(cli bool, run func(id string, win *mygo.Window)) *mygo.Menu {
 
 // menuAccel is the accelerator of a command's menu item: none when
 // keybindings.json binds its keys, which the menu would take first, or
-// takes them away from it.
+// takes them away from it. CmdOrCtrl is Command on macOS's keys, as
+// Mayoi's systems have them, not as MyGo's machine does.
 func (a *app) menuAccel(cmd command) string {
-	st, ok := keymap.ParseAccel(cmd.accel)
+	st, ok := parseAccel(cmd.accel)
 	if ok && (a.keys.Binds(st) || a.keys.Removes(commandNames(cmd.id)...)) {
 		return ""
 	}

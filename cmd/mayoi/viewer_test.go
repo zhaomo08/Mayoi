@@ -35,13 +35,15 @@ func writePNG(t testing.TB, path string, w, h int) {
 const testSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32" viewBox="0 0 64 32"><rect width="64" height="32" fill="#36c"/></svg>
 `
 
-// until draws frames until ok, failing after a while.
+// until settles until ok, failing after as long as settle waits: what
+// it waits for comes after the work a slow machine runs slowly, as a
+// host's over the network.
 func (hs *harness) until(what string, ok func() bool) {
 	hs.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(settleTimeout)
 	for !ok() {
 		if time.Now().After(deadline) {
-			hs.t.Fatalf("timed out waiting for %s", what)
+			hs.t.Fatalf("timed out waiting for %s: %q", what, hs.tt.Texts())
 		}
 		hs.settle()
 	}
@@ -135,8 +137,9 @@ func TestOtherBinaryFilesStillRefuse(t *testing.T) {
 	os.WriteFile(hs.path("blob.bin"), []byte("a\x00b"), 0o644)
 	os.WriteFile(hs.path("broken.png"), []byte("not a png"), 0o644)
 	a.openFile(hs.path("blob.bin"), true)
-	if len(a.errors) != 1 || !strings.Contains(a.errors[0], "binary") || len(a.column().tabs) != 0 {
-		t.Fatalf("errors %q, %d tabs", a.errors, len(a.column().tabs))
+	hs.settle()
+	if d := a.activeEditor(); d.sync != syncLoadFailed || d.loadErr != errBinary || hs.tt.HasText("Try Again") || len(a.column().tabs) != 1 {
+		t.Fatal("binary file did not keep its failed tab and retry action")
 	}
 	// An image that does not decode says why in its tab.
 	a.openFile(hs.path("broken.png"), true)
@@ -167,8 +170,9 @@ func TestLongLineRefuses(t *testing.T) {
 	a := hs.a
 	os.WriteFile(hs.path("index.js.map"), []byte(line+"x"), 0o644)
 	a.openFile(hs.path("index.js.map"), true)
-	if len(a.errors) != 1 || !strings.Contains(a.errors[0], "too long") || len(a.column().tabs) != 0 {
-		t.Fatalf("errors %q, %d tabs", a.errors, len(a.column().tabs))
+	hs.settle()
+	if d := a.activeEditor(); d.sync != syncLoadFailed || d.loadErr != errLongLine || hs.tt.HasText("Try Again") || len(a.column().tabs) != 1 {
+		t.Fatal("long line did not keep its failed tab and retry action")
 	}
 }
 
@@ -221,7 +225,7 @@ func TestImageTabsMoveAndRestore(t *testing.T) {
 	b := newApp(&fakeHost{folder: hs.root}, a.settings, a.window)
 	t.Cleanup(b.shutdown)
 	tt := ui.NewTester(b.view, 1200, 760)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(settleTimeout)
 	for (b.activeViewer() == nil || b.activeViewer().src == nil) && time.Now().Before(deadline) {
 		step(tt)
 		time.Sleep(5 * time.Millisecond)
@@ -233,6 +237,44 @@ func TestImageTabsMoveAndRestore(t *testing.T) {
 	b.run("file.close")
 	if len(b.column().tabs) != 1 || b.activeTab().ed == nil {
 		t.Fatalf("%d tabs after closing", len(b.column().tabs))
+	}
+}
+
+// TestSVGPreviewDrawsText checks the preview of an SVG draws its text, as
+// issue #198 found it did not.
+func TestSVGPreviewDrawsText(t *testing.T) {
+	hs := newHarness(t, true)
+	a, tt := hs.a, hs.tt
+	path := hs.path("text.svg")
+	os.WriteFile(path, []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="100">
+  <rect width="320" height="100" fill="white"/>
+  <text x="16" y="55" font-size="24" fill="black">中文 Hello</text>
+</svg>
+`), 0o644)
+	a.openFile(path, true)
+	hs.settle()
+	a.run("view.togglePreview")
+	d := a.activeEditor()
+	hs.until("the preview", func() bool { return d.preview != nil && d.preview.src != nil })
+	hs.settle()
+	box, ok := tt.Find("Preview text.svg")
+	if !ok {
+		t.Fatal("no pane")
+	}
+	v := d.preview
+	at := v.place(v.paneW, v.paneH)
+	img := tt.Image()
+	// Within the picture, clear of its edges, only the text is dark.
+	dark := 0
+	for y := int(box.Y+at.Y) + 2; y < int(box.Y+at.Y+at.H)-2; y++ {
+		for x := int(box.X+at.X) + 2; x < int(box.X+at.X+at.W)-2; x++ {
+			if c := img.RGBAAt(x, y); c.R < 100 && c.G < 100 && c.B < 100 {
+				dark++
+			}
+		}
+	}
+	if dark < 50 {
+		t.Fatalf("the picture %+v shows %d dark pixels of text", at, dark)
 	}
 }
 
@@ -333,8 +375,15 @@ func TestSVGPreview(t *testing.T) {
 	b := newApp(&fakeHost{folder: hs.root}, a.settings, a.window)
 	t.Cleanup(b.shutdown)
 	bt := ui.NewTester(b.view, 1200, 760)
-	step(bt)
-	step(bt)
+	restored := func() bool {
+		e := b.activeEditor()
+		return e != nil && e.preview != nil && e.preview.src != nil
+	}
+	deadline := time.Now().Add(settleTimeout)
+	for !restored() && time.Now().Before(deadline) {
+		step(bt)
+		time.Sleep(5 * time.Millisecond)
+	}
 	if e := b.activeEditor(); e == nil || e.preview == nil || e.preview.src == nil {
 		t.Fatalf("restored %v", b.activeTab())
 	}

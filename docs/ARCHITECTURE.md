@@ -62,6 +62,13 @@ show during a drag.
 document as one tab shows it, with its own selection, scroll position and paint caches. A column holds tabs, each of
 which is an editor or a terminal.
 
+**`tiles.go`.** The columns are laid out in a tree of tiles: the root a row, a group of tiles side by side or one above
+the other, and a column at each leaf. A group never holds one tile nor one of its own direction, so a split along a
+group adds to it and one across a column makes a group of its own, and `a.cols` is the leaves as they read, which
+focus, moves and locks go through. A column moved in the tree gets a new text area, so its editors come back as a
+tab shown again does. The settings keep `columns` as a row, which an older version reads, and `panes`, the tree, only
+when columns are stacked; a tree that does not name each column once restores as a row.
+
 **`columnlock.go`.** A locked column stays when empty and does not take implicit
 file opens or new terminal tabs. `fileColumn` selects the current unlocked column
 or the last one used, creating a workspace on the left if all columns are locked.
@@ -123,6 +130,53 @@ painted over a checkerboard, at a scale and offset the viewer keeps.
 
 An SVG preview is a viewer shown in place of its editor. It parses the text shortly after each edit and keeps the last
 image that parsed. The text area stays built, out of sight, so the editor keeps its place.
+
+## Markdown
+
+**`markdown.go`, `markdownsync.go`.** The Reading view is a viewer in place of its editor too. goldmark parses the text
+in the background, a moment after each edit, into blocks a list shows, each drawn by `markdownRow`, which Live Preview
+draws its rendered blocks with as well.
+
+**`markdownlive.go`, `markdownliveview.go`.** Live Preview is the editor itself, its text area styled as the text reads,
+as Obsidian's is. A parse, in the background a moment after each edit, finds spans of runes: what styles text, as a
+heading's size or bold's weight, the marks of Markdown, which hide unless the caret or the selection touches what they
+mark, and objects, the first rune of a bullet, a task's box, a picture or a formula drawn in place, the rest hidden.
+They reach the text area as MyGo's `TextRange`s, for the lines about the view only. Until the next parse arrives, the
+last one follows the edits made since (`liveDoc.mapTo`): the texts are compared from both ends, what was before the
+change stays, what was after moves with it, a style grows with what is typed at its end and a mark does not, so that
+typing never lands in a hidden mark. Only the spans, cards and blocks a frame shows move (`liveDoc.visit`, `eachDeco`,
+`eachBlock`), so a key costs the same in a long note as in a short one, some 50 µs to follow (`BenchmarkLiveMapTo`); a
+task's box checked stays a box. The first frame parses on the main thread, quickly, without pictures, formulas or
+blocks. Tables, diagrams and formulas in display style are blocks: `TextBlocks` keeps their lines as high as the block
+renders, and the block, drawn by `markdownRow`, covers them, until the caret goes in, which shows their source. A parse
+takes the blocks of the same source as the last drew (`markdownCache.blocks`), so only those edited are drawn again: a
+parse of a 250 KB note full of them takes some 13 ms and 30 MB (`BenchmarkParseLive`), a span keeping a picture or a
+formula behind a pointer. A block keeps the room of its drawing, or of its source when that is higher, as a short
+formula's is. As the caret goes into a block or leaves it, its room glides between the two (`liveIn`), from wherever it
+is when the caret turns back: the blank line after it takes the difference, or, with text right below, its last line
+grows by its last rune drawn as an object, so the text below moves over rather than jumps. A block shows once measured,
+fading in. A click on a table's cell edits it in place (`markdownlivecell.go`): one text input, in that cell only,
+holds its source, and the editor's caret waits outside the table, which stays drawn. What is typed is written to the
+text as typing pauses, or as the cell is left or a shortcut runs, as one edit of the cell's source (`tableCellEdit`,
+its pipes escaped), which undoes as typing does: an edit made to the text from outside the text area has the area lay
+out all of the text again, too much for each key. The table's view keeps its height and its columns as its source
+changes under the cell. Tab after the last cell, Return in the last row and the menu of a cell add and take away
+rows and columns (`tableStructure`, which keeps the header first, its line of alignments as wide and one column at
+least) as one step of undo; the cell follows its table by a rune of its header, which the edits of every view move,
+and a change chosen from a menu of a table whose rows or columns changed since is not made. Until the parse that
+follows, the table is drawn from its own source parsed alone, so the new cell shows at once. A table builds only its
+rows in view and a view above and below it, and the row of the cell, the others taking the room they were built at
+(`markdownlivetable.go`): all of them are built once as it shows and at each new width, to know their heights. Its
+lines each keep the room of their row in the text area (`liveTableRooms`), so the lines in view, a caret waiting in
+view and the area keeping its place as a row takes its height all find the row where it shows; the caret waits on the
+cell's row as the cell writes, as the area takes the lines after an edit for guesses until it measures them again. What
+an element's handler leaves goes to no handler around it, so a cell and the cell's input hand a scroll up or down to
+the block (`passScroll`), which scrolls the text under it. A bullet and a task's box keep the width of their source, which shows in their room as the caret comes to
+them, so the line holds still. A picture of the web on its way is a card (`livePicture`), whose room glides to the
+picture's as it arrives and fades in over it. The link under the pointer is found from where the area says the pointer
+is (`liveHovered`), and its underline fills in. Blocks of code are cards painted behind their lines, their code alone
+colored by the highlighter (`liveState.codeColors`). The Reading view parses a note whole, with the cache of its last
+parse, so a parse after a key takes some 13 ms where one without would take 550 (`BenchmarkMarkdownReparse`).
 
 ## Git
 
@@ -272,7 +326,7 @@ dark, and the other themes that the `theme` setting names: The Matrix, Purple Go
 `appearance` setting is, and Claude, Qoder, Grok Bot and Cursor, which have a light and a dark palette and are as the appearance is. A palette with a `card` radius, Qoder's, has `workbench.go` lay the editors and the bottom panel out as a card in a grained shell of chrome, with no lines between the shell's parts and splitters lit around the pointer. `rain.go` paints The Matrix's digital rain behind the welcome page,
 worked out from the time alone, a step every 70 ms. `mascot.go` places a theme's character on the welcome page and in
 the status bar, its pose also worked out from the time, asking for a frame only when the pose next changes: `clawd.go`
-paints Claude's from cells, `qoduck.go` Qoder's duck from vector shapes, with the prop `mascot.go` picks from the work going on for the status bar's, `grokbot.go` Grok Bot's face from them too, and `halloween.go` the Halloween themes' pumpkin, cauldron and bat from cells, `rabbit.go` The Matrix's White Rabbit from them too; Cursor and Purple Gold have none. `clauding.go` draws Claude's welcome page as Claude Code's welcome box, and its spinner in the status bar while Git works, its glyph, the light on its word and its seconds painted from the time, a step every 120 ms. It also styles what floats over
+paints Claude's from cells, `qoduck.go` Qoder's duck from vector shapes, with the prop `mascot.go` picks from the work going on for the status bar's, `grokbot.go` Grok Bot's face from them too, and `halloween.go` the Halloween themes' pumpkin, cauldron and bat from cells, `rabbit.go` The Matrix's White Rabbit from them too, `wanted.go` GTA VI's wanted stars from paths, lit by the files that differ from HEAD; Cursor and Purple Gold have none. `clauding.go` draws Claude's welcome page as Claude Code's welcome box, and its spinner in the status bar while Git works, its glyph, the light on its word and its seconds painted from the time, a step every 120 ms. It also styles what floats over
 the window, dialogs and the boxes over an editor, and fades them in as they show.
 
 ## Performance
@@ -283,3 +337,8 @@ These figures come from the tests, run on an M-series Mac:
 - Scrolling and typing cost under 2 ms per frame, or about 3 ms with find open.
 - Highlighting again after a keystroke in a 6,000-line file takes under 1 ms.
 - Quick open searches 100,000 paths in about 1.5 ms.
+- Opening the command palette and closing it again takes about 13 ms, a frame each.
+
+`TestBudgets` in `budget_test.go` holds the cost of a frame to a budget, a few times these figures to allow for
+a slower machine: idle, scrolling and typing, typing with find open, quick open, the palette, the Sessions view of
+2,000 sessions scrolled, hovered and filtered, and a terminal printing as fast as it can. CI runs it on macOS for every pull request (`MAYOI_BUDGETS=1`).

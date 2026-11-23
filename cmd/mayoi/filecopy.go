@@ -39,7 +39,7 @@ var copiedRemote struct {
 }
 
 // explorerInput takes the Copy and Paste of the Edit menu while the
-// explorer has the keyboard.
+// explorer has the keyboard: Copy copies every row chosen.
 func (a *app) explorerInput(ev ui.InputEvent) bool {
 	if ev.Kind != ui.InputCommand {
 		return false
@@ -49,7 +49,7 @@ func (a *app) explorerInput(ev ui.InputEvent) bool {
 		if a.fileRow < 0 || a.fileRow >= a.files.Rows() {
 			return false
 		}
-		a.copyFiles(a.files.Item(a.fileRow))
+		a.copyFiles(a.explorerPicked(a.files.Item(a.fileRow))...)
 		return true
 	case "paste":
 		a.pasteFiles(a.targetDir())
@@ -278,7 +278,7 @@ func toHost(c *remote.Conn, srcs []string, rdir string, p *remote.Progress) ([]s
 func hostPaths(c *remote.Conn, rps []string) []string {
 	out := make([]string, len(rps))
 	for i, rp := range rps {
-		out[i] = remote.Path(c.Host, rp)
+		out[i] = c.Path(rp)
 	}
 	return out
 }
@@ -312,11 +312,11 @@ func fetchInto(src, dir string, p *remote.Progress) (string, error) {
 // copyInto copies the file or folder at src into dir, under a name of
 // its own there, and returns where it went.
 func copyInto(src, dir string) (string, error) {
-	info, err := os.Lstat(src)
+	info, err := lstatJunction(src)
 	if err != nil {
 		return "", err
 	}
-	if info.IsDir() && (dir == src || strings.HasPrefix(dir, src+string(filepath.Separator))) {
+	if info.IsDir() && remote.Contains(src, dir) {
 		return "", errors.New(locales.ErrPasteIntoItself())
 	}
 	to := freeName(dir, filepath.Base(src), info.IsDir())
@@ -347,10 +347,22 @@ func freeName(dir, name string, isDir bool) string {
 	}
 }
 
+// lstatJunction is os.Lstat, but for a directory junction of Windows,
+// which it calls irregular, the folder the junction points to.
+func lstatJunction(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeIrregular != 0 {
+		if target, err := os.Stat(path); err == nil && target.IsDir() {
+			return target, nil
+		}
+	}
+	return info, err
+}
+
 // copyEntry copies a file, a link or a folder with all it has, keeping
 // their modes.
 func copyEntry(src, dst string) error {
-	info, err := os.Lstat(src)
+	info, err := lstatJunction(src)
 	if err != nil {
 		return err
 	}

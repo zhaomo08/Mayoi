@@ -26,9 +26,12 @@ events.on("editor.open", (e) => {
     { range: { start: { line: 2, character: 2 }, end: { line: 2, character: 7 } }, severity: "warning", message: "small is vague" },
   ]);
 });
-events.on("editor.didSave", (e) => views.render("lint.view", { type: "text", text: "saved " + e.path.split(/[\\/]/).pop() }));
+// A save can come as two events, the second after the view shows, which
+// would take its place: it only tells of saves until then.
+let shown = false;
+events.on("editor.didSave", (e) => shown || views.render("lint.view", { type: "text", text: "saved " + e.path.split(/[\\/]/).pop() }));
 languages.registerFormatter("lint.shout", async (doc) => (await doc.text()).replace("editor", "EDITOR"));
-views.onShow("lint.view", () => views.render("lint.view", {
+views.onShow("lint.view", () => (shown = true) && views.render("lint.view", {
   type: "stack", children: [{ type: "text", text: "Hello view" }, { type: "list", items: [{ label: "one" }] }, { type: "markdown", text: "# Title\n\nSome *text*." }],
 }));
 previews.register("lint.preview", (text) =>
@@ -184,5 +187,18 @@ func TestBundledPlugins(t *testing.T) {
 		defer h.mu.Unlock()
 		data, _ := json.Marshal(h.views["todos.list"])
 		return strings.Contains(string(data), "say more")
+	})
+	// A tag of symbols, as [TODO], is found too.
+	hs.a.settings.Prefs.Plugins["todos"] = json.RawMessage(`{"enabled": true, "tags": "[TODO]"}`)
+	h.syncPrefs()
+	os.WriteFile(hs.path("main.go"), []byte("package main\n\n// [TODO]: in brackets\nfunc main() {}\n"), 0o644)
+	a.indexRead.Invalidate()
+	hs.settle()
+	go h.reg.Run("todos.refresh", nil)
+	hs.until("the [TODO]", func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		data, _ := json.Marshal(h.views["todos.list"])
+		return strings.Contains(string(data), "in brackets")
 	})
 }

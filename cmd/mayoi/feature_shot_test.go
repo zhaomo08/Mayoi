@@ -5,6 +5,7 @@ package main
 // FSHOTS=<dir> go test -run TestFeat ./cmd/mayoi
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -724,12 +725,12 @@ func TestFeatRemote(t *testing.T) {
 		hs.settle()
 		hs.fshot("19-remote-welcome", dark)
 		a.openRemotePicker()
-		hs.untilLong("the hosts", func() bool { return len(a.remotePick.resolved) >= 6 })
+		hs.until("the hosts", func() bool { return len(a.remotePick.resolved) >= 6 })
 		hs.settle()
 		hs.fshot("19-remote-hosts", dark)
 		a.chooseHost("build-mac")
-		hs.untilLong("the folders", func() bool { return a.remotePick.stage == pickFolder })
-		hs.untilLong("the listing", func() bool { return a.remotePick.dir != "" && !a.remotePick.listing && hs.tt.HasText("scratch") })
+		hs.until("the folders", func() bool { return a.remotePick.stage == pickFolder })
+		hs.until("the listing", func() bool { return a.remotePick.dir != "" && !a.remotePick.listing && hs.tt.HasText("scratch") })
 		hs.settle()
 		hs.fshot("19-remote-folders", dark)
 		a.closeRemotePicker()
@@ -750,9 +751,9 @@ func TestFeatRemoteWindow(t *testing.T) {
 		tt.SetScale(2)
 		hs := &harness{t: t, a: a, h: &fakeHost{}, tt: tt, root: w.Folder}
 		t.Cleanup(a.shutdown)
-		hs.untilLong("the tree", func() bool { return tt.HasText("go.mod") })
+		hs.until("the tree", func() bool { return tt.HasText("go.mod") })
 		a.openFile(hs.path("internal/remote/conn.go"), true)
-		hs.untilLong("the file", func() bool { d := a.activeEditor(); return d != nil && d.sync != syncLoading })
+		hs.until("the file", func() bool { d := a.activeEditor(); return d != nil && d.sync != syncLoading })
 		a.run("view.terminal")
 		hs.settle()
 		hs.termRun(a.panelTerm, "ls ~/projects", "website")
@@ -789,6 +790,7 @@ func TestFeatThemes(t *testing.T) {
 		{themeCursor, false, "cursor-light"}, {themeCursor, true, "cursor-dark"},
 		{themePurpleGold, true, "purplegold"},
 		{themePumpkin, true, "pumpkin"}, {themeWitchsBrew, true, "witchsbrew"}, {themeBloodMoon, true, "bloodmoon"},
+		{themeGTAVI, true, "gtavi"},
 	} {
 		hs := featHarness(t, tc.dark, featOpts{theme: tc.theme, expanded: []string{"cmd", "cmd/mayoi"}})
 		a := hs.a
@@ -857,3 +859,179 @@ const featKeys = `// Keyboard shortcuts, in VS Code's format: "key" is a key or 
   { "key": "cmd+shift+d", "command": "editor.action.copyLinesDownAction" }
 ]
 `
+
+// featLiveMD is a note of every kind of Markdown Live Preview draws.
+const featLiveMD = "# Field notes\n\n" +
+	"Mayoi edits Markdown *as it reads*: the marks of **what the caret touches** show, faint, and the rest " +
+	"hide away. Code like `go test ./...`, ==highlights== and ~~struck text~~ keep their look; " +
+	"[links](https://example.com) stay links, [[notes]] and [[a note to write]] too; tags read as #pills " +
+	"and footnotes stay small.[^1]\n\n" +
+	"## Lists\n\n" +
+	"- A first item, long enough to wrap onto a second line of the column so its indent shows\n" +
+	"- A second item\n" +
+	"  continued on a line of its own\n" +
+	"  - nested, one level\n" +
+	"  - and another\n\n" +
+	"1. Ordered\n2. Lists\n\n" +
+	"### Tasks\n\n" +
+	"- [x] Draw the boxes\n- [ ] Animate them\n\n" +
+	"> A quote reads muted, behind a bar,\n> over as many lines as it takes.\n\n" +
+	"> [!NOTE]\n> An alert takes its kind's color.\n\n" +
+	"> [!tip] Callouts have titles\n> As Obsidian's do, tinted their color.\n\n" +
+	"---\n\n" +
+	"## Code and tables\n\n" +
+	"```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```\n\n" +
+	"| Key  | Action        |\n|------|---------------|\n| ⌘P   | Quick open    |\n| ⇧⌘F  | Find in files |\n\n" +
+	"Inline math $e^{i\\pi}+1=0$ sits in its line.\n\n" +
+	"#### A fourth level\n\nAnd its paragraph.\n\n[^1]: A footnote.\n"
+
+// Live Preview of a note, the caret in its first paragraph.
+func TestFeatLivePreview(t *testing.T) {
+	featBoth(t, func(t *testing.T, dark bool) {
+		hs := featHarness(t, dark, featOpts{root: t.TempDir(), w: 1100, h: 1300})
+		a := hs.a
+		os.WriteFile(hs.path("notes.md"), []byte(featLiveMD), 0o644)
+		a.settings.MarkdownMode = "live"
+		a.openFile(hs.path("notes.md"), true)
+		d := a.activeEditor()
+		hs.until("the note parsed", func() bool { l := d.document.live; return l != nil && l.doc != nil && !l.quick })
+		hs.caretAt(d, "what the caret", 4, 0)
+		hs.settle()
+		time.Sleep(300 * time.Millisecond)
+		hs.settle()
+		hs.fshot("live-preview", dark)
+		// The caret at a bullet shows its mark in the dot's room.
+		hs.caretAt(d, "- A second", 0, 0)
+		hs.settle()
+		time.Sleep(300 * time.Millisecond)
+		hs.settle()
+		hs.fshot("live-preview-marker", dark)
+		// The caret in the table shows its source, the rest as it was.
+		hs.caretAt(d, "| ⌘P", 2, 0)
+		hs.settle()
+		time.Sleep(300 * time.Millisecond)
+		hs.settle()
+		hs.fshot("live-preview-table", dark)
+	})
+}
+
+// featCalloutsMD is a note of Obsidian's callouts, folded and open, a note
+// embedded and a comment.
+const featCalloutsMD = "# Callouts and embeds\n\n" +
+	"> [!info] Each kind has its color\n> And its own icon, as in Obsidian.\n\n" +
+	"> [!success]\n> Done, in green.\n\n" +
+	"> [!faq]- Folded until opened\n> Hidden below the title.\n> Over lines.\n\n" +
+	"> [!bug]+ Open until folded\n> A click on the chevron folds it.\n\n" +
+	"> [!example]\n> Purple, with a list.\n\n" +
+	"Text with a %%quiet comment%% in it, and a [link to the web](https://example.com).\n\n" +
+	"![[recipe]]\n\n" +
+	"After the embed.\n"
+
+// Callouts of each kind, folded and open, a note embedded and a comment,
+// in Live Preview and the Reading view.
+func TestFeatLiveCallouts(t *testing.T) {
+	featBoth(t, func(t *testing.T, dark bool) {
+		root := t.TempDir()
+		hs := featHarness(t, dark, featOpts{root: root, w: 1000, h: 1100})
+		a := hs.a
+		os.WriteFile(hs.path("recipe.md"), []byte("## Pancakes\n\nMix **flour**, milk and eggs.\n\n- [ ] Rest the batter\n- [x] Heat the pan\n"), 0o644)
+		os.WriteFile(hs.path("callouts.md"), []byte(featCalloutsMD), 0o644)
+		a.settings.MarkdownMode = "live"
+		a.openFile(hs.path("callouts.md"), true)
+		d := a.activeEditor()
+		hs.until("the note parsed", func() bool {
+			l := d.document.live
+			return l != nil && l.doc != nil && !l.quick && len(d.livePane.views) > 0
+		})
+		hs.caretAt(d, "After the embed", 0, 0)
+		hs.settle()
+		time.Sleep(300 * time.Millisecond)
+		hs.settle()
+		hs.fshot("live-callouts", dark)
+		a.setMarkdownMode("reading")
+		hs.until("the reading view", func() bool { return d.preview != nil && d.preview.loaded })
+		hs.settle()
+		time.Sleep(300 * time.Millisecond)
+		hs.settle()
+		hs.fshot("reading-callouts", dark)
+	})
+}
+
+// featLiveDetailsMD is a note of the smaller things Live Preview shows:
+// a link, ordered tasks, a picture of the web on its way, a formula and
+// a diagram.
+const featLiveDetailsMD = "# Details\n\n" +
+	"Hold ⌘ over [a link](https://example.com) to open it.\n\n" +
+	"1. [x] Ordered tasks\n2. [ ] keep their place\n\n" +
+	"![A picture on its way](https://example.com/feat-picture.png)\n\n" +
+	"$$\n\\int_0^1 x^2\\,dx = \\frac{1}{3}\n$$\n\n" +
+	"```mermaid\ngraph LR\n  A[Write] --> B[Read]\n```\n" +
+	"Text right below the diagram.\n"
+
+// Live Preview's details: the pointer over a link with ⌘ held, a picture
+// on its way as its card, and the caret at an ordered task's box.
+func TestFeatLivePreviewDetails(t *testing.T) {
+	featBoth(t, func(t *testing.T, dark bool) {
+		hold := make(chan struct{})
+		get := markdownRemote.get
+		markdownRemote.get = func(string) ([]byte, error) { <-hold; return nil, errors.New("offline") }
+		t.Cleanup(func() { close(hold); markdownRemote.get = get })
+		hs := featHarness(t, dark, featOpts{root: t.TempDir(), w: 1100, h: 900})
+		a := hs.a
+		os.WriteFile(hs.path("details.md"), []byte(featLiveDetailsMD), 0o644)
+		a.settings.MarkdownMode = "live"
+		a.openFile(hs.path("details.md"), true)
+		d := a.activeEditor()
+		hs.until("the note parsed", func() bool {
+			l := d.document.live
+			return l != nil && l.doc != nil && !l.quick && len(d.livePane.views) == 2
+		})
+		hs.caretAt(d, "keep their", 0, 0)
+		hs.settle()
+		time.Sleep(300 * time.Millisecond)
+		hs.settle()
+		// The pointer over the link, ⌘ held.
+		link := len([]rune(featLiveDetailsMD[:strings.Index(featLiveDetailsMD, "a link")])) + 1
+		if _, y, h, ok := d.lines.Caret(link); ok {
+			hs.tt.HoldModifiers(ui.Cmd)
+			y = d.liveAt.Y + editorPadY + y + h/2 - d.vscroll.Y
+			for x := d.liveAt.X; x < d.liveAt.X+1000 && d.liveHover != link; x += 6 {
+				hs.tt.Move(x, y)
+				step(hs.tt)
+			}
+			hs.settle()
+		}
+		hs.fshot("live-preview-details", dark)
+		hs.tt.HoldModifiers(0)
+	})
+}
+
+// Notes embedded in a list and in a quote, in Live Preview and the
+// Reading view.
+func TestFeatLiveNestedEmbeds(t *testing.T) {
+	featBoth(t, func(t *testing.T, dark bool) {
+		root := t.TempDir()
+		hs := featHarness(t, dark, featOpts{root: root, w: 1000, h: 900})
+		a := hs.a
+		os.WriteFile(hs.path("recipe.md"), []byte("Mix **flour**, milk and eggs.\n\n- [ ] Rest the batter\n"), 0o644)
+		os.WriteFile(hs.path("nested.md"), []byte("# Embeds, nested\n\n- Shopping\n- ![[recipe]]\n  - ![[recipe]]\n\n> A quote with a note:\n>\n> ![[recipe]]\n\nAfter.\n"), 0o644)
+		a.settings.MarkdownMode = "live"
+		a.openFile(hs.path("nested.md"), true)
+		d := a.activeEditor()
+		hs.until("the note parsed", func() bool {
+			l := d.document.live
+			return l != nil && l.doc != nil && !l.quick && len(d.livePane.views) > 0
+		})
+		hs.caretAt(d, "After.", 0, 0)
+		hs.settle()
+		time.Sleep(300 * time.Millisecond)
+		hs.settle()
+		hs.fshot("live-nested-embeds", dark)
+		a.setMarkdownMode("reading")
+		hs.until("the reading view", func() bool { return d.preview != nil && d.preview.loaded })
+		hs.settle()
+		time.Sleep(300 * time.Millisecond)
+		hs.settle()
+		hs.fshot("reading-nested-embeds", dark)
+	})
+}

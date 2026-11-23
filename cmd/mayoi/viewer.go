@@ -97,13 +97,21 @@ type viewer struct {
 	drawing bool
 	// plugin is the preview a plugin renders, of a file it declares.
 	plugin *pluginPreview
+	// jsonl is the Table view of a file of JSON Lines.
+	jsonl *jsonlTable
 }
 
 // newImageViewer makes the viewer of an image file, which load reads.
 func newImageViewer(path string) *viewer { return &viewer{path: path} }
 
 // newPreviewViewer makes the preview of an SVG, Mermaid or Markdown document.
-func newPreviewViewer(d *document) *viewer { return &viewer{doc: d} }
+func newPreviewViewer(d *document) *viewer {
+	v := &viewer{doc: d}
+	if isJSONL(d) {
+		v.jsonl = newJSONLTable()
+	}
+	return v
+}
 
 func (v *viewer) name() string { return filepath.Base(v.path) }
 
@@ -310,6 +318,9 @@ func (v *viewer) stop() {
 	if v.markdown != nil {
 		v.markdown.generation.Add(1)
 	}
+	if v.jsonl != nil {
+		v.jsonl.gen.Add(1)
+	}
 }
 
 // fitMargin is the room a fitted picture leaves around it, in a pane
@@ -463,6 +474,10 @@ func (a *app) viewerInput(v *viewer, ev ui.InputEvent) bool {
 func (a *app) viewerView(c *ui.Context, v *viewer, name string) {
 	if v.markdown != nil {
 		a.markdownView(c, v, name)
+		return
+	}
+	if v.jsonl != nil {
+		a.jsonlView(c, v, name)
 		return
 	}
 	p := a.pal
@@ -623,6 +638,10 @@ func (a *app) setPreview(d *editor, on bool) {
 			m.sync.want, m.sync.placing = a.textPlace(d, y), true
 			d.preview.markdown = m
 		}
+		if t := d.preview.jsonl; t != nil {
+			// It opens at the row of the caret's line.
+			t.line = d.buf.Snapshot().LineAt(d.sel[1])
+		}
 	} else {
 		if m := d.preview.markdown; m != nil && m.lines > 0 {
 			// The text opens where the preview was.
@@ -633,8 +652,16 @@ func (a *app) setPreview(d *editor, on bool) {
 				d.vscroll.Y = y
 			}
 		}
+		row := -1
+		if t := d.preview.jsonl; t != nil && t.ix != nil && t.row >= 0 && t.row < t.count() {
+			// The text opens at the line of the row chosen.
+			row = int(t.ix.lines[t.rowAt(t.row)])
+		}
 		d.preview.stop()
 		d.preview = nil
+		if row >= 0 {
+			d.whenRead(func(d *editor) { d.selectLine(row+1, 1) })
+		}
 	}
 	if t := a.activeTab(); t != nil && t.ed == d && a.focus == paneEditor {
 		a.focusTab(t)
@@ -642,15 +669,15 @@ func (a *app) setPreview(d *editor, on bool) {
 	a.rememberTabs()
 }
 
-// toggleMarkdownPreview switches opening Markdown files, .mdx included,
-// rendered or as text.
-func (a *app) toggleMarkdownPreview() {
-	a.setPref("markdownPreview", func(p *settings.Prefs) { p.MarkdownPreview = !p.MarkdownPreview })
+// setMarkdownOpen has Markdown files, .mdx included, open as their source,
+// as Live Preview or rendered.
+func (a *app) setMarkdownOpen(mode string) {
+	a.setPref("markdownMode", func(p *settings.Prefs) { p.MarkdownMode = mode })
 }
 
 // togglePreview switches between a document's source and rendered view.
 func (a *app) togglePreview() {
-	if d := a.activeEditor(); d != nil && canPreview(d.document) {
+	if d := a.activeEditor(); d != nil && a.previewable(d.document) {
 		a.setPreview(d, d.preview == nil)
 		a.focusColumn()
 	}
@@ -661,7 +688,7 @@ func (a *app) togglePreview() {
 // and the text keeps the keyboard.
 func (a *app) previewToSide() {
 	d := a.activeEditor()
-	if d == nil || !canPreview(d.document) {
+	if d == nil || !a.previewable(d.document) {
 		return
 	}
 	if d.preview != nil {
@@ -681,7 +708,7 @@ func (a *app) previewToSide() {
 		side = col.tabs[i].ed
 	default:
 		at := col.active + 1
-		a.addTab(col, at, &colTab{ed: cloneEditor(d)})
+		at = a.addTab(col, at, &colTab{ed: cloneEditor(d)})
 		a.activate(col, at, true)
 		side = col.tabs[at].ed
 	}
@@ -716,6 +743,10 @@ func (a *app) viewerStatus(c *ui.Context, v *viewer, item func(key, label, tip s
 			ui.Icon(c, iconTrash).FontSize(12).TextColor(p.danger)
 			text(locales.DeletedOnDisk()).TextColor(p.dangerFg)
 		})
+	}
+	if v.jsonl != nil {
+		a.jsonlStatus(v, item)
+		return
 	}
 	if m := v.markdown; m != nil {
 		if m.words > 0 {

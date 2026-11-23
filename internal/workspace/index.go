@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"mayoi/internal/remote"
 	"mayoi/internal/vfs"
 )
 
@@ -63,6 +64,12 @@ func gitFiles(root string) ([]string, bool) {
 	}
 	return files, true
 }
+
+// Walk lists the files under root by reading its directories, on its
+// host for a remote root, as Index does outside a Git work tree, with
+// the files of the repositories nested in it. It runs in the caller's
+// goroutine.
+func Walk(root string) []string { return walk(root) }
 
 // walk lists the files under root by reading its directories.
 func walk(root string) []string {
@@ -352,7 +359,7 @@ func Ignored(root string) map[string]bool {
 	ignored := map[string]bool{}
 	for name := range bytes.SplitSeq(out, []byte{0}) {
 		if len(name) > 0 {
-			ignored[filepath.Join(root, filepath.FromSlash(strings.TrimSuffix(string(name), "/")))] = true
+			ignored[remote.Join(root, strings.TrimSuffix(string(name), "/"))] = true
 		}
 	}
 	return ignored

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -79,12 +80,22 @@ func TestSplitRightSharesTheDocument(t *testing.T) {
 	hs.shot("09-columns")
 }
 
+// scrollEditor scrolls an editor to y, as the wheel leaves it, and lets
+// the frames show it there. A file just opened keeps its scroll for the
+// frame after it took its caret (pinFrame), which would take y back: when
+// it is read late, that frame is still to come.
+func (hs *harness) scrollEditor(d *editor, y float32) {
+	hs.t.Helper()
+	hs.until("the editor lets its scroll go", func() bool { return d.pinFrame == 0 })
+	d.vscroll.Y = y
+	hs.settle()
+}
+
 func TestOtherColumnStaysWhereItIsScrolled(t *testing.T) {
 	hs, left, right := splitHarness(t, func(hs *harness) string { return hs.longFile("long.go", 400) })
 	a, tt := hs.a, hs.tt
 	// The left column reads far from its caret, as the wheel leaves it.
-	left.vscroll.Y = 6000
-	hs.settle()
+	hs.scrollEditor(left, 6000)
 	if left.vscroll.Y != 6000 {
 		t.Fatalf("scrolled to %v", left.vscroll.Y)
 	}
@@ -116,8 +127,7 @@ func TestOtherColumnStaysWhereItIsScrolled(t *testing.T) {
 func TestHiddenTabStaysWhereItIsScrolled(t *testing.T) {
 	hs, left, _ := splitHarness(t, func(hs *harness) string { return hs.longFile("long.go", 400) })
 	a, tt := hs.a, hs.tt
-	left.vscroll.Y = 6000
-	hs.settle()
+	hs.scrollEditor(left, 6000)
 	// Another tab covers it in the left column, while the right one edits.
 	a.col = 0
 	a.openFile(hs.path("README.md"), false)
@@ -143,8 +153,7 @@ func TestHiddenTabComesBackInPlace(t *testing.T) {
 	a.openFile(hs.longFile("long.go", 400), true)
 	hs.settle()
 	d := a.activeEditor()
-	d.vscroll.Y = 6000
-	hs.settle()
+	hs.scrollEditor(d, 6000)
 	a.openFile(hs.path("README.md"), true)
 	hs.settle()
 	a.activate(a.column(), 0, true)
@@ -589,6 +598,55 @@ func TestTerminalInAColumn(t *testing.T) {
 	a.closeTerminals()
 }
 
+// Closing a terminal whose agent works asks first; keeping it leaves it
+// as it was, and an idle one closes at once.
+func TestClosingABusyTerminalAsks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a shell")
+	}
+	hs := newHarness(t, true)
+	a, tt := hs.a, hs.tt
+	t.Cleanup(a.closeTerminals)
+	a.openFile(hs.path("main.go"), true)
+	a.run("view.terminalTab")
+	hs.settle()
+	s := a.terms[0]
+	s.status.Records = []terminal.StatusRecord{{State: terminal.StatusWorking, App: "claude-code", Progress: -1}}
+	a.run("file.close")
+	hs.settle()
+	if a.confirm == nil || len(a.terms) != 1 || !tt.HasText("Close this terminal?") {
+		t.Fatalf("closing a working terminal did not ask: %d terminals", len(a.terms))
+	}
+	hs.shot("terminal-close-busy")
+	a.dismiss()
+	hs.settle()
+	if len(a.terms) != 1 || a.column().tab().term != s {
+		t.Fatal("keeping the terminal closed it")
+	}
+	// The panel's kill asks too, and Close closes it.
+	a.run("view.terminalMove")
+	hs.settle()
+	a.killTerminalAsking(s)
+	if a.confirm == nil || len(a.terms) != 1 {
+		t.Fatal("killing a working terminal did not ask")
+	}
+	a.confirm.run()
+	a.confirm = nil
+	hs.settle()
+	if len(a.terms) != 0 {
+		t.Fatalf("%d terminals after Close", len(a.terms))
+	}
+	// One that is idle closes at once.
+	a.run("view.terminalTab")
+	hs.settle()
+	a.terms[0].status.Records = []terminal.StatusRecord{{State: terminal.StatusDone, App: "claude-code", Progress: -1}}
+	a.run("file.close")
+	hs.settle()
+	if a.confirm != nil || len(a.terms) != 0 {
+		t.Fatalf("closing an idle terminal asked or stayed: %d terminals", len(a.terms))
+	}
+}
+
 func TestFindFollowsTheColumn(t *testing.T) {
 	hs := newHarness(t, true)
 	a, tt := hs.a, hs.tt
@@ -813,8 +871,7 @@ func TestHiddenTabsKeptAreTheLastShown(t *testing.T) {
 	a.openFile(hs.longFile("long.go", 400), true)
 	hs.settle()
 	d := a.activeEditor()
-	d.vscroll.Y = 6000
-	hs.settle()
+	hs.scrollEditor(d, 6000)
 	for i := range keepTabs + 2 {
 		p := hs.path(fmt.Sprintf("t%02d.txt", i))
 		os.WriteFile(p, []byte("tab\n"), 0o644)
@@ -942,5 +999,75 @@ func TestWrappedTabMovesWithItsLine(t *testing.T) {
 	}
 	if len(a.cols) != 2 || a.cols[1].tab().ed != d {
 		t.Fatal("the tab did not move")
+	}
+}
+
+func TestSaveKeepsThePreviewTab(t *testing.T) {
+	hs := newHarness(t, true)
+	a := hs.a
+	a.previewFile(hs.path("main.go"))
+	hs.settle()
+	if !a.activeTab().transient {
+		t.Fatal("main.go is not a preview")
+	}
+	// Saved without a change, the preview is a tab of its own.
+	a.run("file.save")
+	a.previewFile(hs.path("README.md"))
+	hs.settle()
+	col := a.column()
+	if got := tabNames(col); got != "main.go README.md" || col.tabs[0].transient || !col.tab().transient {
+		t.Fatalf("tabs %q", got)
+	}
+}
+
+func TestPinnedTabs(t *testing.T) {
+	hs := newHarness(t, true)
+	a := hs.a
+	a.openFile(hs.path("main.go"), true)
+	a.openFile(hs.path("go.mod"), true)
+	a.previewFile(hs.path("README.md"))
+	hs.settle()
+	col := a.column()
+	// Pinned, the preview is kept and goes first.
+	a.run("view.togglePinTab")
+	hs.settle()
+	if got := tabNames(col); got != "README.md main.go go.mod" || !col.tabs[0].pinned || col.tabs[0].transient || col.tab() != col.tabs[0] {
+		t.Fatalf("pinned: tabs %q", got)
+	}
+	// What opens next goes after the pinned tabs.
+	a.previewFile(hs.path("internal/a/a.go"))
+	hs.settle()
+	if got := tabNames(col); got != "README.md a.go main.go go.mod" {
+		t.Fatalf("previewed: tabs %q", got)
+	}
+	// A tab dragged among the pinned ones stays after them.
+	a.moveTab(col.tabs[3], col, 0)
+	if got := tabNames(col); got != "README.md go.mod a.go main.go" {
+		t.Fatalf("moved: tabs %q", got)
+	}
+	// They come back pinned.
+	a.rememberTabs()
+	saved := a.window.Columns
+	a.window.Columns = nil
+	for _, tab := range slices.Clone(col.tabs) {
+		a.dropTab(tab)
+	}
+	a.window.Columns = saved
+	a.restoreTabs()
+	hs.settle()
+	col = a.column()
+	if got := tabNames(col); got != "README.md go.mod a.go main.go" || !col.tabs[0].pinned || col.tabs[1].pinned {
+		t.Fatalf("restored: tabs %q", got)
+	}
+	// Close Others leaves them open.
+	a.closeOthers(col, col.tabs[2])
+	hs.settle()
+	if got := tabNames(col); got != "README.md a.go" {
+		t.Fatalf("closed others: tabs %q", got)
+	}
+	// Unpinned, it goes after those pinned, here first.
+	a.pinTab(col.tabs[0], false)
+	if col.tabs[0].pinned || tabNames(col) != "README.md a.go" || col.tab().name() != "a.go" {
+		t.Fatalf("unpinned: tabs %q", tabNames(col))
 	}
 }

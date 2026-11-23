@@ -5,6 +5,13 @@
 - One imperative subject line of 72 characters or fewer, for one change: `Add mayoi run and mayoi commands`.
 - Put any detail in a short body, not the subject.
 - Dont run full test since its slow.
+- Run sh scripts/lint.sh before you commit and fix all it reports.
+- After your commit lands on main, remove your worktree and its branch.
+
+## Design
+
+- Follow docs/DESIGN.md for motion, layout stability, states, speed, failures and words.
+- Take animation lengths from the tokens in cmd/mayoi/motion.go, never a number written out.
 
 ## Changelog
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,8 +56,7 @@ type gitState struct {
 	read       time.Time
 
 	// meta is when the files Git changes as HEAD moves last changed, and
-	// checked when the app last looked; metaRead looks at a remote work
-	// tree.
+	// checked when the app last looked; metaRead looks in the background.
 	meta, checked time.Time
 	metaRead      bg.Refresher[*git.Repo]
 	// refsMeta is when the refs last changed, and refsGen counts the
@@ -118,6 +118,36 @@ type gitState struct {
 	prHeadsRepo *git.Repo
 	prHeadsPoll bg.Poller[prHeadsAsked]
 	prHeadsOff  bool
+
+	// gh is what the work tree has of GitHub, which the GitHub view
+	// shows; while it has the pull requests open, the history's marks
+	// are read from it.
+	gh githubState
+
+	// commitChecks is how the checks of the commits of commitChecksRepo
+	// went, as GitHub last told, by hash, and commitChecksRead when each
+	// was asked, those with no checks too; commitChecksPoll asks again for
+	// those of the history that are new, still run or got old, and
+	// commitChecksOff is set once gh could not tell, commitChecksRunning
+	// while the checks of one of them run. headChecksRunning is
+	// the commit at HEAD while its checks were seen running, to tell once
+	// they end. checksWanted are the commits a tab shows whose checks are
+	// to be read, which the history may not have.
+	commitChecks        map[string]git.CommitStatus
+	checksWanted        map[string]bool
+	commitChecksRead    map[string]time.Time
+	commitChecksRepo    *git.Repo
+	commitChecksPoll    bg.Poller[commitChecksAsked]
+	commitChecksOff     bool
+	commitChecksRunning bool
+	headChecksRunning   string
+}
+
+// commitChecksAsked is what GitHub was asked the checks of: the commits
+// of a work tree's history, as of its reads and its refs' changes.
+type commitChecksAsked struct {
+	repo          *git.Repo
+	history, refs int
 }
 
 // prAsked is what gh was asked the pull request of: a work tree, and its
@@ -227,30 +257,36 @@ func (a *gitContext) refreshGit() {
 		return
 	}
 	now := a.app.gitNow()
-	switch {
-	case a.app.conn != nil:
-		// On the host, at one round trip, in the background.
-		if !g.metaRead.Running() && now.Sub(g.checked) >= remoteMetaEvery {
-			g.metaRead.Invalidate()
-		}
-		if r := g.repo; g.metaRead.Start(r) {
-			g.checked = now
-			bg.Go(func() {
-				defer recoverCrash()
-				t, refs, err := remoteGitMeta(r)
-				a.app.post(func() {
-					if !g.metaRead.Done(r) || g.repo != r {
-						return
-					}
-					if err == nil {
-						a.tookGitMeta(t, refs)
-					}
-				})
-			})
-		}
-	case now.Sub(g.checked) >= 1500*time.Millisecond:
+	// In the background, off the frames, which a folder of many work trees
+	// would otherwise stat and walk the refs of (#149); on the host, at one
+	// round trip.
+	local, every := a.app.conn == nil, remoteMetaEvery
+	if local {
+		every = metaEvery
+	}
+	if !g.metaRead.Running() && now.Sub(g.checked) >= every {
+		g.metaRead.Invalidate()
+	}
+	if r := g.repo; g.metaRead.Start(r) {
 		g.checked = now
-		a.tookGitMeta(gitMeta(g.repo))
+		bg.Go(func() {
+			defer recoverCrash()
+			var t, refs time.Time
+			var err error
+			if local {
+				t, refs = gitMeta(r)
+			} else {
+				t, refs, err = remoteGitMeta(r)
+			}
+			a.app.post(func() {
+				if !g.metaRead.Done(r) || g.repo != r {
+					return
+				}
+				if err == nil {
+					a.tookGitMeta(t, refs)
+				}
+			})
+		})
 	}
 	a.refreshHistory()
 	if !g.statusRead.Running() && now.Sub(g.read) >= statusEvery {
@@ -263,30 +299,35 @@ func (a *gitContext) refreshGit() {
 	// The remotes change seldom: they are read again with the status after
 	// a command, or as HEAD moves, not every few seconds, and of a work
 	// tree here only once the config they are in changed.
-	readRemotes, local, remotesOf := g.remotesStale, a.app.conn == nil, g.remotesOf
+	readRemotes, remotesOf := g.remotesStale, g.remotesOf
 	g.remotesStale = false
 	bg.Go(func() {
 		defer recoverCrash()
-		st, err := r.Status()
-		refs, _ := r.Refs()
-		// The stash is listed only while its ref is there.
+		var st *git.Status
+		var err error
+		var refs git.Refs
 		var stashes []git.Stash
 		var stashesErr error
-		if refs.Stash {
-			stashes, stashesErr = r.StashList(stashListN)
-		}
 		var remotes []string
 		var remotesErr error
 		var config time.Time
-		if readRemotes && local {
-			if info, err := os.Stat(filepath.Join(r.Common, "config")); err == nil {
-				config = info.ModTime()
-				readRemotes = !config.Equal(remotesOf)
+		readGit(func() {
+			st, err = r.Status()
+			refs, _ = r.Refs()
+			// The stash is listed only while its ref is there.
+			if refs.Stash {
+				stashes, stashesErr = r.StashList(stashListN)
 			}
-		}
-		if readRemotes {
-			remotes, remotesErr = r.Remotes()
-		}
+			if readRemotes && local {
+				if info, err := os.Stat(filepath.Join(r.Common, "config")); err == nil {
+					config = info.ModTime()
+					readRemotes = !config.Equal(remotesOf)
+				}
+			}
+			if readRemotes {
+				remotes, remotesErr = r.Remotes()
+			}
+		})
 		a.app.post(func() {
 			if !g.statusRead.Done(r) || g.repo != r {
 				return
@@ -340,11 +381,15 @@ func (a *gitContext) refreshHistory() {
 	r, remotes, all, upstream := g.repo, len(g.remotes) > 0, a.app.settings.ScmAllBranches, st.Upstream
 	bg.Go(func() {
 		defer recoverCrash()
-		cs, err := r.Log(n, all)
+		var cs []git.Commit
+		var err error
 		var unpushed map[string]bool
-		if remotes {
-			unpushed = r.Unpushed(n, upstream)
-		}
+		readGit(func() {
+			cs, err = r.Log(n, all)
+			if remotes {
+				unpushed = r.Unpushed(n, upstream)
+			}
+		})
 		a.app.post(func() {
 			if g.repo != r {
 				return
@@ -380,9 +425,26 @@ func (a *gitContext) tookGitMeta(t, refs time.Time) {
 	}
 }
 
-// remoteMetaEvery is how often a remote work tree is looked at for HEAD
-// moving.
-const remoteMetaEvery = 3 * time.Second
+// metaEvery and remoteMetaEvery are how often a work tree here, and a
+// remote one, is looked at for HEAD moving.
+const (
+	metaEvery       = 1500 * time.Millisecond
+	remoteMetaEvery = 3 * time.Second
+)
+
+// gitReads bounds how many work trees have their status or history read
+// at once, for a folder of many not to run a git for each together (#149).
+// A git spends most of its time waiting, not on a core: the bound is the
+// cores, and no fewer than four. The commands asked for do not wait on it.
+var gitReads = make(chan struct{}, max(4, runtime.NumCPU()))
+
+// readGit runs a read of the status or history once fewer than the bound
+// run.
+func readGit(fn func()) {
+	gitReads <- struct{}{}
+	defer func() { <-gitReads }()
+	fn()
+}
 
 // remoteGitMeta is gitMeta of a remote work tree, which stats the files
 // and the folders of the refs on its host, at one round trip.
@@ -453,12 +515,12 @@ func (a *gitContext) setStatus(st *git.Status) {
 	for _, e := range st.Entries {
 		g.entries[e.Path] = e
 		l := e.Letter()
-		for d := filepath.Dir(e.Path); len(d) >= len(g.repo.Root); d = filepath.Dir(d) {
+		for d := remote.Dir(e.Path); len(d) >= len(g.repo.Root); d = remote.Dir(d) {
 			if old, ok := g.dirs[d]; ok && letterRank(old) >= letterRank(l) {
 				break
 			}
 			g.dirs[d] = l
-			if d == filepath.Dir(d) {
+			if d == remote.Dir(d) {
 				break
 			}
 		}

@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/673e7907-2b2c-4ed6-9093-1ba9633cd61c
 - **Smart editing:** auto-indent, auto-closing brackets and quotes, line commands, and per-tab undo
 - **Vim mode:** normal, insert and visual modes, with motions, operators, text objects, counts and `.`, registers,
   macros, marks, search, and `:` commands as `:s`, `:g` and `:normal`
-- **Columns:** split the editor side by side and drag tabs between columns
+- **Columns:** split the editor side by side or stacked, and drag tabs between columns
 - **Explorer:** a live file tree that follows the disk and dims Git-ignored files
 - **Quick open:** fuzzy file search, go to line (`:42`), go to symbol (`@`) and a command palette (`>`, ⇧⌘P)
 - **Find and replace:** case, whole-word and regex matching, searched in the background in large files
@@ -26,6 +26,9 @@ https://github.com/user-attachments/assets/673e7907-2b2c-4ed6-9093-1ba9633cd61c
 - **Git:** a source control view to stage, commit, amend, undo, pull and push, every change in one diff, folded
   around the changes, inline or side by side, a graph of the commits with their branches and tags, each with its own
   diff, gutter marks that revert or stage a change, branches and blame
+- **GitHub:** a sidebar view of the issues and pull requests open, issues read and commented on in tabs, a pull
+  request's conversation, changes, commits and checks in one tab, reviewed and merged from there, **Work on
+  Issue** that hands an issue to an agent in a worktree of its own, and review threads sent to an agent as notes
 - **Terminal:** Ghostty's emulator (libghostty-vt), in the bottom panel, at a side of the window, or in a tab
 - **Remote SSH:** open a folder on another machine with the system's `ssh`, nothing installed there: the Explorer,
   search, Git and terminals run on the host, and its ports forward to this machine
@@ -36,7 +39,7 @@ https://github.com/user-attachments/assets/673e7907-2b2c-4ed6-9093-1ba9633cd61c
   folders and hosts, Open Recent (⌃R), and a `mayoi` shell command that opens files at a line, compares them, waits
   for them to close and runs any command
 - **Themes:** light and dark, The Matrix with digital rain and the White Rabbit, Purple Gold, the Halloween themes
-  Jack-o'-Lantern, Witch's Brew and Blood Moon, and Claude, Qoder, Grok Bot and Cursor, each in light and dark
+  Jack-o'-Lantern, Witch's Brew and Blood Moon, GTA VI with wanted stars, and Claude, Qoder, Grok Bot and Cursor, each in light and dark
 - **Auto save,** and every window reopened as you left it, with its columns, tabs and carets
 - **Settings:** a settings window with search and a keyboard shortcuts editor, over JSON files applied as you save
   them, with the code's and the terminal's fonts, weight, ligatures and line height, keyboard shortcuts in VS Code's
@@ -148,6 +151,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development and testing.
 | Shortcut | Action |
 |---|---|
 | ⌘P / ⇧⌘O / ⌃G | Quick open / go to symbol / go to line |
+| F12 or ⌘-click / ⌃- / ⌃⇧- | Go to definition / go back / go forward |
+| ⌘K ⌘I | Show hover; again to scroll it with the arrows |
 | ⌘F / ⌥⌘F / ⌘G | Find / replace / next match |
 | ⇧⌘F / ⇧⌘H | Find in files / replace in files |
 | ⌘S / ⇧⌘S / ⌥⌘S | Save / save as / save all |
@@ -165,6 +170,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development and testing.
 | ⌘= / ⌘- / ⌘0 | Zoom the whole window in / out / reset |
 | ⇧⌘V | Toggle SVG preview |
 | ⌥Z | Toggle word wrap for the current tab |
+
+## Privacy
+
+Mayoi sends an anonymous count once a day and on each update, with only its version and system. Set `usageStats` to
+`false` to turn it off. Crash reports are sent only when you say so. See [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## License
 

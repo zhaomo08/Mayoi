@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	mtransfer "github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
 	"mayoi/internal/remote"
@@ -24,17 +23,29 @@ func (a *app) sidebar(c *ui.Context) {
 	sb := ui.Column(c).Fill().Background(p.chrome)
 	hovered := sb.Hovered()
 	view := a.window.SidebarView
-	if a.root == "" {
+	if a.root == "" || view == "sessions" && !a.hasSessions() {
 		view = ""
 	}
-	scm, search := view == "git", view == "search"
+	if ctx := a.repository(); view == "github" && ctx.githubKnown() && !ctx.onGitHub() {
+		// Not on GitHub: the explorer, though the view is kept for a
+		// repository that is.
+		view = ""
+	}
+	scm, search, sessions, github := view == "git", view == "search", view == "sessions", view == "github"
+	ghSwitch := a.root != "" && (github || a.hasGitHub())
 	pluginView := a.root != "" && a.pluginSidebarView() != ""
 	sb.Children(func() {
 		ui.Row(c).Height(34).Padding(0, 6, 0, 8).Gap(2).AlignItems(ui.Center).Children(func() {
 			if a.root != "" {
-				a.sidebarSwitch(c, iconFiles, a.withKey(locales.SidebarExplorer(), "view.explorer"), !scm && !search && !pluginView, 0, a.showExplorer)
+				a.sidebarSwitch(c, iconFiles, a.withKey(locales.SidebarExplorer(), "view.explorer"), !scm && !search && !sessions && !github && !pluginView, 0, a.showExplorer)
 				a.sidebarSwitch(c, iconSearch, a.withKey(locales.SidebarSearch(), "edit.findInFiles"), search, 0, func() { a.showSearch(false) })
 				a.sidebarSwitch(c, iconBranch, a.withKey(locales.SidebarScm(), "view.scm"), scm, a.changeCount(), a.showSourceControl)
+				if ghSwitch {
+					a.sidebarSwitch(c, iconGitHub, a.withKey(locales.SidebarGitHub(), "view.github"), github, a.githubCount(), a.showGitHub)
+				}
+				if a.hasSessions() {
+					a.sidebarSwitch(c, iconClock, a.withKey(locales.CmdViewSessions(), "view.sessions"), sessions, 0, a.showSessions)
+				}
 				a.pluginSwitches(c)
 			}
 			title, short, actions := locales.SidebarTitleExplorer(), "", 0
@@ -49,6 +60,16 @@ func (a *app) sidebar(c *ui.Context) {
 				if hovered {
 					actions = 3
 				}
+			case sessions:
+				title, actions = locales.SidebarTitleSessions(), 1
+				if a.sessions.archived {
+					title, short = locales.SidebarTitleSessionsArchived(), locales.SidebarTitleSessionsArchivedShort()
+				}
+			case github:
+				title = locales.SidebarTitleGitHub()
+				if hovered {
+					actions = 3
+				}
 			case pluginView:
 				title = a.pluginSidebarTitle()
 			}
@@ -57,6 +78,12 @@ func (a *app) sidebar(c *ui.Context) {
 			room := a.window.SidebarWidth - 1 - 14 - 6 - float32(actions)*28
 			if a.root != "" {
 				n := float32(3 + len(pluginSlots()))
+				if a.hasSessions() {
+					n++
+				}
+				if ghSwitch {
+					n++
+				}
 				room -= n*26 + (n-1)*3
 			}
 			size, spacing := p.titleLook(11, titleSpacing)
@@ -69,6 +96,14 @@ func (a *app) sidebar(c *ui.Context) {
 			}
 			if search {
 				a.searchTitleActions(c, hovered)
+				return
+			}
+			if github {
+				a.githubTitleActions(c, hovered)
+				return
+			}
+			if sessions {
+				a.sessionsTitleActions(c)
 				return
 			}
 		})
@@ -85,6 +120,14 @@ func (a *app) sidebar(c *ui.Context) {
 				a.searchView(c)
 				return
 			}
+			if sessions {
+				a.sessionsView(c)
+				return
+			}
+			if github {
+				a.githubView(c)
+				return
+			}
 			if pluginView {
 				a.pluginSidebar(c)
 				return
@@ -92,11 +135,21 @@ func (a *app) sidebar(c *ui.Context) {
 			// The folder's row, with the explorer's actions while the pointer
 			// is over the sidebar or the tree has the keyboard: on the title's
 			// row, they would leave the title no room.
-			ui.Row(c).Height(24).Padding(0, 6, 0, 16).Gap(2).AlignItems(ui.Center).ContextMenu(func(m *ui.Menu) {
+			head := ui.Row(c).Height(24).Padding(0, 6, 0, 16).Gap(2).AlignItems(ui.Center).ContextMenu(func(m *ui.Menu) {
 				if m.Item(locales.CmdViewCompactFolders()).Checked(a.settings.ExplorerCompactFolders).Chosen() {
 					a.toggleCompactFolders()
 				}
-			}).Children(func() {
+			})
+			// A file or a folder of the explorer dropped on it, or below the
+			// rows, moves into the workspace's folder.
+			var moveHere func()
+			if a.treeRootDrop(head, &moveHere) || a.rootMoveOver {
+				head.Background(p.accent.Alpha(0.16)).Radius(4)
+			}
+			if moveHere != nil {
+				a.post(moveHere)
+			}
+			head.Children(func() {
 				// The folder's own name in sentence case, not recased.
 				name, size, spacing := strings.ToUpper(filepath.Base(a.root)), float32(11), float32(0.4)
 				if p.sentence {
@@ -250,7 +303,7 @@ func (a *app) fileTree(c *ui.Context) {
 	if activePath != a.treeSynced {
 		a.treeSynced = activePath
 		// A file outside the folder has no row: none is chosen in its place.
-		if activePath != "" && !strings.HasPrefix(activePath, a.root+string(filepath.Separator)) {
+		if activePath != "" && (activePath == a.root || !remote.Contains(a.root, activePath)) {
 			a.fileRow, a.selectInTree = -1, ""
 		}
 		a.revealInTree(activePath)
@@ -270,6 +323,10 @@ func (a *app) fileTree(c *ui.Context) {
 	quiet.Accent, quiet.AccentText, quiet.SurfaceHover = p.active, p.text, p.hover
 	c.SetTheme(&quiet)
 	var clicked, kept string
+	// picked is a row Shift or Cmd clicked, with pickMods, which chooses
+	// it with others and opens nothing; dragged is a row being dragged.
+	var picked, dragged string
+	var pickMods ui.Modifiers
 	var action func()
 	// end is where the last row ends, while it shows: a click below it is
 	// on no file. top is where the first row starts, while it shows.
@@ -278,7 +335,7 @@ func (a *app) fileTree(c *ui.Context) {
 	// brighter, as the block of the caret's is in the editor.
 	activeDir := ""
 	if activePath != "" {
-		activeDir = filepath.Dir(activePath)
+		activeDir = remote.Dir(activePath)
 	}
 	out := ui.Outline(c.Key("files"), &a.files, view.roots, children, func(path string) {
 		isDir := t.IsDir(path)
@@ -299,47 +356,89 @@ func (a *app) fileTree(c *ui.Context) {
 				top = r.Y
 			}
 		}
+		// A row chosen with the row chosen, which the list paints itself,
+		// shows it under its guides: an element draws once.
+		together := a.explorerSel.Has(path) && path != chosen
+		if depth := entry.depth; depth > 0 || together {
+			row.Draw(func(pt *ui.Painter, r ui.Rect) {
+				if together {
+					a.explorerSelectionDraw(pt, r, depth)
+				}
+				if depth > 0 {
+					a.treeGuides(pt, r, path, depth, activeDir)
+				}
+			})
+		}
 		if depth := entry.depth; depth > 0 {
-			row.Draw(func(pt *ui.Painter, r ui.Rect) { a.treeGuides(pt, r, path, depth, activeDir) })
 			// The rows of a folder just opened fade in.
 			if k := a.treeOpening.shown(entry.parent, now); k < 1 {
 				row.Opacity(k)
 				c.AnimationFrame()
 			}
 		}
+		// Shift and Cmd (Ctrl on Linux and Windows) choose the row with
+		// others, without opening a file or a folder.
+		mods := row.ClickModifiers() & (ui.Shift | ui.Cmd)
 		if row.Clicked() {
-			clicked = path
+			if mods != 0 {
+				picked, pickMods = path, mods
+			} else {
+				clicked = path
+			}
 		}
 		// The row, not the list's, takes the clicks, and so the double
 		// click that keeps a file open.
-		if row.DoubleClicked() && !isDir {
+		if row.DoubleClicked() && !isDir && mods == 0 {
 			kept = path
 		}
+		// A file drags to the columns and to rows of the explorer, a folder
+		// to rows alone; both drag out to other apps as a copy.
+		src := &treeDrag{path: path, from: a}
+		var value any = src
 		if !isDir {
-			a.dragFile(row, &fileDrag{path: path})
-		} else if a.host.nativeDrags() {
-			// A folder drags out to other apps as the folder; within
-			// Mayoi it drags nowhere.
-			row.DragDataFrom(func() mtransfer.Data { return fileDragData(path) })
+			value = dragItem{file: &fileDrag{path: path}, tree: src}
+		}
+		a.dragValue(row, value, func() []string { return []string{path} })
+		if row.Dragging() {
+			dragged = path
+		}
+		into := path
+		if !isDir {
+			into = remote.Dir(path)
 		}
 		// Files of the Finder dropped on a row copy into its folder, up to
 		// a host for a remote folder.
 		if paths := row.DroppedFiles(); paths != nil {
-			srcs, into := slices.Clone(paths), path
-			if !isDir {
-				into = filepath.Dir(path)
-			}
+			srcs := slices.Clone(paths)
 			action = func() { a.copyPathsInto(srcs, into) }
 		}
-		if row.FileDragOver() {
+		// A file or a folder of the explorer moves into it.
+		if v, ok := ui.Drop[treeTake](row); ok {
+			if s := treeSource(v); s != nil {
+				action = func() { a.dropInTree(s, into) }
+			}
+		}
+		moveOver := false
+		if v, ok := ui.DragOver[treeTake](row); ok {
+			moveOver = a.canMove(treeSource(v), into)
+		}
+		if row.FileDragOver() || moveOver {
 			row.Background(p.accent.Alpha(0.16)).Radius(4)
 		}
 		row.ContextMenu(func(m *ui.Menu) {
 			a.filesMenuBelow = false
+			// The menu of a row chosen with others copies them all, and
+			// renames or deletes none; of another row, it is that row's
+			// alone, which the others stop being chosen with.
+			multi := a.explorerMulti(path)
+			if !multi {
+				a.clearExplorerSelection()
+			}
+			paths := a.explorerPicked(path)
 			a.pluginMenuItems(m, "explorer/context", path)
 			dir := path
 			if !isDir {
-				dir = filepath.Dir(path)
+				dir = remote.Dir(path)
 			}
 			if m.Item(locales.NewFileEllipsis()).Chosen() {
 				action = func() { a.askNewEntry(dir, false) }
@@ -368,7 +467,7 @@ func (a *app) fileTree(c *ui.Context) {
 				m.Separator()
 			}
 			if m.Item(locales.CopyLabel()).Chosen() {
-				action = func() { a.copyFiles(path) }
+				action = func() { a.copyFiles(paths...) }
 			}
 			if m.Item(locales.PasteLabel()).Disabled(len(a.clipboardSources()) == 0).Chosen() {
 				action = func() { a.pasteFiles(dir) }
@@ -384,10 +483,10 @@ func (a *app) fileTree(c *ui.Context) {
 				m.Separator()
 			}
 			if m.Item(locales.CopyPath()).Chosen() {
-				action = func() { a.services.WriteClipboard(hostPath(path)) }
+				action = func() { a.services.WriteClipboard(joinPaths(paths, hostPath)) }
 			}
 			if m.Item(locales.CopyRelativePath()).Chosen() {
-				action = func() { a.services.WriteClipboard(t.Rel(path)) }
+				action = func() { a.services.WriteClipboard(joinPaths(paths, t.Rel)) }
 			}
 			if !isDir && a.repositoryForPath(path).git.repo != nil {
 				m.Separator()
@@ -399,10 +498,10 @@ func (a *app) fileTree(c *ui.Context) {
 				}
 			}
 			m.Separator()
-			if m.Item(locales.RenameEllipsis()).Chosen() {
+			if m.Item(locales.RenameEllipsis()).Disabled(multi).Chosen() {
 				action = func() { a.askRename(path) }
 			}
-			if m.Item(a.trashLabel()).Chosen() {
+			if m.Item(a.trashLabel()).Disabled(multi).Chosen() {
 				action = func() { a.trash(path) }
 			}
 		})
@@ -461,6 +560,10 @@ func (a *app) fileTree(c *ui.Context) {
 	if selection != "" {
 		for i := range a.files.Rows() {
 			if a.files.Item(i) == selection {
+				if a.selectInTree != "" && a.fileRow != i {
+					// Following the document shown chooses its row alone.
+					a.clearExplorerSelection()
+				}
 				a.fileRow = i
 				if a.selectInTree != "" {
 					a.selectInTree = ""
@@ -491,6 +594,12 @@ func (a *app) fileTree(c *ui.Context) {
 	if paths := out.DroppedFiles(); paths != nil {
 		srcs := slices.Clone(paths)
 		action = func() { a.copyPathsInto(srcs, a.root) }
+	}
+	if over := a.treeRootDrop(out, &action); over != a.rootMoveOver {
+		// The folder's row, built before the rows, shows it in the next
+		// frame.
+		a.rootMoveOver = over
+		a.invalidate()
 	}
 	// The space below the files, while the last shows: a click there
 	// chooses none, so that new files go in the workspace, and its menu is
@@ -542,6 +651,7 @@ func (a *app) fileTree(c *ui.Context) {
 	if a.files.List.Shortcut(c, 0, ui.KeyEscape) {
 		a.fileRow = -1
 	}
+	a.explorerSelectionInput(out, view, picked, pickMods, dragged)
 	c.SetTheme(base)
 	if action != nil {
 		action()
@@ -560,6 +670,7 @@ func (a *app) fileTree(c *ui.Context) {
 		}
 	}
 	if clicked != "" {
+		a.clearExplorerSelection()
 		for i := range a.files.Rows() {
 			if a.files.Item(i) == clicked {
 				a.fileRow = i
@@ -597,7 +708,7 @@ func (o *treeOpening) note(open *ui.Selection[string], now time.Time) {
 		o.open, o.opened = map[string]bool{}, map[string]time.Time{}
 	}
 	for dir, at := range o.opened {
-		if now.Sub(at) >= showFor {
+		if now.Sub(at) >= motionShow {
 			delete(o.opened, dir)
 		}
 	}
@@ -631,7 +742,7 @@ func (o *treeOpening) shown(dir string, now time.Time) float32 {
 	if !ok {
 		return 1
 	}
-	return ui.EaseOut(min(float32(now.Sub(at))/float32(showFor), 1))
+	return ui.EaseOut(min(float32(now.Sub(at))/float32(motionShow), 1))
 }
 
 // treeGuides paints the indent guides of a row of the tree, depth deep,
@@ -681,7 +792,7 @@ func (a *app) targetDir() string {
 		if a.tree.IsDir(p) {
 			return p
 		}
-		return filepath.Dir(p)
+		return remote.Dir(p)
 	}
 	return a.root
 }
@@ -689,13 +800,18 @@ func (a *app) targetDir() string {
 // revealInTree opens the folders above a file, and chooses it and scrolls
 // to it once the tree lists it.
 func (a *app) revealInTree(path string) {
-	if a.tree == nil || !strings.HasPrefix(path, a.root+string(filepath.Separator)) {
+	if a.tree == nil || !remote.Contains(a.root, path) || remote.Clean(path) == remote.Clean(a.root) {
 		return
 	}
 	a.selectInTree = path
-	for d := filepath.Dir(path); d != a.root && len(d) > len(a.root); d = filepath.Dir(d) {
+	for d := remote.Dir(path); d != a.root && len(d) > len(a.root); {
 		a.files.Open.Add(d)
 		a.tree.Load(d)
+		next := remote.Dir(d)
+		if next == d {
+			break
+		}
+		d = next
 	}
 }
 
@@ -709,7 +825,7 @@ func (a *app) askNewEntry(dir string, folder bool) {
 		if name == "" {
 			return locales.EnterName()
 		}
-		path := filepath.Join(dir, filepath.FromSlash(name))
+		path := remote.Join(dir, name)
 		if remote.Is(path) {
 			a.newRemoteEntry(dir, path, folder)
 			return ""
@@ -752,7 +868,7 @@ func (a *app) askRename(path string) {
 		if name == "" || hasSlash(name) {
 			return locales.EnterNameNoSlashes()
 		}
-		to := filepath.Join(filepath.Dir(path), name)
+		to := remote.Join(remote.Dir(path), name)
 		if to == path {
 			return ""
 		}
@@ -783,7 +899,11 @@ func (a *app) askRename(path string) {
 // renamed has the open documents follow the files renamed.
 func (a *app) renamed(path, to string) {
 	for _, d := range a.docs {
-		if d.path == path || strings.HasPrefix(d.path, path+string(filepath.Separator)) {
+		sep := string(filepath.Separator)
+		if remote.Is(path) || remote.Is(d.path) {
+			sep = "/"
+		}
+		if d.path == path || strings.HasPrefix(d.path, path+sep) {
 			if a.tree != nil {
 				a.tree.Unwatch(d.path)
 			}
@@ -794,6 +914,7 @@ func (a *app) renamed(path, to string) {
 			}
 		}
 	}
+	a.explorerSelectionMoved(path, to)
 	if a.tree != nil {
 		a.tree.Refresh()
 	}
@@ -875,8 +996,8 @@ func (a *app) relOrPath(path string) string {
 		if path == a.root {
 			return filepath.Base(a.root)
 		}
-		if len(path) > len(a.root) && path[len(a.root)] == filepath.Separator && strings.HasPrefix(path, a.root) {
-			return filepath.ToSlash(path[len(a.root)+1:])
+		if rel, err := remote.Rel(a.root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") && !remote.IsAbs(rel) {
+			return rel
 		}
 	}
 	return shortenHome(path)

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"mayoi/internal/remote"
 )
 
 // Settings are what Mayoi remembers between launches: the preferences,
@@ -49,6 +51,11 @@ type Settings struct {
 	gen          uint64
 	prefsSeen    []byte
 	prefsChanged func()
+	// archiveGen counts the changes of ArchivedSessions, and archived is
+	// them by their refs, as of archivedGen.
+	archiveGen  uint64
+	archived    map[SessionRef]bool
+	archivedGen uint64
 }
 
 // State is what Mayoi keeps itself, not what a person chooses: the
@@ -65,6 +72,30 @@ type State struct {
 	// window has open, by folder, which the next window to open one gets
 	// back.
 	Sessions map[string]*Session `json:"sessions,omitempty"`
+	// ServerOffers are the languages whose plugin of the index Mayoi
+	// offered, and, as "missing:" and the language, those whose server it
+	// said was not installed: each is told of once.
+	ServerOffers []string `json:"serverOffers,omitempty"`
+	// ArchivedSessions are the sessions of the coding agents the Sessions
+	// view keeps out of its list, and shows under Archived, the one
+	// archived first first. Mayoi keeps them here, never in the agents'
+	// own files.
+	ArchivedSessions []ArchivedSession `json:"archivedSessions,omitempty"`
+}
+
+// SessionRef tells a session of a coding agent apart from every other:
+// its agent, the config folder of Claude Code it is of, "" for the other
+// agents, and its id.
+type SessionRef struct {
+	Agent string `json:"agent"`
+	Root  string `json:"root,omitempty"`
+	ID    string `json:"id"`
+}
+
+// ArchivedSession is a session archived, and when.
+type ArchivedSession struct {
+	SessionRef
+	At time.Time `json:"at"`
 }
 
 // oldLayout is the layout an older version kept for every window, in the
@@ -77,19 +108,21 @@ type oldLayout struct {
 }
 
 // legacy is what an older version kept in the settings' file besides the
-// state: DiffSplit, which DiffLayout "split" is now, and the window as a
+// state: DiffSplit, which DiffLayout "split" is now, MarkdownPreview,
+// which MarkdownMode "reading" is now, and the window as a
 // version with one window kept it, Folder, Columns, Column, PanelOpen and
 // TerminalOpen, with OpenFiles and ActiveFile its tabs as a version
 // without columns kept them. Load makes a window of them.
 type legacy struct {
-	DiffSplit    bool     `json:"diffSplit"`
-	Folder       string   `json:"folder"`
-	Columns      []Column `json:"columns"`
-	Column       int      `json:"column"`
-	PanelOpen    bool     `json:"panelOpen"`
-	TerminalOpen bool     `json:"terminalOpen"`
-	OpenFiles    []string `json:"openFiles"`
-	ActiveFile   string   `json:"activeFile"`
+	DiffSplit       bool     `json:"diffSplit"`
+	MarkdownPreview bool     `json:"markdownPreview"`
+	Folder          string   `json:"folder"`
+	Columns         []Column `json:"columns"`
+	Column          int      `json:"column"`
+	PanelOpen       bool     `json:"panelOpen"`
+	TerminalOpen    bool     `json:"terminalOpen"`
+	OpenFiles       []string `json:"openFiles"`
+	ActiveFile      string   `json:"activeFile"`
 }
 
 // PluginSource is where a plugin installed from Git came from.
@@ -128,18 +161,30 @@ type Prefs struct {
 	// scrolling sideways to them. A tab may choose otherwise, until this
 	// changes: Settings.WrapGen counts its changes.
 	WordWrap bool `json:"wordWrap,omitempty"`
+	// TrimTrailingWhitespace removes the spaces and tabs at the ends of
+	// lines as a file saves, keeping the hard breaks of Markdown.
+	TrimTrailingWhitespace bool `json:"trimTrailingWhitespace,omitempty"`
+	// TabSize is how many columns a tab takes in the editor, from 1 to 8.
+	TabSize int `json:"tabSize"`
 	// EditorAgentContext offers selection actions in ordinary files to
 	// collect code snippets and send them with review comments.
 	EditorAgentContext bool `json:"editorAgentContext,omitempty"`
+	// EditorHover shows a name's hover card in the editor as the pointer
+	// rests on it, as Show Hover does from the keyboard.
+	EditorHover bool `json:"editorHover"`
 	// PreviewMermaid draws the blocks of Mermaid of a Markdown preview as
 	// the diagrams they make, rather than their source.
 	PreviewMermaid bool `json:"previewMermaid"`
 	// PreviewMath draws the TeX math of a Markdown preview, between $ and
 	// $, $$ and $$, or in a block of math, as the formulas it makes.
 	PreviewMath bool `json:"previewMath"`
-	// MarkdownPreview opens a Markdown file, .mdx included, rendered
-	// rather than as text; ⇧⌘V still shows the text.
-	MarkdownPreview bool `json:"markdownPreview,omitempty"`
+	// MarkdownMode is how a Markdown file, .mdx included, opens: "" as
+	// its source, "live" as Live Preview, its source styled as it reads,
+	// or "reading" rendered.
+	MarkdownMode string `json:"markdownMode,omitempty"`
+	// JSONLMode is how a file of JSON Lines, .jsonl or .ndjson, opens: ""
+	// as a table of its rows, or "source".
+	JSONLMode string `json:"jsonlMode,omitempty"`
 	// DiffLayout is how diffs show: "split" side by side, "inline" in
 	// one column, or "" side by side when they are wide enough to.
 	DiffLayout string `json:"diffLayout,omitempty"`
@@ -148,6 +193,9 @@ type Prefs struct {
 	// is and crosses on one more step that way, "always" crosses at once,
 	// and "never" stays in the file.
 	DiffCrossFiles string `json:"diffCrossFiles,omitempty"`
+	// DiffFiles is how many files a diff shows at once: "" every file
+	// changed, one after another, or "one" the file chosen alone.
+	DiffFiles string `json:"diffFiles,omitempty"`
 	// DiffHighlight is what a diff shows of a line that changed: "line"
 	// no more than the line, "char" the characters that changed, or ""
 	// the words that changed. What it shows is only so: a diff's block
@@ -175,6 +223,9 @@ type Prefs struct {
 	// ScmAllBranches has the commits of source control show every branch
 	// and tag, not only the history of the branch checked out.
 	ScmAllBranches bool `json:"scmAllBranches,omitempty"`
+	// PRDeleteBranch has Merge of a pull request delete its branch on
+	// GitHub once it merged.
+	PRDeleteBranch bool `json:"prDeleteBranch,omitempty"`
 	// ScmRepositoryOpen remembers whether the repository panel is expanded.
 	ScmRepositoryOpen bool `json:"scmRepositoryOpen,omitempty"`
 	// ScmRemotes selects Remotes instead of Branches in the repository panel.
@@ -189,8 +240,9 @@ type Prefs struct {
 	// Appearance is "light", "dark", or "" to follow the system.
 	Appearance string `json:"appearance,omitempty"`
 	// Theme is "matrix" for The Matrix, "purplegold" for Purple Gold,
-	// "pumpkin" for Jack-o'-Lantern, "witchsbrew" for Witch's Brew or
-	// "bloodmoon" for Blood Moon, which are always dark, "claude" for Claude, "qoder" for Qoder,
+	// "pumpkin" for Jack-o'-Lantern, "witchsbrew" for Witch's Brew,
+	// "bloodmoon" for Blood Moon or "gtavi" for GTA VI, which are always
+	// dark, "claude" for Claude, "qoder" for Qoder,
 	// "grokbot" for Grok Bot or "cursor" for Cursor, light or dark as
 	// Appearance is, or "" for Mayoi's own.
 	Theme string `json:"theme,omitempty"`
@@ -209,6 +261,14 @@ type Prefs struct {
 	// TerminalBackend is what runs a terminal's shell: "" Mayoi itself,
 	// or "hc" a terminal of herdr-core, which outlives the window.
 	TerminalBackend string `json:"terminalBackend,omitempty"`
+	// TerminalShell is the program a new local terminal of Mayoi's own
+	// runs: a path to it, or a name on the path. "" runs the user's shell,
+	// as the terminal picks it. Terminals of a host or of herdr-core run
+	// their own.
+	TerminalShell string `json:"terminalShell,omitempty"`
+	// TerminalShellArgs are the arguments TerminalShell is given, each one
+	// as it is, never split or quoted by a shell.
+	TerminalShellArgs []string `json:"terminalShellArgs,omitempty"`
 	// TerminalBackendHcPath is the hc to run when TerminalBackend is
 	// "hc": a path to the program, a folder that has it, or a name on
 	// the path. Mayoi finds hc there first, and on the path or in
@@ -222,6 +282,10 @@ type Prefs struct {
 	// Herdr app, in a space of the window's folder, when TerminalBackend
 	// is "hc". Those of a remote folder stay out of it.
 	TerminalBackendHcShowInHerdr bool `json:"terminalBackendHcShowInHerdr"`
+	// AgentSessionsClaudeDirs are more config folders of Claude Code whose
+	// sessions the Sessions view lists, besides ~/.claude, each
+	// ~/.claude-* folder and $CLAUDE_CONFIG_DIR. A folder may start with ~.
+	AgentSessionsClaudeDirs []string `json:"agentSessionsClaudeDirs,omitempty"`
 	// ProjectTabs keeps the folders open in one window, a rail on its left
 	// choosing which shows, rather than a window for each.
 	ProjectTabs bool `json:"projectTabs,omitempty"`
@@ -245,6 +309,12 @@ type Prefs struct {
 	// next launch: "" asks whether to send it to Mon, "always" sends it
 	// and "never" doesn't.
 	CrashReports string `json:"crashReports,omitempty"`
+	// UsageStats sends anonymous counts of Mayoi's use: one a day while
+	// it is open, and one as it updates, with its version and system.
+	UsageStats bool `json:"usageStats"`
+	// ConfirmBeforeQuit asks before Cmd+Q and the menu's Quit quit Mayoi.
+	// Quitting otherwise, as to update or to log out, never asks.
+	ConfirmBeforeQuit bool `json:"confirmBeforeQuit"`
 	// SyncIgnored is what settings sync leaves on this machine: keys of
 	// the preferences, "settings.json" for all of them, and
 	// "keybindings.json" for the keyboard shortcuts.
@@ -253,6 +323,10 @@ type Prefs struct {
 	// object of the settings its plugin.json declares, and "enabled":
 	// false to turn the plugin off.
 	Plugins map[string]json.RawMessage `json:"plugins,omitempty"`
+	// LanguageServers are the settings of each language server, by its
+	// id, as "gopls.server": its "initializationOptions", laid over those
+	// of its plugin as it starts.
+	LanguageServers map[string]json.RawMessage `json:"languageServers,omitempty"`
 	// FormatOnSave formats a document with a plugin's formatter as it
 	// saves, by language, as "go", or "*" for every language.
 	FormatOnSave map[string]bool `json:"formatOnSave,omitempty"`
@@ -344,11 +418,15 @@ type Window struct {
 // the panel, the folders open in the explorer, and its layout.
 type Session struct {
 	Layout
-	Columns      []Column `json:"columns,omitempty"`
-	Column       int      `json:"column,omitempty"`
-	FileColumn   int      `json:"fileColumn,omitempty"`
-	PanelOpen    bool     `json:"panelOpen,omitempty"`
-	TerminalOpen bool     `json:"terminalOpen,omitempty"`
+	Columns []Column `json:"columns,omitempty"`
+	// Panes is how the columns are laid out when they are not one row,
+	// some above others: nil for side by side, which an older version
+	// reads as it is.
+	Panes        *Pane `json:"panes,omitempty"`
+	Column       int   `json:"column,omitempty"`
+	FileColumn   int   `json:"fileColumn,omitempty"`
+	PanelOpen    bool  `json:"panelOpen,omitempty"`
+	TerminalOpen bool  `json:"terminalOpen,omitempty"`
 	// PanelTerms are the addresses in herdr-core of the panel's terminals
 	// whose shells run there, which the next start attaches to again, and
 	// PanelTerm the one of them the panel showed.
@@ -380,6 +458,9 @@ type ReviewNote struct {
 	Snippet []string `json:"snippet,omitempty"`
 	Lines   []string `json:"lines,omitempty"`
 	Text    string   `json:"text"`
+	// Thread is the GitHub review thread the note came from, which it
+	// can resolve there, "" for one written here.
+	Thread string `json:"thread,omitempty"`
 }
 
 // Layout is how a window lays its folder out: what its sidebar shows,
@@ -387,7 +468,9 @@ type ReviewNote struct {
 // the bottom, or how wide it is at a side.
 type Layout struct {
 	// SidebarView is what the sidebar shows: "" the explorer, "search"
-	// the search in the files, "git" the changes for source control.
+	// the search in the files, "git" the changes for source control,
+	// "sessions" the agents' sessions and "github" the issues and pull
+	// requests of the repository on GitHub.
 	SidebarView   string  `json:"sidebarView,omitempty"`
 	SidebarClosed bool    `json:"sidebarClosed,omitempty"`
 	SidebarWidth  float32 `json:"sidebarWidth,omitempty"`
@@ -431,6 +514,16 @@ type Column struct {
 	Locked bool    `json:"locked,omitempty"`
 }
 
+// Pane is a place of the editor area's layout: a column, by its place in
+// Columns, or a group of panes, with Kids, side by side, or one above
+// the other when Down. Weight is a group's share of its parent's room.
+type Pane struct {
+	Column int     `json:"column"`
+	Down   bool    `json:"down,omitempty"`
+	Weight float32 `json:"weight,omitempty"`
+	Kids   []Pane  `json:"kids,omitempty"`
+}
+
 // Tab is a tab: the file it shows, or a terminal, which the next
 // start opens anew, or attaches to again while its shell runs in
 // herdr-core at HC.
@@ -438,11 +531,21 @@ type Tab struct {
 	File     string `json:"file,omitempty"`
 	Terminal bool   `json:"terminal,omitempty"`
 	HC       string `json:"hc,omitempty"`
-	// Preview is set for an SVG shown as a picture rather than as text.
+	// Agent is the agent of a terminal of herdr-core, as its icon shows,
+	// and Session the key of the session the Sessions view resumed in it,
+	// "" for none.
+	Agent   string `json:"agent,omitempty"`
+	Session string `json:"session,omitempty"`
+	// Preview is set for an SVG shown as a picture rather than as text,
+	// or a Markdown file shown rendered, and Live for one shown as Live
+	// Preview.
 	Preview bool `json:"preview,omitempty"`
+	Live    bool `json:"live,omitempty"`
 	// Transient is set for the preview tab of its column, which the next
 	// file previewed replaces.
 	Transient bool `json:"transient,omitempty"`
+	// Pinned is set for a tab pinned among the first of its column.
+	Pinned bool `json:"pinned,omitempty"`
 	// Diff is set for the changes of File rather than the file: "head",
 	// "index" or "staged", what they are against. With no File, it is
 	// the changes of every file, against that. Layout is the diff's, as
@@ -454,6 +557,10 @@ type Tab struct {
 	Split    bool   `json:"split,omitempty"`
 	// Full is set for a diff showing every unchanged line.
 	Full bool `json:"full,omitempty"`
+	// Shown is the file a diff showing one file at a time shows, and
+	// ShownStaged is set when it shows the file's changes staged.
+	Shown       string `json:"shown,omitempty"`
+	ShownStaged bool   `json:"shownStaged,omitempty"`
 	// Sel is the selection of a file's editor, its caret at Sel[1], and
 	// ScrollX and ScrollY where the tab was scrolled. Wrap is the tab's
 	// own choice to wrap its lines, nil to follow WordWrap.
@@ -461,11 +568,20 @@ type Tab struct {
 	ScrollX float32 `json:"scrollX,omitempty"`
 	ScrollY float32 `json:"scrollY,omitempty"`
 	Wrap    *bool   `json:"wrap,omitempty"`
+	// Folds are the lines of the runs of lines the tab's editor folded,
+	// the lines that show of them.
+	Folds []int `json:"folds,omitempty"`
 	// Untitled is the file in the untitled folder beside the settings that
 	// keeps the text of an untitled document as the app quit, and Number
 	// the number of its name.
 	Untitled string `json:"untitled,omitempty"`
 	Number   int    `json:"number,omitempty"`
+	// Issue is the number of the issue, or of the pull request whose
+	// conversation, the tab shows, of the repository at RepoRoot.
+	Issue int `json:"issue,omitempty"`
+	// PRPage is the page a pull request's tab showed: "conversation",
+	// "changes", "commits" or "checks".
+	PRPage string `json:"prPage,omitempty"`
 }
 
 // MaxDiffContext is as many unchanged lines around a change as a diff
@@ -476,9 +592,10 @@ const MaxDiffContext = 100
 func Default() *Settings {
 	return &Settings{
 		Prefs: Prefs{
-			FontSize: 13, FontFamily: "monospace", FontWeight: 400, LineHeight: 1.55,
-			AutoSave: true, Blame: true, TerminalCopyOnSelect: true, TerminalBackendHcShowInHerdr: true, PreviewMermaid: true, PreviewMath: true,
+			FontSize: 13, FontFamily: "monospace", FontWeight: 400, LineHeight: 1.55, TabSize: 4,
+			AutoSave: true, Blame: true, EditorHover: true, TerminalCopyOnSelect: true, TerminalBackendHcShowInHerdr: true, PreviewMermaid: true, PreviewMath: true,
 			DiffAlignedRows: true, DiffContext: 3, DiffSyncScroll: true, MergeAutoApply: true,
+			UsageStats: true, ConfirmBeforeQuit: true,
 		},
 	}
 }
@@ -512,6 +629,9 @@ func Load(path string) *Settings {
 	}
 	if old.DiffSplit && s.DiffLayout == "" {
 		s.DiffLayout = "split"
+	}
+	if old.MarkdownPreview && s.MarkdownMode == "" {
+		s.MarkdownMode = "reading"
 	}
 	s.normalize()
 	if moved {
@@ -567,6 +687,10 @@ func (p *Prefs) normalize() {
 		p.LineHeight = 1.55
 	}
 	p.LineHeight = clamp(p.LineHeight, 1, 3)
+	if p.TabSize == 0 {
+		p.TabSize = 4
+	}
+	p.TabSize = min(max(p.TabSize, 1), 8)
 	p.FontFeatures = slices.DeleteFunc(p.FontFeatures, func(f string) bool { return strings.TrimSpace(f) == "" })
 	p.AISecretFiles = slices.DeleteFunc(p.AISecretFiles, func(f string) bool { return strings.TrimSpace(f) == "" })
 	if p.TerminalFontSize != 0 {
@@ -593,6 +717,12 @@ func (p *Prefs) normalize() {
 	}
 	if p.TerminalBackend != "hc" {
 		p.TerminalBackend = ""
+	}
+	if p.MarkdownMode != "live" && p.MarkdownMode != "reading" {
+		p.MarkdownMode = ""
+	}
+	if p.JSONLMode != "source" {
+		p.JSONLMode = ""
 	}
 	// The themes were appearances once.
 	if p.Appearance == "matrix" || p.Appearance == "claude" {
@@ -724,6 +854,61 @@ func (s *Settings) TakeSession(dir string) *Session {
 		s.Changed()
 	}
 	return ses
+}
+
+// ArchiveGen counts the changes of the sessions archived, which what is
+// made of them is made again as.
+func (s *Settings) ArchiveGen() uint64 { return s.archiveGen }
+
+// IsArchived reports whether the session of ref is archived.
+func (s *Settings) IsArchived(ref SessionRef) bool {
+	if s.archived == nil || s.archivedGen != s.archiveGen {
+		s.archived = make(map[SessionRef]bool, len(s.ArchivedSessions))
+		for _, as := range s.ArchivedSessions {
+			s.archived[as.SessionRef] = true
+		}
+		s.archivedGen = s.archiveGen
+	}
+	return s.archived[ref]
+}
+
+// Archive archives the sessions of ss not archived yet, and returns
+// them. It saves the change.
+func (s *Settings) Archive(ss []ArchivedSession) []ArchivedSession {
+	var added []ArchivedSession
+	for _, as := range ss {
+		if !s.IsArchived(as.SessionRef) && !slices.ContainsFunc(added, func(o ArchivedSession) bool { return o.SessionRef == as.SessionRef }) {
+			added = append(added, as)
+		}
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	s.ArchivedSessions = append(slices.Clone(s.ArchivedSessions), added...)
+	s.archiveGen++
+	s.Changed()
+	return added
+}
+
+// Unarchive brings back the sessions of refs that are archived, and
+// returns them as they were, to archive again. It saves the change.
+func (s *Settings) Unarchive(refs []SessionRef) []ArchivedSession {
+	var gone []ArchivedSession
+	kept := make([]ArchivedSession, 0, len(s.ArchivedSessions))
+	for _, as := range s.ArchivedSessions {
+		if slices.Contains(refs, as.SessionRef) {
+			gone = append(gone, as)
+		} else {
+			kept = append(kept, as)
+		}
+	}
+	if len(gone) == 0 {
+		return nil
+	}
+	s.ArchivedSessions = kept
+	s.archiveGen++
+	s.Changed()
+	return gone
 }
 
 func clamp(v, lo, hi float32) float32 { return max(lo, min(v, hi)) }
@@ -873,7 +1058,7 @@ func (s *Settings) RecentExcept(dir string) []string {
 			continue
 		}
 		// A remote folder is looked at as it opens.
-		if strings.HasPrefix(d, "/ssh:") {
+		if remote.Is(d) {
 			out = append(out, d)
 		} else if info, err := os.Stat(d); err == nil && info.IsDir() {
 			out = append(out, d)
@@ -1010,8 +1195,8 @@ func (s *Settings) OnPrefsWritten(fn func()) {
 // chooses, what the person keeps on the machine, the looks of the
 // projects on the rail, by folders of this machine, and the hc to run
 // with its environment, which may hold secrets and runs as a terminal
-// opens.
-var unsynced = []string{"scmRepositoryOpen", "scmRemotes", "syncIgnored", "projectTabStyle", "terminalBackendHcPath", "terminalBackendHcEnv"}
+// opens, and the folders of Claude Code of this machine.
+var unsynced = []string{"scmRepositoryOpen", "scmRemotes", "syncIgnored", "projectTabStyle", "terminalShell", "terminalShellArgs", "terminalBackendHcPath", "terminalBackendHcEnv", "agentSessionsClaudeDirs"}
 
 // PrefKeys are the keys of the preferences in the settings' file.
 var PrefKeys = func() []string {

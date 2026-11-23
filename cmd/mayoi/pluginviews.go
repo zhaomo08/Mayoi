@@ -17,6 +17,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"mayoi/internal/bg"
 	"mayoi/internal/plugin"
 	"mayoi/internal/settings"
 	"mayoi/locales"
@@ -238,11 +239,11 @@ func (a *app) showPluginView(id string) {
 	if slot.webview == nil {
 		p := slot.plugin
 		plugins.reg.Activate("onView:" + id)
-		go func() {
+		bg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), plugin.BusyLimit)
 			defer cancel()
 			p.Request(ctx, "viewShow", map[string]any{"id": id})
-		}()
+		})
 	}
 }
 
@@ -453,14 +454,19 @@ func (a *app) drawViewNode(c *ui.Context, key any, n *viewNode, pv *pluginView) 
 // viewMarkdown draws Markdown a plugin gave: its headings, paragraphs and
 // code, as the preview has them.
 func (a *app) viewMarkdown(c *ui.Context, key any, n *viewNode) {
-	p := a.pal
 	if !n.parsed {
 		n.parsed = true
 		n.blocks = parseMarkdown([]byte(n.Text), "", "", nil)
 	}
-	size := a.settings.FontSize
+	a.markdownBlocksView(c, key, n.blocks, a.settings.FontSize)
+}
+
+// markdownBlocksView draws blocks of Markdown at a size, as a view's
+// Markdown and a hover's documentation show.
+func (a *app) markdownBlocksView(c *ui.Context, key any, blocks []markdownBlock, size float32) {
+	p := a.pal
 	ui.Column(c.Key(key)).Gap(6).Children(func() {
-		for k, b := range n.blocks {
+		for k, b := range blocks {
 			switch b.kind {
 			case markdownHeading:
 				sz := size * (1.5 - 0.12*float32(min(b.level, 4)))
@@ -484,11 +490,17 @@ func (a *app) viewMarkdown(c *ui.Context, key any, n *viewNode) {
 				for _, r := range b.runs {
 					spans = append(spans, a.markdownSpan(r, p.text, size, false))
 				}
-				if len(spans) > 0 {
-					t := ui.RichText(c.Key(k), spans...).FontSize(size).Selectable()
-					if b.marker != "" {
-						t.Padding(0, 0, 0, 14+float32(b.indent)*14)
-					}
+				switch {
+				case len(spans) == 0:
+				case b.marker != "":
+					// The item's bullet or number before it, in the room
+					// its indent leaves.
+					ui.Row(c.Key(k)).Padding(0, 0, 0, float32(b.indent)*14).Children(func() {
+						ui.Text(c, b.marker).FontSize(size).TextColor(p.muted).Width(14 + 0.65*size*float32(len([]rune(b.marker))-1)).SingleLine()
+						ui.RichText(c.Key("item"), spans...).FontSize(size).Selectable().Grow(1).MinWidth(0)
+					})
+				default:
+					ui.RichText(c.Key(k), spans...).FontSize(size).Selectable()
 				}
 			}
 		}
@@ -504,7 +516,7 @@ const viewRowStep = 12
 
 // treeKids is how the rows of a node of a plugin's tree come and go as it
 // opens and closes: they unfold rather than jump.
-var treeKids = ui.ElementTransition{Duration: 140 * time.Millisecond, Enter: &ui.Motion{Collapse: true}, Exit: &ui.Motion{Collapse: true}}
+var treeKids = ui.ElementTransition{Duration: motionShow, Enter: &ui.Motion{Collapse: true}, Exit: &ui.Motion{Collapse: true}}
 
 // rowPath is where a row of a plugin's list or tree is, under the path of
 // its parent, worked out once.
@@ -730,7 +742,7 @@ func (a *app) followPluginPreview(v *viewer) {
 		v.drawing = true
 		v.loading++
 		load, ver, text, file := v.loading, d.buf.Version(), d.buf.String(), d.path
-		go func() {
+		bg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), plugin.BusyLimit)
 			defer cancel()
 			res, err := pp.plugin.Request(ctx, "preview", map[string]any{"id": pp.id, "text": text, "path": file})
@@ -776,7 +788,7 @@ func (a *app) followPluginPreview(v *viewer) {
 				}
 				pp.view.tree = &tree
 			})
-		}()
+		})
 	}
 	if !v.loaded {
 		render()
@@ -977,11 +989,11 @@ func (a *app) newPluginWebview(win *mygo.Window, st *webviewState) (*mygo.WebVie
 		if err != nil {
 			return
 		}
-		go func() {
+		bg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), plugin.BusyLimit)
 			defer cancel()
 			pl.Request(ctx, "webview", map[string]any{"id": st.contrib.ID, "message": json.RawMessage(msg)})
-		}()
+		})
 	})
 	base := ""
 	if pl.Dir != "" {
